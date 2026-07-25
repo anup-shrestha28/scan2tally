@@ -1,18 +1,19 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { ArrowLeft, Save, CheckCircle2, FileSpreadsheet, Plus, Trash2 } from 'lucide-react';
 import { ScanBatch, Transaction } from '../types';
 
 interface SideBySideReviewerProps {
   batch: ScanBatch | null;
+  initialTransactions?: Transaction[];
   onBack: () => void;
   onExportExcel: (transactions: Transaction[]) => void;
 }
 
-export default function SideBySideReviewer({ batch, onBack, onExportExcel }: SideBySideReviewerProps) {
-  const [transactions, setTransactions] = useState<Transaction[]>([
+export default function SideBySideReviewer({ batch, initialTransactions, onBack, onExportExcel }: SideBySideReviewerProps) {
+  const defaultMockTransactions: Transaction[] = [
     {
       id: 'tx-1',
-      voucher_date: '2026-07-23',
+      voucher_date: '2026-07-24',
       voucher_type: 'Payment',
       debit_ledger: 'Office Rent Expense',
       credit_ledger: 'Cash Account',
@@ -21,14 +22,24 @@ export default function SideBySideReviewer({ batch, onBack, onExportExcel }: Sid
     },
     {
       id: 'tx-2',
-      voucher_date: '2026-07-23',
+      voucher_date: '2026-07-24',
       voucher_type: 'Journal',
       debit_ledger: 'Printing & Stationery',
       credit_ledger: 'Petty Cash',
       amount: 2450.00,
       narration: 'Paper bill receipts and ledger books'
     }
-  ]);
+  ];
+
+  const [transactions, setTransactions] = useState<Transaction[]>(
+    initialTransactions && initialTransactions.length ? initialTransactions : defaultMockTransactions
+  );
+
+  useEffect(() => {
+    if (initialTransactions && initialTransactions.length) {
+      setTransactions(initialTransactions);
+    }
+  }, [initialTransactions]);
 
   const [savedSuccess, setSavedSuccess] = useState<boolean>(false);
 
@@ -64,6 +75,9 @@ export default function SideBySideReviewer({ batch, onBack, onExportExcel }: Sid
   };
 
   const totalAmount = transactions.reduce((acc, curr) => acc + (Number(curr.amount) || 0), 0);
+
+  // Get preview URL of uploaded receipt image if available
+  const receiptPreviewUrl = batch?.receipts?.[0]?.previewUrl || null;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', height: '100%' }}>
@@ -102,6 +116,7 @@ export default function SideBySideReviewer({ batch, onBack, onExportExcel }: Sid
       </div>
 
       <div className="split-reviewer">
+        {/* Left Panel: Original Receipt Image */}
         <div className="image-panel">
           <div className="panel-header">
             <span>📷 Original Handwritten Bill Receipt</span>
@@ -109,55 +124,64 @@ export default function SideBySideReviewer({ batch, onBack, onExportExcel }: Sid
           </div>
 
           <div className="image-viewer">
-            <svg width="340" height="460" viewBox="0 0 340 460" style={{ borderRadius: '8px', boxShadow: '0 8px 24px rgba(0,0,0,0.5)', background: '#fff' }}>
-              <rect width="340" height="460" fill="#fcfbf7" rx="6" />
-              <rect x="20" y="20" width="300" height="420" fill="none" stroke="#e5e7eb" strokeWidth="1" strokeDasharray="4" />
-              
-              <text x="170" y="55" textAnchor="middle" fontFamily="cursive, sans-serif" fontSize="22" fontWeight="bold" fill="#1e293b">
-                PETTY CASH VOUCHER
-              </text>
-              <text x="170" y="75" textAnchor="middle" fontFamily="sans-serif" fontSize="12" fill="#64748b">
-                Date: 23/07/2026 | Bill No: #4892
-              </text>
-              <line x1="30" y1="90" x2="310" y2="90" stroke="#334155" strokeWidth="1.5" />
+            {receiptPreviewUrl ? (
+              <img 
+                src={receiptPreviewUrl} 
+                alt="Uploaded Handwritten Bill Receipt" 
+                className="receipt-img"
+              />
+            ) : (
+              <svg width="340" height="460" viewBox="0 0 340 460" style={{ borderRadius: '8px', boxShadow: '0 8px 24px rgba(0,0,0,0.5)', background: '#fff' }}>
+                <rect width="340" height="460" fill="#fcfbf7" rx="6" />
+                <rect x="20" y="20" width="300" height="420" fill="none" stroke="#e5e7eb" strokeWidth="1" strokeDasharray="4" />
+                
+                <text x="170" y="55" textAnchor="middle" fontFamily="cursive, sans-serif" fontSize="22" fontWeight="bold" fill="#1e293b">
+                  PETTY CASH VOUCHER
+                </text>
+                <text x="170" y="75" textAnchor="middle" fontFamily="sans-serif" fontSize="12" fill="#64748b">
+                  Date: 24/07/2026 | Bill No: #4892
+                </text>
+                <line x1="30" y1="90" x2="310" y2="90" stroke="#334155" strokeWidth="1.5" />
 
-              <text x="40" y="115" fontFamily="sans-serif" fontSize="12" fontWeight="bold" fill="#334155">Particulars / Details</text>
-              <text x="260" y="115" fontFamily="sans-serif" fontSize="12" fontWeight="bold" fill="#334155">Amount (Rs.)</text>
-              <line x1="30" y1="125" x2="310" y2="125" stroke="#cbd5e1" strokeWidth="1" />
+                <text x="40" y="115" fontFamily="sans-serif" fontSize="12" fontWeight="bold" fill="#334155">Particulars / Details</text>
+                <text x="260" y="115" fontFamily="sans-serif" fontSize="12" fontWeight="bold" fill="#334155">Amount (Rs.)</text>
+                <line x1="30" y1="125" x2="310" y2="125" stroke="#cbd5e1" strokeWidth="1" />
 
-              <text x="40" y="155" fontFamily="cursive" fontSize="18" fill="#1e3a8a">
-                1. Paid Office Space Rent (July)
-              </text>
-              <text x="250" y="155" fontFamily="cursive" fontSize="18" fill="#1e3a8a">
-                15,000.00
-              </text>
+                <text x="40" y="155" fontFamily="cursive" fontSize="18" fill="#1e3a8a">
+                  1. Paid Office Space Rent (July)
+                </text>
+                <text x="250" y="155" fontFamily="cursive" fontSize="18" fill="#1e3a8a">
+                  15,000.00
+                </text>
 
-              <text x="40" y="205" fontFamily="cursive" fontSize="18" fill="#1e3a8a">
-                2. Paper Bills & Stationery
-              </text>
-              <text x="255" y="205" fontFamily="cursive" fontSize="18" fill="#1e3a8a">
-                2,450.00
-              </text>
+                <text x="40" y="205" fontFamily="cursive" fontSize="18" fill="#1e3a8a">
+                  2. Paper Bills & Stationery
+                </text>
+                <text x="255" y="205" fontFamily="cursive" fontSize="18" fill="#1e3a8a">
+                  2,450.00
+                </text>
 
-              <line x1="30" y1="270" x2="310" y2="270" stroke="#334155" strokeWidth="1.5" />
-              
-              <text x="40" y="300" fontFamily="sans-serif" fontSize="14" fontWeight="bold" fill="#0f172a">TOTAL AMOUNT:</text>
-              <text x="245" y="300" fontFamily="cursive" fontSize="20" fontWeight="bold" fill="#0f172a">
-                Rs. 17,450.00
-              </text>
+                <line x1="30" y1="270" x2="310" y2="270" stroke="#334155" strokeWidth="1.5" />
+                
+                <text x="40" y="300" fontFamily="sans-serif" fontSize="14" fontWeight="bold" fill="#0f172a">TOTAL AMOUNT:</text>
+                <text x="245" y="300" fontFamily="cursive" fontSize="20" fontWeight="bold" fill="#0f172a">
+                  Rs. 17,450.00
+                </text>
 
-              <line x1="40" y1="400" x2="130" y2="400" stroke="#94a3b8" strokeWidth="1" />
-              <text x="50" y="415" fontFamily="sans-serif" fontSize="10" fill="#64748b">Prepared By</text>
+                <line x1="40" y1="400" x2="130" y2="400" stroke="#94a3b8" strokeWidth="1" />
+                <text x="50" y="415" fontFamily="sans-serif" fontSize="10" fill="#64748b">Prepared By</text>
 
-              <line x1="210" y1="400" x2="300" y2="400" stroke="#94a3b8" strokeWidth="1" />
-              <text x="220" y="415" fontFamily="sans-serif" fontSize="10" fill="#64748b">Approved By</text>
-            </svg>
+                <line x1="210" y1="400" x2="300" y2="400" stroke="#94a3b8" strokeWidth="1" />
+                <text x="220" y="415" fontFamily="sans-serif" fontSize="10" fill="#64748b">Approved By</text>
+              </svg>
+            )}
           </div>
         </div>
 
+        {/* Right Panel: Extracted Transaction Editor */}
         <div className="data-panel">
           <div className="panel-header">
-            <span>✏️ Extracted Tally Transaction Data</span>
+            <span>✏️ Extracted Tally Transaction Data ({transactions.length} rows)</span>
             <span style={{ fontSize: '0.85rem', color: '#10b981', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
               <CheckCircle2 size={14} /> Total Debit == Total Credit Check Passed
             </span>

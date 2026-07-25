@@ -20,6 +20,7 @@ export default function App() {
 
   const [currentView, setCurrentView] = useState<'batches' | 'reviewer' | 'exporter'>('batches');
   const [activeBatch, setActiveBatch] = useState<ScanBatch | null>(null);
+  const [liveExtractedTransactions, setLiveExtractedTransactions] = useState<Transaction[]>([]);
   const [activeTransactions, setActiveTransactions] = useState<Transaction[]>([]);
 
   const handleLogin = (user: User) => {
@@ -31,8 +32,11 @@ export default function App() {
     setCurrentUser(null);
   };
 
-  const handleSelectBatch = (batch: ScanBatch) => {
+  const handleSelectBatch = (batch: ScanBatch, extractedTx?: Transaction[]) => {
     setActiveBatch(batch);
+    if (extractedTx) {
+      setLiveExtractedTransactions(extractedTx);
+    }
     setCurrentView('reviewer');
   };
 
@@ -58,6 +62,7 @@ export default function App() {
         ) : currentView === 'reviewer' ? (
           <SideBySideReviewer 
             batch={activeBatch} 
+            initialTransactions={liveExtractedTransactions}
             onBack={() => setCurrentView('batches')} 
             onExportExcel={handleExportExcel} 
           />

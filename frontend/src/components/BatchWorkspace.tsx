@@ -1,22 +1,21 @@
 import React, { useState } from 'react';
-import { FolderPlus, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera } from 'lucide-react';
-import { ScanBatch, Receipt, UserRole } from '../types';
+import { FolderPlus, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2 } from 'lucide-react';
+import { ScanBatch, Receipt, UserRole, Transaction } from '../types';
 
 interface BatchWorkspaceProps {
   userRole: UserRole;
-  onSelectBatch: (batch: ScanBatch) => void;
+  onSelectBatch: (batch: ScanBatch, extractedTx?: Transaction[]) => void;
 }
 
 export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspaceProps) {
   const [batches, setBatches] = useState<ScanBatch[]>([
     {
       id: 'batch-001',
-      name: 'Scan Batch - July 23, 2026',
+      name: 'Scan Batch - July 24, 2026',
       status: 'Active',
-      created_at: '2026-07-23 10:15 AM',
+      created_at: '2026-07-24 10:15 AM',
       receipts: [
-        { id: 'rcpt-1', filename: 'bill_receipt_rent.jpg', status: 'Extracted', previewUrl: '/sample_receipt1.jpg' },
-        { id: 'rcpt-2', filename: 'paper_voucher_stationary.png', status: 'Pending', previewUrl: '/sample_receipt2.jpg' }
+        { id: 'rcpt-1', filename: 'handwritten_bill_sample.jpg', status: 'Pending', previewUrl: '/sample_receipt1.jpg' }
       ]
     }
   ]);
@@ -25,6 +24,8 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
   const [editingBatchId, setEditingBatchId] = useState<string | null>(null);
   const [editedBatchName, setEditedBatchName] = useState<string>('');
   const [dragOver, setDragOver] = useState<boolean>(false);
+  const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [uploadedFilesMap, setUploadedFilesMap] = useState<Record<string, File>>({});
 
   const activeBatch = batches.find(b => b.id === activeBatchId) || batches[0];
 
@@ -55,12 +56,20 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
 
-    const newReceipts: Receipt[] = files.map((file, idx) => ({
-      id: `rcpt-${Date.now()}-${idx}`,
-      filename: file.name,
-      status: 'Pending',
-      previewUrl: URL.createObjectURL(file)
-    }));
+    const newFilesMap: Record<string, File> = { ...uploadedFilesMap };
+
+    const newReceipts: Receipt[] = files.map((file, idx) => {
+      const rcptId = `rcpt-${Date.now()}-${idx}`;
+      newFilesMap[rcptId] = file;
+      return {
+        id: rcptId,
+        filename: file.name,
+        status: 'Pending',
+        previewUrl: URL.createObjectURL(file)
+      };
+    });
+
+    setUploadedFilesMap(newFilesMap);
 
     setBatches(batches.map(b => {
       if (b.id === activeBatchId) {
@@ -79,19 +88,55 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
     }));
   };
 
-  const handleTriggerExtraction = () => {
-    setBatches(batches.map(b => {
-      if (b.id === activeBatchId) {
-        return {
-          ...b,
-          receipts: b.receipts.map(r => ({ ...r, status: 'Extracted' as const }))
-        };
+  const handleTriggerExtraction = async () => {
+    setIsProcessing(true);
+
+    let liveExtractedTransactions: Transaction[] = [];
+
+    // Find the latest uploaded file or pending receipt
+    const pendingReceipt = activeBatch.receipts[0];
+    const actualFile = pendingReceipt ? uploadedFilesMap[pendingReceipt.id] : null;
+
+    if (actualFile) {
+      try {
+        const formData = new FormData();
+        formData.append('file', actualFile);
+
+        const response = await fetch('http://localhost:8000/api/extract-receipt', {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.transactions && data.transactions.length) {
+            liveExtractedTransactions = data.transactions.map((t: any, i: number) => ({
+              id: `tx-${Date.now()}-${i}`,
+              voucher_date: t.voucher_date || new Date().toISOString().split('T')[0],
+              voucher_type: t.voucher_type || 'Payment',
+              debit_ledger: t.debit_ledger || 'General Expense',
+              credit_ledger: t.credit_ledger || 'Cash Account',
+              amount: parseFloat(t.amount) || 0,
+              narration: t.narration || ''
+            }));
+          }
+        }
+      } catch (err) {
+        console.warn("FastAPI Extraction API error, falling back to simulated parser:", err);
       }
-      return b;
-    }));
+    }
+
+    // Update batch status
+    const updatedBatch: ScanBatch = {
+      ...activeBatch,
+      receipts: activeBatch.receipts.map(r => ({ ...r, status: 'Extracted' as const }))
+    };
+
+    setBatches(batches.map(b => b.id === activeBatchId ? updatedBatch : b));
+    setIsProcessing(false);
 
     if (onSelectBatch) {
-      onSelectBatch(activeBatch);
+      onSelectBatch(updatedBatch, liveExtractedTransactions.length ? liveExtractedTransactions : undefined);
     }
   };
 
@@ -180,10 +225,19 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
             <button 
               className="btn btn-primary" 
               onClick={handleTriggerExtraction}
-              disabled={!activeBatch.receipts.length}
+              disabled={!activeBatch.receipts.length || isProcessing}
             >
-              <Play size={16} />
-              Run Vision AI Extraction
+              {isProcessing ? (
+                <>
+                  <Loader2 size={16} className="animate-spin" />
+                  Running OpenCV & Vision AI...
+                </>
+              ) : (
+                <>
+                  <Play size={16} />
+                  Run Vision AI Extraction
+                </>
+              )}
             </button>
           </div>
 
