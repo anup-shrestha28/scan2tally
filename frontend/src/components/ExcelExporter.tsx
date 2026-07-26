@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { FileSpreadsheet, Download, CheckCircle2, RefreshCw, ArrowLeft } from 'lucide-react';
+import ExcelJS from 'exceljs';
 import { Transaction } from '../types';
 
 interface ExcelExporterProps {
@@ -10,27 +11,71 @@ interface ExcelExporterProps {
 export default function ExcelExporter({ transactions, onBack }: ExcelExporterProps) {
   const [downloaded, setDownloaded] = useState<boolean>(false);
 
-  const generateAndDownloadExcel = () => {
-    // Construct CSV / Excel content matching Tally Prime Journal Voucher Import Schema
-    const headers = ['Voucher Date', 'Voucher Type', 'Dr/Cr', 'Ledger Name', 'Debit Amount (Rs.)', 'Credit Amount (Rs.)', 'Narration'];
+  const generateAndDownloadExcel = async () => {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Goshwara Import');
+
+    const rawType = transactions[0]?.voucher_type || 'Journal';
+    const headerText = rawType === 'Journal' ? 'Journal Voucher' : rawType;
+    const voucherNo = (transactions[0] as any)?.voucher_no || '';
+    const voucherDate = transactions[0]?.voucher_date || '';
+    const defaultNarration = 'Being Expenses paid via cheque no.';
+    const isOldNarration = transactions[0]?.narration?.includes('(Being Expenses Recorded)') || transactions[0]?.narration?.includes('Being Expenses paid via cheque no');
+    const narration = isOldNarration 
+      ? defaultNarration 
+      : (transactions[0]?.narration || defaultNarration);
     
-    const rows = transactions.map(t => [
-      t.voucher_date,
-      t.voucher_type,
-      t.entry_type || (t.debit_amount ? 'Dr' : 'Cr'),
-      `"${t.ledger_name || t.debit_ledger || t.credit_ledger || ''}"`,
-      t.debit_amount || t.amount || 0,
-      t.credit_amount || 0,
-      `"${t.narration || ''}"`
-    ]);
+    sheet.getColumn(1).width = 15; 
+    sheet.getColumn(2).width = 8;  
+    sheet.getColumn(3).width = 40; 
+    sheet.getColumn(4).width = 10; 
+    sheet.getColumn(5).width = 15; 
+    sheet.getColumn(6).width = 15; 
+    
+    const row1 = sheet.addRow([headerText, '', '', '', '', '']);
+    sheet.mergeCells('A1:F1');
+    row1.getCell(1).alignment = { horizontal: 'center' };
+    row1.getCell(1).font = { bold: true };
+    
+    const row2 = sheet.addRow(['Voucher No', voucherNo, '', 'Date', voucherDate, '']);
+    sheet.mergeCells('E2:F2');
+    row2.getCell(5).font = { bold: true }; 
+    
+    const row3 = sheet.addRow(['', '', 'Particulars', 'LF', 'Dr', 'Cr']);
+    ['C', 'D', 'E', 'F'].forEach(col => {
+      row3.getCell(col).font = { bold: true };
+      row3.getCell(col).alignment = { horizontal: 'center' };
+    });
+    
+    transactions.forEach(t => {
+      const type = t.entry_type || (t.debit_amount ? 'Dr' : 'Cr');
+      const drAmount = t.debit_amount ? Number(t.debit_amount).toFixed(2) : '';
+      const crAmount = t.credit_amount ? Number(t.credit_amount).toFixed(2) : '';
+      const ledgerName = t.ledger_name || t.debit_ledger || t.credit_ledger || '';
+      const r = sheet.addRow(['', type, ledgerName, '', drAmount, crAmount]);
+      r.getCell('E').alignment = { horizontal: 'right' };
+      r.getCell('F').alignment = { horizontal: 'right' };
+    });
+    
+    const totalDr = transactions.reduce((sum, t) => sum + (Number(t.debit_amount) || Number(t.amount) || 0), 0);
+    const totalCr = transactions.reduce((sum, t) => sum + (Number(t.credit_amount) || 0), 0);
+    
+    const totalRow = sheet.addRow(['', '', '', '', totalDr.toFixed(2), totalCr.toFixed(2)]);
+    totalRow.getCell('E').font = { bold: true }; 
+    totalRow.getCell('F').font = { bold: true }; 
+    totalRow.getCell('E').alignment = { horizontal: 'right' };
+    totalRow.getCell('F').alignment = { horizontal: 'right' };
+    
+    const narrationRow = sheet.addRow([narration, '', '', '', '', '']);
+    sheet.mergeCells(`A${narrationRow.number}:F${narrationRow.number}`);
+    narrationRow.getCell(1).font = { bold: true }; 
 
-    const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
-
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.setAttribute('href', url);
-    link.setAttribute('download', `Tally_Goshwara_Import_${new Date().toISOString().split('T')[0]}.csv`);
+    link.href = url;
+    link.download = `Tally_Goshwara_Import_${new Date().toISOString().split('T')[0]}.xlsx`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -102,38 +147,65 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
         </div>
 
         <div className="table-container">
-          <table className="custom-table">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Type</th>
-                <th>Dr/Cr</th>
-                <th>Ledger Name</th>
-                <th style={{ textAlign: 'right' }}>Debit (Rs.)</th>
-                <th style={{ textAlign: 'right' }}>Credit (Rs.)</th>
-                <th>Narration</th>
-              </tr>
-            </thead>
+          <table className="custom-table" style={{ borderCollapse: 'collapse', width: '100%', border: '1px solid var(--border-color, #e5e7eb)' }}>
             <tbody>
+              <tr>
+                <td colSpan={6} style={{ textAlign: 'center', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>
+                  {transactions[0]?.voucher_type === 'Journal' ? 'Journal Voucher' : (transactions[0]?.voucher_type || 'Journal Voucher')}
+                </td>
+              </tr>
+              <tr>
+                <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>Voucher No</td>
+                <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>{(transactions[0] as any)?.voucher_no || ''}</td>
+                <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}></td>
+                <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>Date</td>
+                <td colSpan={2} style={{ border: '1px solid var(--border-color, #e5e7eb)', fontWeight: 'bold', padding: '8px' }}>
+                  {transactions[0]?.voucher_date || ''}
+                </td>
+              </tr>
+              <tr>
+                <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}></td>
+                <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}></td>
+                <td style={{ textAlign: 'center', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px', width: '250px' }}>Particulars</td>
+                <td style={{ textAlign: 'center', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>LF</td>
+                <td style={{ textAlign: 'center', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>Dr</td>
+                <td style={{ textAlign: 'center', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>Cr</td>
+              </tr>
               {transactions.map((tx) => (
                 <tr key={tx.id}>
-                  <td>{tx.voucher_date}</td>
-                  <td><span className="status-pill status-processing">{tx.voucher_type}</span></td>
-                  <td>
-                    <span className={`status-pill ${tx.entry_type === 'Dr' ? 'status-processing' : 'status-extracted'}`}>
-                      {tx.entry_type || 'Dr'}
-                    </span>
+                  <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}></td>
+                  <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px', width: '50px', textAlign: 'center' }}>
+                    {tx.entry_type || (tx.debit_amount ? 'Dr' : 'Cr')}
                   </td>
-                  <td style={{ fontWeight: 600 }}>{tx.ledger_name || tx.debit_ledger || tx.credit_ledger || ''}</td>
-                  <td style={{ textAlign: 'right', color: '#818cf8', fontWeight: tx.debit_amount ? 600 : 400 }}>
-                    {tx.debit_amount ? `Rs. ${Number(tx.debit_amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '-'}
+                  <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>
+                    {tx.ledger_name || tx.debit_ledger || tx.credit_ledger || ''}
                   </td>
-                  <td style={{ textAlign: 'right', color: '#34d399', fontWeight: tx.credit_amount ? 600 : 400 }}>
-                    {tx.credit_amount ? `Rs. ${Number(tx.credit_amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '-'}
+                  <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px', width: '50px' }}></td>
+                  <td style={{ textAlign: 'right', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px', minWidth: '100px' }}>
+                    {tx.debit_amount ? Number(tx.debit_amount).toFixed(2) : ''}
                   </td>
-                  <td style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>{tx.narration}</td>
+                  <td style={{ textAlign: 'right', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px', minWidth: '100px' }}>
+                    {tx.credit_amount ? Number(tx.credit_amount).toFixed(2) : ''}
+                  </td>
                 </tr>
               ))}
+              <tr>
+                <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}></td>
+                <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}></td>
+                <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}></td>
+                <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}></td>
+                <td style={{ textAlign: 'right', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>
+                  {totalDebit.toFixed(2)}
+                </td>
+                <td style={{ textAlign: 'right', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>
+                  {totalCredit.toFixed(2)}
+                </td>
+              </tr>
+              <tr>
+                <td colSpan={6} style={{ fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>
+                  {transactions[0]?.narration?.includes('(Being Expenses Recorded)') || transactions[0]?.narration?.includes('Being Expenses paid via cheque no') ? 'Being Expenses paid via cheque no.' : (transactions[0]?.narration || 'Being Expenses paid via cheque no.')}
+                </td>
+              </tr>
             </tbody>
           </table>
         </div>

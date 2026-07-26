@@ -13,15 +13,15 @@ interface SideBySideReviewerProps {
 export default function SideBySideReviewer({ batch, selectedReceipt, initialTransactions, onBack, onExportExcel }: SideBySideReviewerProps) {
   // Standard Nepalese Goshwara Voucher 1 Default Data with Dr/Cr separation
   const defaultGoshwaraVoucher1: Transaction[] = [
-    { id: 'tx-1', voucher_date: '2083-03-15', voucher_type: 'Journal', entry_type: 'Dr', ledger_name: 'Freight outward', debit_amount: 1237.35, credit_amount: 0, narration: '(Being Expenses Recorded)' },
-    { id: 'tx-2', voucher_date: '2083-03-15', voucher_type: 'Journal', entry_type: 'Dr', ledger_name: 'Carriage outward - Transportation', debit_amount: 6000.00, credit_amount: 0, narration: '(Being Expenses Recorded)' },
-    { id: 'tx-3', voucher_date: '2083-03-15', voucher_type: 'Journal', entry_type: 'Dr', ledger_name: 'Carriage outward - Labor', debit_amount: 7171.00, credit_amount: 0, narration: '(Being Expenses Recorded)' },
-    { id: 'tx-4', voucher_date: '2083-03-15', voucher_type: 'Journal', entry_type: 'Cr', ledger_name: 'TDS payable', debit_amount: 0, credit_amount: 16.42, narration: '(Being Expenses Recorded)' },
-    { id: 'tx-5', voucher_date: '2083-03-15', voucher_type: 'Journal', entry_type: 'Cr', ledger_name: 'VAT payable', debit_amount: 0, credit_amount: 690.00, narration: '(Being Expenses Recorded)' },
-    { id: 'tx-6', voucher_date: '2083-03-15', voucher_type: 'Journal', entry_type: 'Cr', ledger_name: 'TDS payable', debit_amount: 0, credit_amount: 71.00, narration: '(Being Expenses Recorded)' },
-    { id: 'tx-7', voucher_date: '2083-03-15', voucher_type: 'Journal', entry_type: 'Cr', ledger_name: 'Krishna Transport', debit_amount: 0, credit_amount: 1020.23, narration: '(Being Expenses Recorded)' },
-    { id: 'tx-8', voucher_date: '2083-03-15', voucher_type: 'Journal', entry_type: 'Cr', ledger_name: 'New subhash Carriers', debit_amount: 0, credit_amount: 200.70, narration: '(Being Expenses Recorded)' },
-    { id: 'tx-9', voucher_date: '2083-03-15', voucher_type: 'Journal', entry_type: 'Cr', ledger_name: 'Sundry payable', debit_amount: 0, credit_amount: 12410.00, narration: '(Being Expenses Recorded)' }
+    { id: 'tx-1', voucher_date: '2083-03-15', voucher_type: 'Journal', entry_type: 'Dr', ledger_name: 'Freight outward', debit_amount: 1237.35, credit_amount: 0, narration: 'Being Expenses paid via cheque no.' },
+    { id: 'tx-2', voucher_date: '2083-03-15', voucher_type: 'Journal', entry_type: 'Dr', ledger_name: 'Carriage outward - Transportation', debit_amount: 6000.00, credit_amount: 0, narration: 'Being Expenses paid via cheque no.' },
+    { id: 'tx-3', voucher_date: '2083-03-15', voucher_type: 'Journal', entry_type: 'Dr', ledger_name: 'Carriage outward - Labor', debit_amount: 7171.00, credit_amount: 0, narration: 'Being Expenses paid via cheque no.' },
+    { id: 'tx-4', voucher_date: '2083-03-15', voucher_type: 'Journal', entry_type: 'Cr', ledger_name: 'TDS payable', debit_amount: 0, credit_amount: 16.42, narration: 'Being Expenses paid via cheque no.' },
+    { id: 'tx-5', voucher_date: '2083-03-15', voucher_type: 'Journal', entry_type: 'Cr', ledger_name: 'VAT payable', debit_amount: 0, credit_amount: 690.00, narration: 'Being Expenses paid via cheque no.' },
+    { id: 'tx-6', voucher_date: '2083-03-15', voucher_type: 'Journal', entry_type: 'Cr', ledger_name: 'TDS payable', debit_amount: 0, credit_amount: 71.00, narration: 'Being Expenses paid via cheque no.' },
+    { id: 'tx-7', voucher_date: '2083-03-15', voucher_type: 'Journal', entry_type: 'Cr', ledger_name: 'Krishna Transport', debit_amount: 0, credit_amount: 1020.23, narration: 'Being Expenses paid via cheque no.' },
+    { id: 'tx-8', voucher_date: '2083-03-15', voucher_type: 'Journal', entry_type: 'Cr', ledger_name: 'New subhash Carriers', debit_amount: 0, credit_amount: 200.70, narration: 'Being Expenses paid via cheque no.' },
+    { id: 'tx-9', voucher_date: '2083-03-15', voucher_type: 'Journal', entry_type: 'Cr', ledger_name: 'Sundry payable', debit_amount: 0, credit_amount: 12410.00, narration: 'Being Expenses paid via cheque no.' }
   ];
 
   const [transactions, setTransactions] = useState<Transaction[]>(
@@ -179,12 +179,18 @@ export default function SideBySideReviewer({ batch, selectedReceipt, initialTran
           </div>
 
           <div style={{ flex: 1, padding: '16px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0 4px', fontSize: '0.95rem' }}>
+              <div>
+                <strong>Date:</strong> {transactions[0]?.voucher_date || ''}
+              </div>
+              <div>
+                <strong>Voucher No:</strong> { (transactions[0] as any)?.voucher_no || '-' }
+              </div>
+            </div>
             <div className="table-container">
               <table className="custom-table">
                 <thead>
                   <tr>
-                    <th style={{ width: '120px' }}>Date</th>
-                    <th style={{ width: '100px' }}>Voucher</th>
                     <th style={{ width: '70px' }}>Type</th>
                     <th>Ledger Name (Account Details)</th>
                     <th style={{ width: '120px', textAlign: 'right' }}>Debit (Rs.)</th>
@@ -195,29 +201,6 @@ export default function SideBySideReviewer({ batch, selectedReceipt, initialTran
                 <tbody>
                   {transactions.map((tx) => (
                     <tr key={tx.id} style={{ background: tx.entry_type === 'Dr' ? 'rgba(99, 102, 241, 0.03)' : 'transparent' }}>
-                      <td>
-                        <input 
-                          type="text" 
-                          className="form-input" 
-                          style={{ padding: '4px 8px', fontSize: '0.825rem' }}
-                          value={tx.voucher_date}
-                          onChange={(e) => handleUpdateTransaction(tx.id, 'voucher_date', e.target.value)}
-                        />
-                      </td>
-                      <td>
-                        <select 
-                          className="form-select" 
-                          style={{ padding: '4px 6px', fontSize: '0.825rem' }}
-                          value={tx.voucher_type}
-                          onChange={(e) => handleUpdateTransaction(tx.id, 'voucher_type', e.target.value)}
-                        >
-                          <option value="Journal">Journal</option>
-                          <option value="Payment">Payment</option>
-                          <option value="Receipt">Receipt</option>
-                          <option value="Purchase">Purchase</option>
-                          <option value="Sales">Sales</option>
-                        </select>
-                      </td>
                       <td>
                         <span className={`status-pill ${tx.entry_type === 'Dr' ? 'status-processing' : 'status-extracted'}`} style={{ fontWeight: 700 }}>
                           {tx.entry_type}
