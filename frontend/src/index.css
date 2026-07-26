@@ -6,6 +6,7 @@
   --bg-card: #1e293b;
   --bg-card-hover: #334155;
   --bg-input: #0f172a;
+  --bg-table-header: rgba(15, 23, 42, 0.8);
   
   --border-color: #334155;
   --border-focus: #6366f1;
@@ -32,6 +33,37 @@
   
   --transition: all 0.2s ease-in-out;
 }
+
+/* Light Mode Overrides */
+body.light {
+  --bg-dark: #f1f5f9;
+  --bg-card: #ffffff;
+  --bg-card-hover: #e2e8f0;
+  --bg-input: #f8fafc;
+  --bg-table-header: #f1f5f9;
+
+  --border-color: #cbd5e1;
+  --border-focus: #6366f1;
+
+  --text-main: #0f172a;
+  --text-muted: #475569;
+  --text-dim: #94a3b8;
+
+  --shadow-sm: 0 2px 4px rgba(0,0,0,0.06);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.1);
+  --shadow-lg: 0 10px 25px rgba(0,0,0,0.15);
+}
+
+body.light .navbar {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-bottom-color: #e2e8f0;
+}
+
+body.light ::-webkit-scrollbar-track { background: #f1f5f9; }
+body.light ::-webkit-scrollbar-thumb { background: #cbd5e1; }
+
 
 * {
   box-sizing: border-box;
@@ -247,7 +279,7 @@ body {
 }
 
 .custom-table th {
-  background-color: rgba(15, 23, 42, 0.8);
+  background-color: var(--bg-table-header);
   color: var(--text-muted);
   font-weight: 600;
   padding: 12px 16px;
@@ -308,6 +340,7 @@ body {
   grid-template-columns: 1fr 1fr;
   gap: 20px;
   height: calc(100vh - 140px);
+  min-height: 0;
 }
 
 .image-panel {
@@ -317,6 +350,7 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-height: 0;
 }
 
 .panel-header {
@@ -353,4 +387,5 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-height: 0;
 }

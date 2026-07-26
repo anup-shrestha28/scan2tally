@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Navbar from './components/Navbar';
 import LoginModal from './components/LoginModal';
 import SuperAdminDashboard from './components/SuperAdminDashboard';
@@ -23,6 +23,11 @@ export default function App() {
   const [selectedReceipt, setSelectedReceipt] = useState<Receipt | null>(null);
   const [liveExtractedTransactions, setLiveExtractedTransactions] = useState<Transaction[]>([]);
   const [activeTransactions, setActiveTransactions] = useState<Transaction[]>([]);
+  const [isDark, setIsDark] = useState<boolean>(true);
+
+  useEffect(() => {
+    document.body.classList.toggle('light', !isDark);
+  }, [isDark]);
 
   const handleLogin = (user: User) => {
     setCurrentUser(user);
@@ -57,7 +62,7 @@ export default function App() {
 
   return (
     <div className="app-container">
-      <Navbar currentUser={currentUser} onLogout={handleLogout} />
+      <Navbar currentUser={currentUser} onLogout={handleLogout} isDark={isDark} onToggleTheme={() => setIsDark(d => !d)} />
 
       <main className="main-content">
         {!currentUser ? (
