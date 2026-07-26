@@ -30,6 +30,12 @@ const normalizeNarration = (raw: string | undefined): string => {
   return baseStatic;
 };
 
+// Format number with Indian-style commas and 2 decimal places
+const formatAmt = (n: number | undefined | null): string => {
+  if (!n) return '';
+  return Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
+
 export default function ExcelExporter({ transactions, onBack }: ExcelExporterProps) {
   const [downloaded, setDownloaded] = useState<boolean>(false);
 
@@ -82,8 +88,8 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
       // Rows: Transactions
       groupTxs.forEach(t => {
         const type = t.entry_type || (t.debit_amount ? 'Dr' : 'Cr');
-        const drAmount = t.debit_amount ? Number(t.debit_amount).toFixed(2) : '';
-        const crAmount = t.credit_amount ? Number(t.credit_amount).toFixed(2) : '';
+        const drAmount = t.debit_amount ? formatAmt(Number(t.debit_amount)) : '';
+        const crAmount = t.credit_amount ? formatAmt(Number(t.credit_amount)) : '';
         const ledgerName = t.ledger_name || t.debit_ledger || t.credit_ledger || '';
         const r = sheet.addRow(['', type, ledgerName, '', drAmount, crAmount]);
         r.getCell('E').alignment = { horizontal: 'right' };
@@ -94,7 +100,7 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
       const totalDr = groupTxs.reduce((sum, t) => sum + (Number(t.debit_amount) || Number(t.amount) || 0), 0);
       const totalCr = groupTxs.reduce((sum, t) => sum + (Number(t.credit_amount) || 0), 0);
       
-      const totalRow = sheet.addRow(['', '', '', '', totalDr.toFixed(2), totalCr.toFixed(2)]);
+      const totalRow = sheet.addRow(['', '', '', '', formatAmt(totalDr), formatAmt(totalCr)]);
       totalRow.getCell('E').font = { bold: true }; 
       totalRow.getCell('F').font = { bold: true }; 
       totalRow.getCell('E').alignment = { horizontal: 'right' };
@@ -251,10 +257,10 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
                       </td>
                       <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px', width: '50px' }}></td>
                       <td style={{ textAlign: 'right', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px', minWidth: '100px' }}>
-                        {tx.debit_amount ? Number(tx.debit_amount).toFixed(2) : ''}
+                        {tx.debit_amount ? formatAmt(Number(tx.debit_amount)) : ''}
                       </td>
                       <td style={{ textAlign: 'right', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px', minWidth: '100px' }}>
-                        {tx.credit_amount ? Number(tx.credit_amount).toFixed(2) : ''}
+                        {tx.credit_amount ? formatAmt(Number(tx.credit_amount)) : ''}
                       </td>
                     </tr>
                   ))}
@@ -264,10 +270,10 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
                     <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}></td>
                     <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}></td>
                     <td style={{ textAlign: 'right', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>
-                      {grpTotalDr.toFixed(2)}
+                      {formatAmt(grpTotalDr)}
                     </td>
                     <td style={{ textAlign: 'right', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>
-                      {grpTotalCr.toFixed(2)}
+                      {formatAmt(grpTotalCr)}
                     </td>
                   </tr>
                   <tr>
