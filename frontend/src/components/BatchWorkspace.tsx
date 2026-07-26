@@ -4,7 +4,7 @@ import { ScanBatch, Receipt, UserRole, Transaction } from '../types';
 
 interface BatchWorkspaceProps {
   userRole: UserRole;
-  onSelectBatch: (batch: ScanBatch, selectedReceipt?: Receipt, extractedTx?: Transaction[]) => void;
+  onSelectBatch: (batch: ScanBatch, selectedReceipt?: Receipt, extractedTx?: Transaction[], txMap?: Record<string, Transaction[]>) => void;
 }
 
 export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspaceProps) {
@@ -153,12 +153,12 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
 
     const firstReceipt = updatedBatch.receipts[0];
     const firstExtracted = firstReceipt ? newTxMap[firstReceipt.id] : undefined;
-    onSelectBatch(updatedBatch, firstReceipt, firstExtracted);
+    onSelectBatch(updatedBatch, firstReceipt, firstExtracted, newTxMap);
   };
 
   const handleReviewSingleReceipt = (receipt: Receipt) => {
     const extractedForThisReceipt = receiptTransactionsMap[receipt.id];
-    onSelectBatch(activeBatch, receipt, extractedForThisReceipt);
+    onSelectBatch(activeBatch, receipt, extractedForThisReceipt, receiptTransactionsMap);
   };
 
   return (
