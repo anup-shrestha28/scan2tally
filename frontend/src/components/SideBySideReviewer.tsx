@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2 } from 'lucide-react';
+import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2, RotateCcw, RotateCw } from 'lucide-react';
 import { ScanBatch, Receipt, Transaction } from '../types';
 
 interface SideBySideReviewerProps {
@@ -35,6 +35,10 @@ export default function SideBySideReviewer({ batch, selectedReceipt, initialTran
   }, [initialTransactions]);
 
   const [savedSuccess, setSavedSuccess] = useState<boolean>(false);
+  const [rotation, setRotation] = useState<number>(0);
+
+  const rotateLeft = () => setRotation(r => r - 90);
+  const rotateRight = () => setRotation(r => r + 90);
 
   const handleUpdateTransaction = (id: string, field: keyof Transaction, value: any) => {
     setTransactions(transactions.map(t => {
@@ -138,15 +142,35 @@ export default function SideBySideReviewer({ batch, selectedReceipt, initialTran
         <div className="image-panel">
           <div className="panel-header">
             <span>📷 {currentReceiptName}</span>
-            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Zoom: 100%</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <button
+                onClick={rotateLeft}
+                title="Rotate Left"
+                style={{ background: 'linear-gradient(135deg, #4f46e5, #6366f1)', border: 'none', borderRadius: '8px', cursor: 'pointer', padding: '5px 10px', color: '#fff', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', fontWeight: 600, boxShadow: '0 2px 8px rgba(99,102,241,0.4)', transition: 'transform 0.15s, box-shadow 0.15s' }}
+                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1.08)'; (e.currentTarget as HTMLButtonElement).style.boxShadow = '0 4px 14px rgba(99,102,241,0.6)'; }}
+                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1)'; (e.currentTarget as HTMLButtonElement).style.boxShadow = '0 2px 8px rgba(99,102,241,0.4)'; }}
+              >
+                <RotateCcw size={14} />
+              </button>
+              <button
+                onClick={rotateRight}
+                title="Rotate Right"
+                style={{ background: 'linear-gradient(135deg, #4f46e5, #6366f1)', border: 'none', borderRadius: '8px', cursor: 'pointer', padding: '5px 10px', color: '#fff', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', fontWeight: 600, boxShadow: '0 2px 8px rgba(99,102,241,0.4)', transition: 'transform 0.15s, box-shadow 0.15s' }}
+                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1.08)'; (e.currentTarget as HTMLButtonElement).style.boxShadow = '0 4px 14px rgba(99,102,241,0.6)'; }}
+                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1)'; (e.currentTarget as HTMLButtonElement).style.boxShadow = '0 2px 8px rgba(99,102,241,0.4)'; }}
+              >
+                <RotateCw size={14} />
+              </button>
+            </div>
           </div>
 
-          <div className="image-viewer">
+          <div className="image-viewer" style={{ overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             {currentReceiptImage ? (
               <img 
                 src={currentReceiptImage} 
                 alt="Uploaded Handwritten Bill Receipt" 
                 className="receipt-img"
+                style={{ transform: `rotate(${rotation}deg)`, transition: 'transform 0.3s ease', maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
               />
             ) : (
               <div style={{ color: 'var(--text-muted)', textAlign: 'center' }}>No Receipt Image Selected</div>
