@@ -117,6 +117,11 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
 
           if (response.ok) {
             const data = await response.json();
+            
+            if (data.error) {
+              alert(`Extraction Failed for ${receipt.filename}:\n\n${data.error}\n\nPlease check your API keys or quota.`);
+            }
+
             if (data.transactions && data.transactions.length) {
               newTxMap[receipt.id] = data.transactions.map((t: any, i: number) => ({
                 id: `tx-${receipt.id}-${i}`,

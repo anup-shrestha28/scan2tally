@@ -24,14 +24,25 @@ export default function SideBySideReviewer({ batch, selectedReceipt, initialTran
     { id: 'tx-9', voucher_date: '2083-03-15', voucher_type: 'Journal', entry_type: 'Cr', ledger_name: 'Sundry payable', debit_amount: 0, credit_amount: 12410.00, narration: 'Being Expenses paid via cheque no.' }
   ];
 
-  const [transactions, setTransactions] = useState<Transaction[]>(
-    initialTransactions && initialTransactions.length ? initialTransactions : defaultGoshwaraVoucher1
-  );
+  const getInitialState = () => {
+    if (!initialTransactions) return defaultGoshwaraVoucher1;
+    if (initialTransactions.length > 0) return initialTransactions;
+    return [{
+      id: `tx-blank-1`,
+      voucher_date: new Date().toISOString().split('T')[0],
+      voucher_type: 'Journal',
+      entry_type: 'Dr',
+      ledger_name: '',
+      debit_amount: 0,
+      credit_amount: 0,
+      narration: 'Being Expenses paid via cheque no.'
+    }];
+  };
+
+  const [transactions, setTransactions] = useState<Transaction[]>(getInitialState());
 
   useEffect(() => {
-    if (initialTransactions && initialTransactions.length) {
-      setTransactions(initialTransactions);
-    }
+    setTransactions(getInitialState());
   }, [initialTransactions]);
 
   const [savedSuccess, setSavedSuccess] = useState<boolean>(false);
@@ -216,7 +227,7 @@ export default function SideBySideReviewer({ batch, selectedReceipt, initialTran
                 <thead>
                   <tr>
                     <th style={{ width: '70px' }}>Type</th>
-                    <th>Ledger Name (Account Details)</th>
+                    <th>Particulars</th>
                     <th style={{ width: '120px', textAlign: 'right' }}>Debit (Rs.)</th>
                     <th style={{ width: '120px', textAlign: 'right' }}>Credit (Rs.)</th>
                     <th style={{ width: '40px' }}></th>
@@ -284,11 +295,11 @@ export default function SideBySideReviewer({ batch, selectedReceipt, initialTran
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div style={{ display: 'flex', gap: '8px' }}>
                 <button className="btn btn-secondary btn-sm" onClick={() => handleAddTransaction('Dr')}>
-                  <Plus size={14} /> Add Debit (Dr) Row
+                  <Plus size={14} /> Add Debit
                 </button>
 
                 <button className="btn btn-secondary btn-sm" onClick={() => handleAddTransaction('Cr')}>
-                  <Plus size={14} /> Add Credit (Cr) Row
+                  <Plus size={14} /> Add Credit
                 </button>
               </div>
 

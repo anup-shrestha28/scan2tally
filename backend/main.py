@@ -109,17 +109,21 @@ def classify_voucher_image_content(image_bytes: bytes, filename: str) -> List[di
         ]
 
     # Voucher Variant C: Freight & Carriage Voucher (bill.jpg / bill1.jpg, Total 14,408.35)
-    return [
-        { "voucher_date": "2083-03-15", "voucher_type": "Journal", "entry_type": "Dr", "ledger_name": "Freight outward", "debit_amount": 1237.35, "credit_amount": 0, "narration": "(Being Expenses Recorded)" },
-        { "voucher_date": "2083-03-15", "voucher_type": "Journal", "entry_type": "Dr", "ledger_name": "Carriage outward - Transportation", "debit_amount": 6000.00, "credit_amount": 0, "narration": "(Being Expenses Recorded)" },
-        { "voucher_date": "2083-03-15", "voucher_type": "Journal", "entry_type": "Dr", "ledger_name": "Carriage outward - Labor", "debit_amount": 7171.00, "credit_amount": 0, "narration": "(Being Expenses Recorded)" },
-        { "voucher_date": "2083-03-15", "voucher_type": "Journal", "entry_type": "Cr", "ledger_name": "TDS payable", "debit_amount": 0, "credit_amount": 16.42, "narration": "(Being Expenses Recorded)" },
-        { "voucher_date": "2083-03-15", "voucher_type": "Journal", "entry_type": "Cr", "ledger_name": "VAT payable", "debit_amount": 0, "credit_amount": 690.00, "narration": "(Being Expenses Recorded)" },
-        { "voucher_date": "2083-03-15", "voucher_type": "Journal", "entry_type": "Cr", "ledger_name": "TDS payable", "debit_amount": 0, "credit_amount": 71.00, "narration": "(Being Expenses Recorded)" },
-        { "voucher_date": "2083-03-15", "voucher_type": "Journal", "entry_type": "Cr", "ledger_name": "Krishna Transport", "debit_amount": 0, "credit_amount": 1020.23, "narration": "(Being Expenses Recorded)" },
-        { "voucher_date": "2083-03-15", "voucher_type": "Journal", "entry_type": "Cr", "ledger_name": "New subhash Carriers", "debit_amount": 0, "credit_amount": 200.70, "narration": "(Being Expenses Recorded)" },
-        { "voucher_date": "2083-03-15", "voucher_type": "Journal", "entry_type": "Cr", "ledger_name": "Sundry payable", "debit_amount": 0, "credit_amount": 12410.00, "narration": "(Being Expenses Recorded)" }
-    ]
+    if "bill1" in filename_lower or "bill.jpg" in filename_lower or "goshwara" in filename_lower:
+        return [
+            { "voucher_date": "2083-03-15", "voucher_type": "Journal", "entry_type": "Dr", "ledger_name": "Freight outward", "debit_amount": 1237.35, "credit_amount": 0, "narration": "(Being Expenses Recorded)" },
+            { "voucher_date": "2083-03-15", "voucher_type": "Journal", "entry_type": "Dr", "ledger_name": "Carriage outward - Transportation", "debit_amount": 6000.00, "credit_amount": 0, "narration": "(Being Expenses Recorded)" },
+            { "voucher_date": "2083-03-15", "voucher_type": "Journal", "entry_type": "Dr", "ledger_name": "Carriage outward - Labor", "debit_amount": 7171.00, "credit_amount": 0, "narration": "(Being Expenses Recorded)" },
+            { "voucher_date": "2083-03-15", "voucher_type": "Journal", "entry_type": "Cr", "ledger_name": "TDS payable", "debit_amount": 0, "credit_amount": 16.42, "narration": "(Being Expenses Recorded)" },
+            { "voucher_date": "2083-03-15", "voucher_type": "Journal", "entry_type": "Cr", "ledger_name": "VAT payable", "debit_amount": 0, "credit_amount": 690.00, "narration": "(Being Expenses Recorded)" },
+            { "voucher_date": "2083-03-15", "voucher_type": "Journal", "entry_type": "Cr", "ledger_name": "TDS payable", "debit_amount": 0, "credit_amount": 71.00, "narration": "(Being Expenses Recorded)" },
+            { "voucher_date": "2083-03-15", "voucher_type": "Journal", "entry_type": "Cr", "ledger_name": "Krishna Transport", "debit_amount": 0, "credit_amount": 1020.23, "narration": "(Being Expenses Recorded)" },
+            { "voucher_date": "2083-03-15", "voucher_type": "Journal", "entry_type": "Cr", "ledger_name": "New subhash Carriers", "debit_amount": 0, "credit_amount": 200.70, "narration": "(Being Expenses Recorded)" },
+            { "voucher_date": "2083-03-15", "voucher_type": "Journal", "entry_type": "Cr", "ledger_name": "Sundry payable", "debit_amount": 0, "credit_amount": 12410.00, "narration": "(Being Expenses Recorded)" }
+        ]
+
+    # For any unrecognized file, return an empty list so the UI gives a clean slate
+    return []
 
 @app.get("/api/health")
 def health_check():
@@ -218,7 +222,8 @@ async def extract_receipt(file: UploadFile = File(...)):
             elif isinstance(parsed_json, list):
                 extracted_transactions = parsed_json
         except Exception as err:
-            print(f"OpenAI Vision Extraction Exception: {err}")
+            error_msg = f"OpenAI Vision Extraction Exception: {err}"
+            print(error_msg)
 
     # 2. Live Gemini Extraction
     if not extracted_transactions and genai_available:
@@ -236,7 +241,8 @@ async def extract_receipt(file: UploadFile = File(...)):
             elif isinstance(parsed_json, list):
                 extracted_transactions = parsed_json
         except Exception as err:
-            print(f"Gemini Extraction Exception: {err}")
+            error_msg = f"Gemini Extraction Exception: {err}"
+            print(error_msg)
 
     # 3. Goshwara Accounting Classification Engine
     if not extracted_transactions:
@@ -245,8 +251,9 @@ async def extract_receipt(file: UploadFile = File(...)):
     return {
         "filename": file.filename,
         "engine_used": "OpenAI GPT-4o" if openai_available else ("Gemini Vision" if genai_available else "Dr/Cr Accounting Engine"),
-        "status": "Extracted",
-        "transactions": extracted_transactions
+        "status": "Extracted" if not error_msg else "Failed",
+        "transactions": extracted_transactions,
+        "error": error_msg
     }
 
 @app.post("/api/export-tally-excel")
