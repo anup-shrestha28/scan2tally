@@ -55,6 +55,8 @@ export default function SideBySideReviewer({
 
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [rotation, setRotation] = useState(0);
+  const [showImbalanceModal, setShowImbalanceModal] = useState(false);
+  const [pendingExportData, setPendingExportData] = useState<Transaction[] | null>(null);
 
   const currentReceipt = receipts[currentIndex] || null;
 
@@ -144,7 +146,46 @@ export default function SideBySideReviewer({
   const handleExportAll = () => {
     const saved = currentReceipt ? { ...txMap, [currentReceipt.id]: transactions } : txMap;
     const all = receipts.flatMap(r => (saved[r.id] || []).map(t => ({ ...t, receipt_id: r.id })));
-    onExportExcel(all.length > 0 ? all : transactions.map(t => ({ ...t, receipt_id: currentReceipt?.id })));
+    const exportData = all.length > 0 ? all : transactions.map(t => ({ ...t, receipt_id: currentReceipt?.id }));
+
+    // Check for imbalance across all receipts being exported
+    let hasImbalance = false;
+    const grouped = exportData.reduce((acc, t) => {
+      const key = t.receipt_id || 'default';
+      if (!acc[key]) acc[key] = [];
+      acc[key].push(t);
+      return acc;
+    }, {} as Record<string, Transaction[]>);
+
+    for (const group of Object.values(grouped)) {
+      const dr = group.reduce((sum, t) => sum + (Number(t.debit_amount) || 0), 0);
+      const cr = group.reduce((sum, t) => sum + (Number(t.credit_amount) || 0), 0);
+      if (Math.abs(dr - cr) > 0.05) {
+        hasImbalance = true;
+        break;
+      }
+    }
+
+    if (hasImbalance) {
+      setPendingExportData(exportData);
+      setShowImbalanceModal(true);
+      return;
+    }
+
+    onExportExcel(exportData);
+  };
+
+  const confirmExport = () => {
+    if (pendingExportData) {
+      onExportExcel(pendingExportData);
+    }
+    setShowImbalanceModal(false);
+    setPendingExportData(null);
+  };
+
+  const cancelExport = () => {
+    setShowImbalanceModal(false);
+    setPendingExportData(null);
   };
 
   const totalDebit = transactions.reduce((acc, curr) => acc + (Number(curr.debit_amount) || 0), 0);
@@ -426,6 +467,53 @@ export default function SideBySideReviewer({
           </div>
         </div>
       </div>
+
+      {showImbalanceModal && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.6)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999,
+          backdropFilter: 'blur(4px)'
+        }}>
+          <div className="card" style={{
+            width: '420px',
+            padding: '24px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '16px',
+            boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.3), 0 10px 10px -5px rgba(0, 0, 0, 0.2)',
+            animation: 'fadeIn 0.2s ease-out'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', color: '#f59e0b' }}>
+              <AlertTriangle size={24} />
+              <h3 style={{ fontSize: '1.2rem', fontWeight: 700, margin: 0, color: 'var(--text-main)' }}>Imbalance Detected</h3>
+            </div>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.95rem', lineHeight: 1.5, margin: 0 }}>
+              Debit / Credit Imbalance Detected in one or more receipts. Are you sure you want to continue with the export?
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '8px' }}>
+              <button 
+                className="btn btn-secondary" 
+                onClick={cancelExport}
+                style={{ padding: '8px 16px' }}
+              >
+                Cancel
+              </button>
+              <button 
+                className="btn btn-primary" 
+                onClick={confirmExport}
+                style={{ padding: '8px 16px', background: '#f59e0b', color: '#fff', border: 'none' }}
+              >
+                Proceed to Export
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
