@@ -21,6 +21,7 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
   const [activeBatchId, setActiveBatchId] = useState<string>('batch-001');
   const [editingBatchId, setEditingBatchId] = useState<string | null>(null);
   const [editedBatchName, setEditedBatchName] = useState<string>('');
+  const [deletingBatchId, setDeletingBatchId] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   
@@ -50,6 +51,15 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
     if (!editedBatchName.trim()) return;
     setBatches(batches.map(b => b.id === id ? { ...b, name: editedBatchName } : b));
     setEditingBatchId(null);
+  };
+
+  const handleDeleteBatch = (id: string) => {
+    const remaining = batches.filter(b => b.id !== id);
+    setBatches(remaining);
+    if (activeBatchId === id) {
+      setActiveBatchId(remaining[0]?.id || '');
+    }
+    setDeletingBatchId(null);
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement> | { target: { files: FileList | File[] } }) => {
@@ -188,9 +198,13 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
                       className="form-input" 
                       value={editedBatchName}
                       onChange={e => setEditedBatchName(e.target.value)}
-                      style={{ padding: '4px 8px', fontSize: '0.85rem' }}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') handleRenameBatch(b.id);
+                        if (e.key === 'Escape') setEditingBatchId(null);
+                      }}
+                      style={{ padding: '6px 10px', fontSize: '0.85rem', flex: 1, boxSizing: 'border-box' }}
+                      autoFocus
                     />
-                    <button className="btn btn-primary btn-sm" onClick={() => handleRenameBatch(b.id)}>Save</button>
                   </div>
                 ) : (
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
@@ -201,17 +215,29 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
                       </div>
                     </div>
 
-                    <button 
-                      className="btn btn-secondary btn-sm" 
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setEditingBatchId(b.id);
-                        setEditedBatchName(b.name);
-                      }}
-                      title="Rename Batch"
-                    >
-                      <Edit2 size={12} />
-                    </button>
+                    <div style={{ display: 'flex', gap: '6px' }}>
+                      <button 
+                        className="btn btn-secondary btn-sm" 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setEditingBatchId(b.id);
+                          setEditedBatchName(b.name);
+                        }}
+                        title="Rename Batch"
+                      >
+                        <Edit2 size={12} />
+                      </button>
+                      <button 
+                        className="btn btn-danger btn-sm" 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDeletingBatchId(b.id);
+                        }}
+                        title="Delete Batch"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -362,6 +388,59 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
           </div>
         </div>
       </div>
+
+      {/* Delete Confirmation Modal */}
+      {deletingBatchId && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 1000,
+          background: 'rgba(0,0,0,0.55)',
+          backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center'
+        }}>
+          <div style={{
+            background: 'var(--card-bg, #1e1e2e)',
+            border: '1px solid var(--border-color)',
+            borderRadius: '16px',
+            padding: '32px 36px',
+            maxWidth: '420px',
+            width: '90%',
+            boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+            textAlign: 'center',
+            animation: 'fadeIn 0.2s ease'
+          }}>
+            <div style={{
+              width: '52px', height: '52px', borderRadius: '50%',
+              background: 'rgba(239,68,68,0.15)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              margin: '0 auto 16px auto'
+            }}>
+              <Trash2 size={24} style={{ color: '#ef4444' }} />
+            </div>
+            <h3 style={{ fontSize: '1.15rem', fontWeight: 700, marginBottom: '8px' }}>Delete Batch?</h3>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '24px', lineHeight: 1.5 }}>
+              Are you sure you want to delete <strong style={{ color: 'var(--text)' }}>"{batches.find(b => b.id === deletingBatchId)?.name}"</strong>? This action cannot be undone.
+            </p>
+            <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
+              <button
+                className="btn btn-secondary"
+                onClick={() => setDeletingBatchId(null)}
+                style={{ minWidth: '110px' }}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={() => handleDeleteBatch(deletingBatchId)}
+                style={{ minWidth: '110px', background: 'linear-gradient(135deg, #ef4444, #dc2626)', boxShadow: '0 2px 8px rgba(239,68,68,0.4)', color: '#ffffff', fontWeight: 600, transition: 'transform 0.15s, box-shadow 0.15s' }}
+                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1.06)'; (e.currentTarget as HTMLButtonElement).style.boxShadow = '0 6px 18px rgba(239,68,68,0.65)'; }}
+                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1)'; (e.currentTarget as HTMLButtonElement).style.boxShadow = '0 2px 8px rgba(239,68,68,0.4)'; }}
+              >
+                <Trash2 size={15} /> Yes, Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
