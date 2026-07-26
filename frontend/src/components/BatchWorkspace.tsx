@@ -4,19 +4,17 @@ import { ScanBatch, Receipt, UserRole, Transaction } from '../types';
 
 interface BatchWorkspaceProps {
   userRole: UserRole;
-  onSelectBatch: (batch: ScanBatch, extractedTx?: Transaction[]) => void;
+  onSelectBatch: (batch: ScanBatch, selectedReceipt?: Receipt, extractedTx?: Transaction[]) => void;
 }
 
 export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspaceProps) {
   const [batches, setBatches] = useState<ScanBatch[]>([
     {
       id: 'batch-001',
-      name: 'Scan Batch - July 24, 2026',
+      name: 'Scan Batch - July 25, 2026',
       status: 'Active',
-      created_at: '2026-07-24 10:15 AM',
-      receipts: [
-        { id: 'rcpt-1', filename: 'handwritten_bill_sample.jpg', status: 'Pending', previewUrl: '/sample_receipt1.jpg' }
-      ]
+      created_at: '2026-07-25 10:15 AM',
+      receipts: []
     }
   ]);
 
@@ -25,7 +23,9 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
   const [editedBatchName, setEditedBatchName] = useState<string>('');
   const [dragOver, setDragOver] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  
   const [uploadedFilesMap, setUploadedFilesMap] = useState<Record<string, File>>({});
+  const [receiptTransactionsMap, setReceiptTransactionsMap] = useState<Record<string, Transaction[]>>({});
 
   const activeBatch = batches.find(b => b.id === activeBatchId) || batches[0];
 
@@ -59,7 +59,7 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
     const newFilesMap: Record<string, File> = { ...uploadedFilesMap };
 
     const newReceipts: Receipt[] = files.map((file, idx) => {
-      const rcptId = `rcpt-${Date.now()}-${idx}`;
+      const rcptId = `rcpt-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 7)}`;
       newFilesMap[rcptId] = file;
       return {
         id: rcptId,
@@ -90,43 +90,44 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
 
   const handleTriggerExtraction = async () => {
     setIsProcessing(true);
+    const newTxMap: Record<string, Transaction[]> = { ...receiptTransactionsMap };
 
-    let liveExtractedTransactions: Transaction[] = [];
+    for (const receipt of activeBatch.receipts) {
+      const actualFile = uploadedFilesMap[receipt.id];
 
-    // Find the latest uploaded file or pending receipt
-    const pendingReceipt = activeBatch.receipts[0];
-    const actualFile = pendingReceipt ? uploadedFilesMap[pendingReceipt.id] : null;
+      if (actualFile) {
+        try {
+          const formData = new FormData();
+          formData.append('file', actualFile);
 
-    if (actualFile) {
-      try {
-        const formData = new FormData();
-        formData.append('file', actualFile);
+          const response = await fetch('http://localhost:8000/api/extract-receipt', {
+            method: 'POST',
+            body: formData,
+          });
 
-        const response = await fetch('http://localhost:8000/api/extract-receipt', {
-          method: 'POST',
-          body: formData,
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          if (data.transactions && data.transactions.length) {
-            liveExtractedTransactions = data.transactions.map((t: any, i: number) => ({
-              id: `tx-${Date.now()}-${i}`,
-              voucher_date: t.voucher_date || new Date().toISOString().split('T')[0],
-              voucher_type: t.voucher_type || 'Payment',
-              debit_ledger: t.debit_ledger || 'General Expense',
-              credit_ledger: t.credit_ledger || 'Cash Account',
-              amount: parseFloat(t.amount) || 0,
-              narration: t.narration || ''
-            }));
+          if (response.ok) {
+            const data = await response.json();
+            if (data.transactions && data.transactions.length) {
+              newTxMap[receipt.id] = data.transactions.map((t: any, i: number) => ({
+                id: `tx-${receipt.id}-${i}`,
+                voucher_date: t.voucher_date || '2083-03-15',
+                voucher_type: t.voucher_type || 'Journal',
+                entry_type: t.entry_type || (t.debit_amount ? 'Dr' : 'Cr'),
+                ledger_name: t.ledger_name || t.debit_ledger || t.credit_ledger || 'General Account',
+                debit_amount: parseFloat(t.debit_amount) || parseFloat(t.amount) || 0,
+                credit_amount: parseFloat(t.credit_amount) || 0,
+                narration: t.narration || ''
+              }));
+            }
           }
+        } catch (err) {
+          console.warn(`Extraction error for ${receipt.filename}:`, err);
         }
-      } catch (err) {
-        console.warn("FastAPI Extraction API error, falling back to simulated parser:", err);
       }
     }
 
-    // Update batch status
+    setReceiptTransactionsMap(newTxMap);
+
     const updatedBatch: ScanBatch = {
       ...activeBatch,
       receipts: activeBatch.receipts.map(r => ({ ...r, status: 'Extracted' as const }))
@@ -135,9 +136,14 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
     setBatches(batches.map(b => b.id === activeBatchId ? updatedBatch : b));
     setIsProcessing(false);
 
-    if (onSelectBatch) {
-      onSelectBatch(updatedBatch, liveExtractedTransactions.length ? liveExtractedTransactions : undefined);
-    }
+    const firstReceipt = updatedBatch.receipts[0];
+    const firstExtracted = firstReceipt ? newTxMap[firstReceipt.id] : undefined;
+    onSelectBatch(updatedBatch, firstReceipt, firstExtracted);
+  };
+
+  const handleReviewSingleReceipt = (receipt: Receipt) => {
+    const extractedForThisReceipt = receiptTransactionsMap[receipt.id];
+    onSelectBatch(activeBatch, receipt, extractedForThisReceipt);
   };
 
   return (
@@ -331,7 +337,7 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
                           <div style={{ display: 'flex', gap: '8px' }}>
                             <button 
                               className="btn btn-secondary btn-sm"
-                              onClick={() => onSelectBatch(activeBatch)}
+                              onClick={() => handleReviewSingleReceipt(rcpt)}
                             >
                               Review & Edit
                             </button>

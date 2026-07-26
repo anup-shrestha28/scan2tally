@@ -3,6 +3,7 @@ export type OrgStatus = 'Active' | 'Inactive';
 export type UserStatus = 'Active' | 'Inactive';
 export type BatchStatus = 'Active' | 'Archived';
 export type ReceiptStatus = 'Pending' | 'Processing' | 'Extracted' | 'Failed';
+export type EntryType = 'Dr' | 'Cr';
 
 export interface Organization {
   id: string;
@@ -45,8 +46,12 @@ export interface Transaction {
   id: string;
   voucher_date: string;
   voucher_type: string;
-  debit_ledger: string;
-  credit_ledger: string;
-  amount: number;
+  entry_type: EntryType; // 'Dr' or 'Cr'
+  ledger_name: string;
+  debit_ledger?: string; // Legacy compatibility
+  credit_ledger?: string; // Legacy compatibility
+  debit_amount: number;
+  credit_amount: number;
+  amount?: number; // Legacy compatibility
   narration: string;
 }

@@ -11,15 +11,17 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
   const [downloaded, setDownloaded] = useState<boolean>(false);
 
   const generateAndDownloadExcel = () => {
-    const headers = ['Voucher Date', 'Voucher Type', 'Debit Ledger', 'Credit Ledger', 'Amount', 'Narration'];
+    // Construct CSV / Excel content matching Tally Prime Journal Voucher Import Schema
+    const headers = ['Voucher Date', 'Voucher Type', 'Dr/Cr', 'Ledger Name', 'Debit Amount (Rs.)', 'Credit Amount (Rs.)', 'Narration'];
     
     const rows = transactions.map(t => [
       t.voucher_date,
       t.voucher_type,
-      `"${t.debit_ledger}"`,
-      `"${t.credit_ledger}"`,
-      t.amount,
-      `"${t.narration}"`
+      t.entry_type || (t.debit_amount ? 'Dr' : 'Cr'),
+      `"${t.ledger_name || t.debit_ledger || t.credit_ledger || ''}"`,
+      t.debit_amount || t.amount || 0,
+      t.credit_amount || 0,
+      `"${t.narration || ''}"`
     ]);
 
     const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
@@ -28,7 +30,7 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);
-    link.setAttribute('download', `Tally_Journal_Import_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `Tally_Goshwara_Import_${new Date().toISOString().split('T')[0]}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -36,8 +38,11 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
     setDownloaded(true);
   };
 
+  const totalDebit = transactions.reduce((acc, curr) => acc + (Number(curr.debit_amount) || Number(curr.amount) || 0), 0);
+  const totalCredit = transactions.reduce((acc, curr) => acc + (Number(curr.credit_amount) || 0), 0);
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', maxWidth: '1000px', margin: '0 auto' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', maxWidth: '1050px', margin: '0 auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
         <button className="btn btn-secondary btn-sm" onClick={onBack}>
           <ArrowLeft size={16} />
@@ -60,9 +65,9 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
           <FileSpreadsheet size={32} />
         </div>
 
-        <h2 style={{ fontSize: '1.5rem', fontWeight: 700 }}>Tally Excel File Ready</h2>
-        <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: '4px', maxWidth: '500px', margin: '4px auto 24px auto' }}>
-          Your extracted handwritten receipts have been validated and formatted into a Tally-compatible spreadsheet ready for 1-click import into Tally Prime.
+        <h2 style={{ fontSize: '1.5rem', fontWeight: 700 }}>Tally Goshwara Excel File Ready</h2>
+        <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: '4px', maxWidth: '540px', margin: '4px auto 24px auto' }}>
+          Your extracted handwritten voucher line items have been formatted into a Tally-compatible spreadsheet ready for 1-click import into Tally Prime.
         </p>
 
         <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
@@ -85,19 +90,27 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
       </div>
 
       <div className="card">
-        <h3 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '16px' }}>
-          Tally Import File Preview ({transactions.length} rows)
-        </h3>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+          <h3 style={{ fontSize: '1.1rem', fontWeight: 600 }}>
+            Tally Import File Preview ({transactions.length} rows)
+          </h3>
+
+          <div style={{ display: 'flex', gap: '16px', fontSize: '0.875rem' }}>
+            <span>Total Debit: <strong style={{ color: '#818cf8' }}>Rs. {totalDebit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong></span>
+            <span>Total Credit: <strong style={{ color: '#34d399' }}>Rs. {totalCredit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong></span>
+          </div>
+        </div>
 
         <div className="table-container">
           <table className="custom-table">
             <thead>
               <tr>
-                <th>Voucher Date</th>
-                <th>Voucher Type</th>
-                <th>Debit Ledger</th>
-                <th>Credit Ledger</th>
-                <th>Amount (Rs.)</th>
+                <th>Date</th>
+                <th>Type</th>
+                <th>Dr/Cr</th>
+                <th>Ledger Name</th>
+                <th style={{ textAlign: 'right' }}>Debit (Rs.)</th>
+                <th style={{ textAlign: 'right' }}>Credit (Rs.)</th>
                 <th>Narration</th>
               </tr>
             </thead>
@@ -106,10 +119,17 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
                 <tr key={tx.id}>
                   <td>{tx.voucher_date}</td>
                   <td><span className="status-pill status-processing">{tx.voucher_type}</span></td>
-                  <td style={{ fontWeight: 600 }}>{tx.debit_ledger}</td>
-                  <td>{tx.credit_ledger}</td>
-                  <td style={{ fontWeight: 700, color: 'var(--primary)' }}>
-                    Rs. {Number(tx.amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                  <td>
+                    <span className={`status-pill ${tx.entry_type === 'Dr' ? 'status-processing' : 'status-extracted'}`}>
+                      {tx.entry_type || 'Dr'}
+                    </span>
+                  </td>
+                  <td style={{ fontWeight: 600 }}>{tx.ledger_name || tx.debit_ledger || tx.credit_ledger || ''}</td>
+                  <td style={{ textAlign: 'right', color: '#818cf8', fontWeight: tx.debit_amount ? 600 : 400 }}>
+                    {tx.debit_amount ? `Rs. ${Number(tx.debit_amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '-'}
+                  </td>
+                  <td style={{ textAlign: 'right', color: '#34d399', fontWeight: tx.credit_amount ? 600 : 400 }}>
+                    {tx.credit_amount ? `Rs. ${Number(tx.credit_amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : '-'}
                   </td>
                   <td style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>{tx.narration}</td>
                 </tr>

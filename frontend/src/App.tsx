@@ -5,7 +5,7 @@ import SuperAdminDashboard from './components/SuperAdminDashboard';
 import BatchWorkspace from './components/BatchWorkspace';
 import SideBySideReviewer from './components/SideBySideReviewer';
 import ExcelExporter from './components/ExcelExporter';
-import { User, ScanBatch, Transaction } from './types';
+import { User, ScanBatch, Receipt, Transaction } from './types';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>({
@@ -20,6 +20,7 @@ export default function App() {
 
   const [currentView, setCurrentView] = useState<'batches' | 'reviewer' | 'exporter'>('batches');
   const [activeBatch, setActiveBatch] = useState<ScanBatch | null>(null);
+  const [selectedReceipt, setSelectedReceipt] = useState<Receipt | null>(null);
   const [liveExtractedTransactions, setLiveExtractedTransactions] = useState<Transaction[]>([]);
   const [activeTransactions, setActiveTransactions] = useState<Transaction[]>([]);
 
@@ -32,11 +33,20 @@ export default function App() {
     setCurrentUser(null);
   };
 
-  const handleSelectBatch = (batch: ScanBatch, extractedTx?: Transaction[]) => {
+  const handleSelectBatch = (batch: ScanBatch, receipt?: Receipt, extractedTx?: Transaction[]) => {
     setActiveBatch(batch);
+    if (receipt) {
+      setSelectedReceipt(receipt);
+    } else if (batch.receipts.length) {
+      setSelectedReceipt(batch.receipts[0]);
+    }
+
     if (extractedTx) {
       setLiveExtractedTransactions(extractedTx);
+    } else {
+      setLiveExtractedTransactions([]);
     }
+    
     setCurrentView('reviewer');
   };
 
@@ -62,6 +72,7 @@ export default function App() {
         ) : currentView === 'reviewer' ? (
           <SideBySideReviewer 
             batch={activeBatch} 
+            selectedReceipt={selectedReceipt}
             initialTransactions={liveExtractedTransactions}
             onBack={() => setCurrentView('batches')} 
             onExportExcel={handleExportExcel} 
