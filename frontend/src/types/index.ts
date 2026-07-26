@@ -44,6 +44,7 @@ export interface ScanBatch {
 
 export interface Transaction {
   id: string;
+  receipt_id?: string;
   voucher_date: string;
   voucher_type: string;
   entry_type: EntryType; // 'Dr' or 'Cr'

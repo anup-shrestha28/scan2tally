@@ -23,6 +23,7 @@ export default function App() {
   const [selectedReceipt, setSelectedReceipt] = useState<Receipt | null>(null);
   const [liveExtractedTransactions, setLiveExtractedTransactions] = useState<Transaction[]>([]);
   const [activeTransactions, setActiveTransactions] = useState<Transaction[]>([]);
+  const [allReceiptTransactions, setAllReceiptTransactions] = useState<Record<string, Transaction[]>>({});
   const [isDark, setIsDark] = useState<boolean>(true);
 
   useEffect(() => {
@@ -38,7 +39,7 @@ export default function App() {
     setCurrentUser(null);
   };
 
-  const handleSelectBatch = (batch: ScanBatch, receipt?: Receipt, extractedTx?: Transaction[]) => {
+  const handleSelectBatch = (batch: ScanBatch, receipt?: Receipt, extractedTx?: Transaction[], txMap?: Record<string, Transaction[]>) => {
     setActiveBatch(batch);
     if (receipt) {
       setSelectedReceipt(receipt);
@@ -50,6 +51,10 @@ export default function App() {
       setLiveExtractedTransactions(extractedTx);
     } else {
       setLiveExtractedTransactions([]);
+    }
+
+    if (txMap) {
+      setAllReceiptTransactions(txMap);
     }
     
     setCurrentView('reviewer');
@@ -79,6 +84,7 @@ export default function App() {
             batch={activeBatch} 
             selectedReceipt={selectedReceipt}
             initialTransactions={liveExtractedTransactions}
+            allReceiptTransactions={allReceiptTransactions}
             onBack={() => setCurrentView('batches')} 
             onExportExcel={handleExportExcel} 
           />

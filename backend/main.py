@@ -17,7 +17,7 @@ import cv2
 from dotenv import load_dotenv
 
 # Load environment variables
-load_dotenv()
+load_dotenv(override=True)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
@@ -71,6 +71,7 @@ class TransactionItem(BaseModel):
     narration: Optional[str] = ""
 
 def preprocess_image_with_opencv(image_bytes: bytes) -> bytes:
+    """Kept for reference but not used for AI extraction - OpenCV grayscale conversion hurts OCR quality."""
     np_arr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
     
@@ -143,19 +144,15 @@ async def extract_receipt(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Only image files (JPG, PNG, WEBP) and PDFs are supported.")
 
     raw_bytes = await file.read()
-    
-    try:
-        processed_bytes = preprocess_image_with_opencv(raw_bytes)
-    except Exception as e:
-        print(f"OpenCV Preprocessing Warning: {e}")
-        processed_bytes = raw_bytes
 
+    # Send original image bytes directly to AI — OpenCV grayscale conversion hurts OCR accuracy
     extracted_transactions = []
     error_msg = None
 
     prompt = """
     You are an expert Nepalese Accounting OCR assistant specialized in reading handwritten Goshwara Vouchers (गोश्वरा भौचर).
     Examine this handwritten voucher image carefully and extract all Debit (Dr) and Credit (Cr) line items.
+    The image may be rotated sideways or upside down; please adjust and read it carefully regardless of its orientation.
 
     For each row in the voucher:
     - Determine if it is a Debit ("Dr") or Credit ("Cr") row.
@@ -190,12 +187,13 @@ async def extract_receipt(file: UploadFile = File(...)):
 
     # 1. Live OpenAI Extraction
     if openai_available:
+        print(f"🤖 Sending image to OpenAI GPT-4o... (size: {len(raw_bytes)} bytes)")
         try:
-            base64_image = base64.b64encode(processed_bytes).decode('utf-8')
+            base64_image = base64.b64encode(raw_bytes).decode('utf-8')
             media_type = file.content_type if file.content_type.startswith("image/") else "image/jpeg"
 
             response = openai_client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-4o",
                 response_format={"type": "json_object"},
                 messages=[
                     {
@@ -212,28 +210,35 @@ async def extract_receipt(file: UploadFile = File(...)):
                         ]
                     }
                 ],
-                max_tokens=1500
+                max_tokens=2000
             )
 
             raw_response = response.choices[0].message.content.strip()
+            print(f"📥 OpenAI raw response:\n{raw_response}")
             parsed_json = json.loads(raw_response)
             
             if isinstance(parsed_json, dict) and "transactions" in parsed_json:
                 extracted_transactions = parsed_json["transactions"]
             elif isinstance(parsed_json, list):
                 extracted_transactions = parsed_json
+            
+            print(f"✅ Extracted {len(extracted_transactions)} transactions from OpenAI")
         except Exception as err:
             error_msg = f"OpenAI Vision Extraction Exception: {err}"
-            print(error_msg)
+            print(f"❌ {error_msg}")
+    else:
+        print("⚠️ OpenAI not available (key missing or invalid)")
 
     # 2. Live Gemini Extraction
     if not extracted_transactions and genai_available:
+        print(f"🤖 Falling back to Gemini Vision...")
         try:
             import google.generativeai as genai
-            pil_img = Image.open(io.BytesIO(processed_bytes))
+            pil_img = Image.open(io.BytesIO(raw_bytes))
             model = genai.GenerativeModel('gemini-1.5-flash')
             response = model.generate_content([prompt, pil_img])
             raw_text = response.text.strip()
+            print(f"📥 Gemini raw response:\n{raw_text}")
             cleaned_text = re.sub(r'^```json\s*', '', raw_text)
             cleaned_text = re.sub(r'\s*```$', '', cleaned_text)
             parsed_json = json.loads(cleaned_text)
@@ -241,15 +246,20 @@ async def extract_receipt(file: UploadFile = File(...)):
                 extracted_transactions = parsed_json["transactions"]
             elif isinstance(parsed_json, list):
                 extracted_transactions = parsed_json
+            print(f"✅ Extracted {len(extracted_transactions)} transactions from Gemini")
         except Exception as err:
             error_msg = f"Gemini Extraction Exception: {err}"
-            print(error_msg)
+            print(f"❌ {error_msg}")
 
     # 3. Goshwara Accounting Classification Engine (offline demo fallback only —
     # never used once a real Vision AI engine is configured, so genuine
     # zero-result extractions aren't silently replaced with fake demo data)
     if not extracted_transactions and not openai_available and not genai_available:
         extracted_transactions = classify_voucher_image_content(raw_bytes, file.filename)
+        if extracted_transactions:
+            print(f"📋 Using demo classification engine: {len(extracted_transactions)} rows")
+
+    print(f"🔚 Final result: {len(extracted_transactions)} transactions, error={error_msg}")
 
     return {
         "filename": file.filename,

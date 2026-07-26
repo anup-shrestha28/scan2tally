@@ -4,7 +4,7 @@ import { ScanBatch, Receipt, UserRole, Transaction } from '../types';
 
 interface BatchWorkspaceProps {
   userRole: UserRole;
-  onSelectBatch: (batch: ScanBatch, selectedReceipt?: Receipt, extractedTx?: Transaction[]) => void;
+  onSelectBatch: (batch: ScanBatch, selectedReceipt?: Receipt, extractedTx?: Transaction[], txMap?: Record<string, Transaction[]>) => void;
 }
 
 export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspaceProps) {
@@ -170,13 +170,17 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
     // successfully extracted receipts are left untouched.
     const targets = activeBatch.receipts.filter(r => r.status === 'Pending' || r.status === 'Failed');
     let firstSuccess: { receipt: Receipt; transactions: Transaction[] } | null = null;
+    const updatedTxMap: Record<string, Transaction[]> = { ...receiptTransactionsMap };
 
     for (const receipt of targets) {
       // Sequential, not Promise.all: a failure on one receipt must not
       // abort or interfere with the others (US-26).
       const result = await extractSingleReceipt(activeBatch.id, receipt);
-      if (result && !firstSuccess) {
-        firstSuccess = { receipt, transactions: result };
+      if (result) {
+        updatedTxMap[receipt.id] = result;
+        if (!firstSuccess) {
+          firstSuccess = { receipt, transactions: result };
+        }
       }
     }
 
@@ -192,7 +196,7 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
         ...activeBatch,
         receipts: activeBatch.receipts.map(r => r.id === updatedReceipt.id ? updatedReceipt : r)
       };
-      onSelectBatch(updatedBatch, updatedReceipt, firstSuccess.transactions);
+      onSelectBatch(updatedBatch, updatedReceipt, firstSuccess.transactions, updatedTxMap);
     }
   };
 
@@ -202,7 +206,7 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
 
   const handleReviewSingleReceipt = (receipt: Receipt) => {
     const extractedForThisReceipt = receiptTransactionsMap[receipt.id];
-    onSelectBatch(activeBatch, receipt, extractedForThisReceipt);
+    onSelectBatch(activeBatch, receipt, extractedForThisReceipt, receiptTransactionsMap);
   };
 
   return (
