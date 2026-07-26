@@ -8,6 +8,28 @@ interface ExcelExporterProps {
   onBack: () => void;
 }
 
+const normalizeNarration = (raw: string | undefined): string => {
+  const baseStatic = 'Being Expenses paid via cheque no.';
+  if (!raw) return baseStatic;
+  
+  // Remove surrounding parentheses and trailing/leading dots
+  const cleaned = raw.trim().replace(/^[\(\)\.]+|[\(\)\.]+$/g, '').trim();
+  
+  // Try to find any sequence of digits that might be the cheque number
+  const chequeMatch = cleaned.match(/(?:cheque(?: no\.?)?\s*|no\.?\s*)(\d+)/i);
+  
+  if (chequeMatch) {
+    const chequeNo = chequeMatch[1];
+    return `${baseStatic} ${chequeNo}`;
+  }
+  
+  // If no digits found but the text includes words like cheque/expenses,
+  // or even if it's completely different, the user wants the static prefix.
+  // We'll just return the static prefix, perhaps appending any non-standard text if it looks completely different,
+  // but based on the prompt, it seems they just want it strictly static + cheque number if any.
+  return baseStatic;
+};
+
 export default function ExcelExporter({ transactions, onBack }: ExcelExporterProps) {
   const [downloaded, setDownloaded] = useState<boolean>(false);
 
@@ -37,11 +59,7 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
       const headerText = rawType === 'Journal' ? 'Journal Voucher' : rawType;
       const voucherNo = (groupTxs[0] as any)?.voucher_no || '';
       const voucherDate = groupTxs[0]?.voucher_date || '';
-      const defaultNarration = 'Being Expenses paid via cheque no.';
-      const isOldNarration = groupTxs[0]?.narration?.includes('(Being Expenses Recorded)') || groupTxs[0]?.narration?.includes('Being Expenses paid via cheque no');
-      const narration = isOldNarration 
-        ? defaultNarration 
-        : (groupTxs[0]?.narration || defaultNarration);
+      const narration = normalizeNarration(groupTxs[0]?.narration);
       
       // Row 1: Header
       const row1 = sheet.addRow([headerText, '', '', '', '', '']);
@@ -192,11 +210,7 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
             const headerText = rawType === 'Journal' ? 'Journal Voucher' : rawType;
             const voucherNo = (groupTxs[0] as any)?.voucher_no || '';
             const voucherDate = groupTxs[0]?.voucher_date || '';
-            const defaultNarration = 'Being Expenses paid via cheque no.';
-            const isOldNarration = groupTxs[0]?.narration?.includes('(Being Expenses Recorded)') || groupTxs[0]?.narration?.includes('Being Expenses paid via cheque no');
-            const narration = isOldNarration 
-              ? defaultNarration 
-              : (groupTxs[0]?.narration || defaultNarration);
+            const narration = normalizeNarration(groupTxs[0]?.narration);
 
             const grpTotalDr = groupTxs.reduce((sum, t) => sum + (Number(t.debit_amount) || Number(t.amount) || 0), 0);
             const grpTotalCr = groupTxs.reduce((sum, t) => sum + (Number(t.credit_amount) || 0), 0);
