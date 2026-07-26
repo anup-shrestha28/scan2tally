@@ -333,26 +333,30 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
               background: dragOver ? 'rgba(99, 102, 241, 0.05)' : 'var(--bg-card)',
               textAlign: 'center',
               padding: '36px',
-              cursor: 'pointer',
-              position: 'relative'
+              cursor: isProcessing ? 'not-allowed' : 'pointer',
+              position: 'relative',
+              opacity: isProcessing ? 0.5 : 1,
+              pointerEvents: isProcessing ? 'none' : 'auto'
             }}
-            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragOver={(e) => { e.preventDefault(); if (!isProcessing) setDragOver(true); }}
             onDragLeave={() => setDragOver(false)}
             onDrop={(e) => {
               e.preventDefault();
               setDragOver(false);
+              if (isProcessing) return;
               handleFileUpload({ target: { files: e.dataTransfer.files } });
             }}
           >
-            <input 
-              type="file" 
-              multiple 
-              accept="image/*,.pdf" 
+            <input
+              type="file"
+              multiple
+              accept="image/*,.pdf"
               onChange={handleFileUpload}
+              disabled={isProcessing}
               style={{
                 position: 'absolute',
                 top: 0, left: 0, width: '100%', height: '100%',
-                opacity: 0, cursor: 'pointer'
+                opacity: 0, cursor: isProcessing ? 'not-allowed' : 'pointer'
               }}
             />
             <div style={{
@@ -366,9 +370,11 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
               <UploadCloud size={28} />
             </div>
 
-            <h4 style={{ fontSize: '1.1rem', fontWeight: 600 }}>Drag & Drop Handwritten Bill Receipts Here</h4>
+            <h4 style={{ fontSize: '1.1rem', fontWeight: 600 }}>
+              {isProcessing ? 'Extraction in Progress — Uploads Locked' : 'Drag & Drop Handwritten Bill Receipts Here'}
+            </h4>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem', marginTop: '4px' }}>
-              Supports JPG, PNG, WEBP, or PDF paper voucher scans
+              {isProcessing ? 'Please wait for the current batch to finish processing before adding more receipts.' : 'Supports JPG, PNG, WEBP, or PDF paper voucher scans'}
             </p>
             <div style={{ marginTop: '12px', display: 'flex', gap: '8px', justifyContent: 'center' }}>
               <span className="btn btn-secondary btn-sm">
@@ -446,6 +452,7 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
                                 className="btn btn-danger btn-sm"
                                 onClick={() => handleDeleteReceipt(rcpt.id)}
                                 title="Delete Pending Receipt"
+                                disabled={isProcessing}
                               >
                                 <Trash2 size={14} />
                               </button>
