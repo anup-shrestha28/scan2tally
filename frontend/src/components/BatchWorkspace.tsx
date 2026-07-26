@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FolderPlus, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2 } from 'lucide-react';
+import { FolderPlus, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, RotateCw } from 'lucide-react';
 import { ScanBatch, Receipt, UserRole, Transaction } from '../types';
 
 interface BatchWorkspaceProps {
@@ -29,6 +29,7 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
   const [receiptTransactionsMap, setReceiptTransactionsMap] = useState<Record<string, Transaction[]>>({});
 
   const activeBatch = batches.find(b => b.id === activeBatchId) || batches[0];
+  const extractableCount = activeBatch.receipts.filter(r => r.status === 'Pending' || r.status === 'Failed').length;
 
   const handleCreateBatch = () => {
     const todayStr = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
@@ -98,62 +99,105 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
     }));
   };
 
+  const updateReceipt = (batchId: string, receiptId: string, patch: Partial<Receipt>) => {
+    setBatches(prev => prev.map(b => {
+      if (b.id !== batchId) return b;
+      return { ...b, receipts: b.receipts.map(r => r.id === receiptId ? { ...r, ...patch } : r) };
+    }));
+  };
+
+  const extractSingleReceipt = async (batchId: string, receipt: Receipt): Promise<Transaction[] | null> => {
+    const actualFile = uploadedFilesMap[receipt.id];
+
+    if (!actualFile) {
+      updateReceipt(batchId, receipt.id, { status: 'Failed', error_message: 'Original file is no longer available in this session.' });
+      return null;
+    }
+
+    updateReceipt(batchId, receipt.id, { status: 'Processing', error_message: undefined });
+
+    try {
+      const formData = new FormData();
+      formData.append('file', actualFile);
+
+      const response = await fetch('http://localhost:8000/api/extract-receipt', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        updateReceipt(batchId, receipt.id, { status: 'Failed', error_message: `Extraction server responded with status ${response.status}.` });
+        return null;
+      }
+
+      const data = await response.json();
+
+      if (data.error || !data.transactions || !data.transactions.length) {
+        updateReceipt(batchId, receipt.id, {
+          status: 'Failed',
+          error_message: data.error || 'No transaction data could be extracted from this receipt.'
+        });
+        return null;
+      }
+
+      const mappedTx: Transaction[] = data.transactions.map((t: any, i: number) => ({
+        id: `tx-${receipt.id}-${i}`,
+        voucher_date: t.voucher_date || '2083-03-15',
+        voucher_type: t.voucher_type || 'Journal',
+        entry_type: t.entry_type || (t.debit_amount ? 'Dr' : 'Cr'),
+        ledger_name: t.ledger_name || t.debit_ledger || t.credit_ledger || 'General Account',
+        debit_amount: parseFloat(t.debit_amount) || parseFloat(t.amount) || 0,
+        credit_amount: parseFloat(t.credit_amount) || 0,
+        narration: t.narration || ''
+      }));
+
+      setReceiptTransactionsMap(prev => ({ ...prev, [receipt.id]: mappedTx }));
+      updateReceipt(batchId, receipt.id, { status: 'Extracted', error_message: undefined });
+      return mappedTx;
+    } catch (err: any) {
+      updateReceipt(batchId, receipt.id, {
+        status: 'Failed',
+        error_message: err?.message || 'Network error while contacting the extraction service.'
+      });
+      return null;
+    }
+  };
+
   const handleTriggerExtraction = async () => {
     setIsProcessing(true);
-    const newTxMap: Record<string, Transaction[]> = { ...receiptTransactionsMap };
 
-    for (const receipt of activeBatch.receipts) {
-      const actualFile = uploadedFilesMap[receipt.id];
+    // US-25: only process receipts that are new or previously failed —
+    // successfully extracted receipts are left untouched.
+    const targets = activeBatch.receipts.filter(r => r.status === 'Pending' || r.status === 'Failed');
+    let firstSuccess: { receipt: Receipt; transactions: Transaction[] } | null = null;
 
-      if (actualFile) {
-        try {
-          const formData = new FormData();
-          formData.append('file', actualFile);
-
-          const response = await fetch('http://localhost:8000/api/extract-receipt', {
-            method: 'POST',
-            body: formData,
-          });
-
-          if (response.ok) {
-            const data = await response.json();
-            
-            if (data.error) {
-              alert(`Extraction Failed for ${receipt.filename}:\n\n${data.error}\n\nPlease check your API keys or quota.`);
-            }
-
-            if (data.transactions && data.transactions.length) {
-              newTxMap[receipt.id] = data.transactions.map((t: any, i: number) => ({
-                id: `tx-${receipt.id}-${i}`,
-                voucher_date: t.voucher_date || '2083-03-15',
-                voucher_type: t.voucher_type || 'Journal',
-                entry_type: t.entry_type || (t.debit_amount ? 'Dr' : 'Cr'),
-                ledger_name: t.ledger_name || t.debit_ledger || t.credit_ledger || 'General Account',
-                debit_amount: parseFloat(t.debit_amount) || parseFloat(t.amount) || 0,
-                credit_amount: parseFloat(t.credit_amount) || 0,
-                narration: t.narration || ''
-              }));
-            }
-          }
-        } catch (err) {
-          console.warn(`Extraction error for ${receipt.filename}:`, err);
-        }
+    for (const receipt of targets) {
+      // Sequential, not Promise.all: a failure on one receipt must not
+      // abort or interfere with the others (US-26).
+      const result = await extractSingleReceipt(activeBatch.id, receipt);
+      if (result && !firstSuccess) {
+        firstSuccess = { receipt, transactions: result };
       }
     }
 
-    setReceiptTransactionsMap(newTxMap);
-
-    const updatedBatch: ScanBatch = {
-      ...activeBatch,
-      receipts: activeBatch.receipts.map(r => ({ ...r, status: 'Extracted' as const }))
-    };
-
-    setBatches(batches.map(b => b.id === activeBatchId ? updatedBatch : b));
     setIsProcessing(false);
 
-    const firstReceipt = updatedBatch.receipts[0];
-    const firstExtracted = firstReceipt ? newTxMap[firstReceipt.id] : undefined;
-    onSelectBatch(updatedBatch, firstReceipt, firstExtracted);
+    // Jump straight into the reviewer for the first successfully extracted
+    // receipt so the user doesn't have to click "Review & Edit" manually.
+    // If every receipt failed, stay on the workspace so the Failed/Retry
+    // rows are visible instead of navigating to an empty reviewer.
+    if (firstSuccess) {
+      const updatedReceipt: Receipt = { ...firstSuccess.receipt, status: 'Extracted', error_message: undefined };
+      const updatedBatch: ScanBatch = {
+        ...activeBatch,
+        receipts: activeBatch.receipts.map(r => r.id === updatedReceipt.id ? updatedReceipt : r)
+      };
+      onSelectBatch(updatedBatch, updatedReceipt, firstSuccess.transactions);
+    }
+  };
+
+  const handleRetryReceipt = (receipt: Receipt) => {
+    extractSingleReceipt(activeBatchId, receipt);
   };
 
   const handleReviewSingleReceipt = (receipt: Receipt) => {
@@ -259,10 +303,10 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
               </p>
             </div>
 
-            <button 
-              className="btn btn-primary" 
+            <button
+              className="btn btn-primary"
               onClick={handleTriggerExtraction}
-              disabled={!activeBatch.receipts.length || isProcessing}
+              disabled={!extractableCount || isProcessing}
             >
               {isProcessing ? (
                 <>
@@ -272,7 +316,7 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
               ) : (
                 <>
                   <Play size={16} />
-                  Run Vision AI Extraction
+                  Run Vision AI Extraction{extractableCount ? ` (${extractableCount})` : ''}
                 </>
               )}
             </button>
@@ -356,25 +400,45 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
                           {rcpt.filename}
                         </td>
                         <td>
-                          <span className={`status-pill ${
-                            rcpt.status === 'Extracted' ? 'status-extracted' :
-                            rcpt.status === 'Processing' ? 'status-processing' : 'status-pending'
-                          }`}>
-                            {rcpt.status === 'Extracted' ? <CheckCircle2 size={12} /> : <Clock size={12} />}
-                            {rcpt.status}
-                          </span>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                            <span className={`status-pill ${
+                              rcpt.status === 'Extracted' ? 'status-extracted' :
+                              rcpt.status === 'Processing' ? 'status-processing' :
+                              rcpt.status === 'Failed' ? 'status-failed' : 'status-pending'
+                            }`}>
+                              {rcpt.status === 'Extracted' ? <CheckCircle2 size={12} /> :
+                               rcpt.status === 'Failed' ? <AlertCircle size={12} /> : <Clock size={12} />}
+                              {rcpt.status}
+                            </span>
+                            {rcpt.status === 'Failed' && rcpt.error_message && (
+                              <span style={{ fontSize: '0.72rem', color: '#f43f5e', maxWidth: '260px' }}>
+                                {rcpt.error_message}
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td>
                           <div style={{ display: 'flex', gap: '8px' }}>
-                            <button 
+                            <button
                               className="btn btn-secondary btn-sm"
                               onClick={() => handleReviewSingleReceipt(rcpt)}
                             >
                               Review & Edit
                             </button>
 
+                            {rcpt.status === 'Failed' && (
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => handleRetryReceipt(rcpt)}
+                                title="Retry Extraction"
+                                disabled={isProcessing}
+                              >
+                                <RotateCw size={13} /> Retry
+                              </button>
+                            )}
+
                             {rcpt.status === 'Pending' && (
-                              <button 
+                              <button
                                 className="btn btn-danger btn-sm"
                                 onClick={() => handleDeleteReceipt(rcpt.id)}
                                 title="Delete Pending Receipt"

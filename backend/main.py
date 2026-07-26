@@ -151,6 +151,7 @@ async def extract_receipt(file: UploadFile = File(...)):
         processed_bytes = raw_bytes
 
     extracted_transactions = []
+    error_msg = None
 
     prompt = """
     You are an expert Nepalese Accounting OCR assistant specialized in reading handwritten Goshwara Vouchers (गोश्वरा भौचर).
@@ -244,8 +245,10 @@ async def extract_receipt(file: UploadFile = File(...)):
             error_msg = f"Gemini Extraction Exception: {err}"
             print(error_msg)
 
-    # 3. Goshwara Accounting Classification Engine
-    if not extracted_transactions:
+    # 3. Goshwara Accounting Classification Engine (offline demo fallback only —
+    # never used once a real Vision AI engine is configured, so genuine
+    # zero-result extractions aren't silently replaced with fake demo data)
+    if not extracted_transactions and not openai_available and not genai_available:
         extracted_transactions = classify_voucher_image_content(raw_bytes, file.filename)
 
     return {
