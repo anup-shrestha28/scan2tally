@@ -192,6 +192,13 @@ export default function SideBySideReviewer({
   const totalCredit = transactions.reduce((acc, curr) => acc + (Number(curr.credit_amount) || 0), 0);
   const isBalanced = Math.abs(totalDebit - totalCredit) < 0.05;
 
+  // Narration is shared across all rows in a receipt
+  const narration = transactions[0]?.narration || 'Being Expenses paid via cheque no.';
+
+  const handleUpdateNarration = (value: string) => {
+    setTransactions(prev => prev.map(t => ({ ...t, narration: value })));
+  };
+
   const hasPrev = currentIndex > 0;
   const hasNext = currentIndex < receipts.length - 1;
 
@@ -463,6 +470,19 @@ export default function SideBySideReviewer({
                   </span>
                 </div>
               </div>
+            </div>
+
+            {/* Narration */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 4px 0 4px' }}>
+              <label style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-muted)', whiteSpace: 'nowrap', minWidth: '70px' }}>Narration:</label>
+              <input
+                type="text"
+                className="form-input"
+                style={{ flex: 1, padding: '6px 10px', fontSize: '0.85rem', fontStyle: 'italic' }}
+                value={narration}
+                onChange={(e) => handleUpdateNarration(e.target.value)}
+                placeholder="Being Expenses paid via cheque no."
+              />
             </div>
           </div>
         </div>
