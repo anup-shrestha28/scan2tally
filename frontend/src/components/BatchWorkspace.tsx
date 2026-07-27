@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { FolderPlus, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw } from 'lucide-react';
 import { ScanBatch, Receipt, UserRole, Transaction, EntryType } from '../types';
 
@@ -46,6 +46,17 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
   const activeBatch = batches.find(b => b.id === activeBatchId) || batches[0];
   const extractableCount = activeBatch.receipts.filter(r => r.status === 'Pending' || r.status === 'Failed').length;
   const hasFailedExtraction = activeBatch.receipts.some(r => r.status === 'Failed');
+
+  useEffect(() => {
+    if (!deletingBatchId) return;
+
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    return () => {
+      document.body.style.overflow = originalOverflow;
+    };
+  }, [deletingBatchId]);
 
   const handleCreateBatch = () => {
     const todayStr = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
@@ -279,23 +290,13 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div>
-          <h2 style={{ fontSize: '1.5rem', fontWeight: 700 }}>Scan Batch Workspace</h2>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>
-            Upload handwritten paper bill receipts and trigger Vision AI extraction
-          </p>
-        </div>
-
-        <button className="btn btn-primary" onClick={handleCreateBatch}>
-          <FolderPlus size={18} />
-          Create New Scan Batch
-        </button>
-      </div>
-
       <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: '24px' }}>
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '12px', minHeight: 'calc(100vh - 120px)', position: 'sticky', top: '24px', alignSelf: 'start' }}>
           <h3 style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text-muted)' }}>Scan Batches</h3>
+          <button className="btn btn-primary" onClick={handleCreateBatch} style={{ width: '100%', padding: '12px 16px', fontSize: '0.9rem' }}>
+            <FolderPlus size={18} />
+            Create New Scan Batch
+          </button>
           
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
             {batches.map(b => (
@@ -352,7 +353,11 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
                         className="btn btn-danger btn-sm" 
                         onClick={(e) => {
                           e.stopPropagation();
-                          setDeletingBatchId(b.id);
+                          if (b.receipts.length === 0) {
+                            handleDeleteBatch(b.id);
+                          } else {
+                            setDeletingBatchId(b.id);
+                          }
                         }}
                         title="Delete Batch"
                       >
@@ -446,7 +451,7 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
             </p>
             <div style={{ marginTop: '12px', display: 'flex', gap: '8px', justifyContent: 'center' }}>
               <span className="btn btn-secondary btn-sm">
-                <Camera size={14} /> Snap Photo / Browse Files
+                <Camera size={14} /> Upload Photo / Browse Files
               </span>
             </div>
           </div>
@@ -473,9 +478,11 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
                   <tbody>
                     {activeBatch.receipts.map(rcpt => (
                       <tr key={rcpt.id}>
-                        <td style={{ display: 'flex', alignItems: 'center', gap: '10px', fontWeight: 500 }}>
-                          <FileText size={16} color="var(--primary)" />
-                          {rcpt.filename}
+                        <td style={{ fontWeight: 500 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <FileText size={16} color="var(--primary)" />
+                            {rcpt.filename}
+                          </div>
                         </td>
                         <td>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
