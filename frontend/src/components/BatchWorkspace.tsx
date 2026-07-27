@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { FolderPlus, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, RotateCw, RotateCcw } from 'lucide-react';
-import { ScanBatch, Receipt, UserRole, Transaction } from '../types';
+import { ScanBatch, Receipt, UserRole, Transaction, EntryType } from '../types';
 
 const NOT_JOURNAL_ENTRY_ERROR = 'The uploaded image is not a journal entry. Please check and try again.';
 
@@ -173,16 +173,30 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
         return null;
       }
 
-      const mappedTx: Transaction[] = data.transactions.map((t: any, i: number) => ({
-        id: `tx-${receipt.id}-${i}`,
-        voucher_date: t.voucher_date || '2083-03-15',
-        voucher_type: t.voucher_type || 'Journal',
-        entry_type: t.entry_type || (t.debit_amount ? 'Dr' : 'Cr'),
-        ledger_name: t.ledger_name || t.debit_ledger || t.credit_ledger || 'General Account',
-        debit_amount: parseFloat(t.debit_amount) || parseFloat(t.amount) || 0,
-        credit_amount: parseFloat(t.credit_amount) || 0,
-        narration: t.narration || ''
-      }));
+      // Single normalization point for the wire format. Downstream code only
+      // ever reads debit_amount / credit_amount — the legacy flat `amount`
+      // field is resolved onto the correct side here and never propagated,
+      // so row values and running totals can't disagree later.
+      const mappedTx: Transaction[] = data.transactions.map((t: any, i: number) => {
+        const debit = parseFloat(t.debit_amount) || 0;
+        const credit = parseFloat(t.credit_amount) || 0;
+        const legacy = parseFloat(t.amount) || 0;
+        const entryType: EntryType =
+          t.entry_type === 'Dr' || t.entry_type === 'Cr'
+            ? t.entry_type
+            : (debit || (legacy && !credit)) ? 'Dr' : 'Cr';
+
+        return {
+          id: `tx-${receipt.id}-${i}`,
+          voucher_date: t.voucher_date || '2083-03-15',
+          voucher_type: t.voucher_type || 'Journal',
+          entry_type: entryType,
+          ledger_name: t.ledger_name || t.debit_ledger || t.credit_ledger || 'General Account',
+          debit_amount: entryType === 'Dr' ? (debit || legacy) : 0,
+          credit_amount: entryType === 'Cr' ? (credit || legacy) : 0,
+          narration: t.narration || ''
+        };
+      });
 
       setReceiptTransactionsMap(prev => ({ ...prev, [receipt.id]: mappedTx }));
       updateReceipt(batchId, receipt.id, { status: 'Extracted', error_message: undefined });

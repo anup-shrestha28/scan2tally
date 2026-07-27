@@ -51,8 +51,10 @@ export interface Transaction {
   ledger_name: string;
   debit_ledger?: string; // Legacy compatibility
   credit_ledger?: string; // Legacy compatibility
+  // Single source of truth for money. A legacy flat `amount` may arrive on the
+  // wire, but it is resolved onto one of these two at ingestion (see
+  // BatchWorkspace) and never carried into app state.
   debit_amount: number;
   credit_amount: number;
-  amount?: number; // Legacy compatibility
   narration: string;
 }

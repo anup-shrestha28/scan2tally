@@ -315,15 +315,20 @@ def export_tally_excel(transactions: List[TransactionItem]):
 
     for idx, tx in enumerate(transactions, start=1):
         ledger = tx.ledger_name or tx.debit_ledger or tx.credit_ledger or ""
-        dr_cr = tx.entry_type or ("Dr" if tx.debit_amount else "Cr")
+        # Resolve the legacy flat `amount` onto whichever side the row belongs
+        # to, so the Dr/Cr marker, the amount column and the totals all agree.
+        legacy = tx.amount or 0
+        dr_cr = tx.entry_type or ("Dr" if (tx.debit_amount or (legacy and not tx.credit_amount)) else "Cr")
+        debit = (tx.debit_amount or legacy or 0) if dr_cr == "Dr" else 0
+        credit = (tx.credit_amount or legacy or 0) if dr_cr == "Cr" else 0
         row = [
             tx.voucher_date,
             tx.voucher_type,
             f"VCH-{idx:04d}",
             dr_cr,
             ledger,
-            tx.debit_amount or tx.amount or 0,
-            tx.credit_amount or 0,
+            debit,
+            credit,
             tx.narration
         ]
         ws.append(row)

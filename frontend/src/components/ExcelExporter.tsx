@@ -97,7 +97,7 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
       });
       
       // Total Row
-      const totalDr = groupTxs.reduce((sum, t) => sum + (Number(t.debit_amount) || Number(t.amount) || 0), 0);
+      const totalDr = groupTxs.reduce((sum, t) => sum + (Number(t.debit_amount) || 0), 0);
       const totalCr = groupTxs.reduce((sum, t) => sum + (Number(t.credit_amount) || 0), 0);
       
       const totalRow = sheet.addRow(['', '', '', '', formatAmt(totalDr), formatAmt(totalCr)]);
@@ -147,7 +147,7 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
     setDownloaded(true);
   };
 
-  const totalDebit = transactions.reduce((acc, curr) => acc + (Number(curr.debit_amount) || Number(curr.amount) || 0), 0);
+  const totalDebit = transactions.reduce((acc, curr) => acc + (Number(curr.debit_amount) || 0), 0);
   const totalCredit = transactions.reduce((acc, curr) => acc + (Number(curr.credit_amount) || 0), 0);
 
   return (
@@ -218,7 +218,7 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
             const voucherDate = groupTxs[0]?.voucher_date || '';
             const narration = normalizeNarration(groupTxs[0]?.narration);
 
-            const grpTotalDr = groupTxs.reduce((sum, t) => sum + (Number(t.debit_amount) || Number(t.amount) || 0), 0);
+            const grpTotalDr = groupTxs.reduce((sum, t) => sum + (Number(t.debit_amount) || 0), 0);
             const grpTotalCr = groupTxs.reduce((sum, t) => sum + (Number(t.credit_amount) || 0), 0);
 
             return (
