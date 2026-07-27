@@ -22,6 +22,27 @@ load_dotenv(override=True)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
+# Vision model, overridable without a code change. gpt-5.5 reads marginal /
+# low-resolution vouchers noticeably better than gpt-4o in side-by-side tests.
+OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5.5")
+
+
+def openai_sampling_params(model: str) -> dict:
+    """Per-model request params.
+
+    The two families disagree on both names and allowed values:
+      * gpt-4o accepts `max_tokens` and an explicit `temperature`.
+      * gpt-5.x requires `max_completion_tokens` and rejects any temperature
+        other than the default of 1 ("does not support 0.0 with this model").
+
+    Deterministic decoding is what we want for transcription, so temperature=0
+    is sent wherever it is actually permitted rather than assumed everywhere.
+    """
+    if model.startswith("gpt-5"):
+        return {"max_completion_tokens": 8000}
+    return {"max_tokens": 3000, "temperature": 0}
+
+
 # Check OpenAI Availability
 openai_available = False
 if OPENAI_API_KEY and OPENAI_API_KEY != "placeholder-openai-api-key":
@@ -29,7 +50,7 @@ if OPENAI_API_KEY and OPENAI_API_KEY != "placeholder-openai-api-key":
         from openai import OpenAI
         openai_client = OpenAI(api_key=OPENAI_API_KEY)
         openai_available = True
-        print("✅ OpenAI Vision AI engine activated!")
+        print(f"✅ OpenAI Vision AI engine activated! (model: {OPENAI_VISION_MODEL})")
     except Exception as e:
         print(f"Warning: Could not configure OpenAI: {e}")
 
@@ -77,6 +98,82 @@ def extraction_error_message(engine: str, err: Exception) -> str:
     if "'NoneType' object has no attribute 'strip'" in err_text:
         return INVALID_JOURNAL_IMAGE_ERROR
     return f"{engine} Extraction Exception: {err}"
+
+def _to_float(value) -> float:
+    """Tolerant numeric coercion — models sometimes return '14,408.35' as a string."""
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (ValueError, AttributeError):
+        return 0.0
+
+
+def read_stated_totals(parsed: dict) -> dict:
+    """Pull the voucher's own जम्मा totals out of a model response, if present."""
+    totals = {}
+    for key, out in (("stated_total_debit", "debit"), ("stated_total_credit", "credit")):
+        if parsed.get(key) is not None:
+            value = _to_float(parsed.get(key))
+            if value:
+                totals[out] = round(value, 2)
+    return totals
+
+
+def verify_against_stated_totals(transactions: List[dict], stated: dict) -> dict:
+    """Reconcile extracted line items against the voucher's printed जम्मा totals.
+
+    This only ever REPORTS. It deliberately does not adjust any amount: asking a
+    model to "fix" a known discrepancy makes it fabricate a plausible number on
+    an arbitrary row rather than re-read the misread one.
+
+    Note the limits of this check — a matching total does not prove the rows are
+    right, because two misread rows can cancel out (e.g. 920.70 + 11,690.00 sums
+    to the same as the correct 200.70 + 12,410.00). Treat agreement as "no error
+    detected", never as "verified correct".
+    """
+    computed_debit = round(sum(_to_float(t.get("debit_amount")) for t in transactions), 2)
+    computed_credit = round(sum(_to_float(t.get("credit_amount")) for t in transactions), 2)
+
+    result = {
+        "computed_debit": computed_debit,
+        "computed_credit": computed_credit,
+        "stated_debit": stated.get("debit"),
+        "stated_credit": stated.get("credit"),
+        "balanced": abs(computed_debit - computed_credit) < 0.005,
+        "checked_against_voucher": False,
+        "reconciles": None,
+        "warnings": [],
+    }
+
+    if not result["balanced"]:
+        result["warnings"].append(
+            f"Debit total ({computed_debit:,.2f}) does not equal credit total ({computed_credit:,.2f})."
+        )
+
+    # Tracked as a flag rather than inferred from the warning text, so rewording
+    # a user-facing message can never silently change the reconciliation verdict.
+    discrepancy_found = False
+    for side, computed in (("debit", computed_debit), ("credit", computed_credit)):
+        stated_value = stated.get(side)
+        if stated_value is None:
+            continue
+        result["checked_against_voucher"] = True
+        if abs(computed - stated_value) >= 0.005:
+            discrepancy_found = True
+            result["warnings"].append(
+                f"Extracted {side} rows sum to {computed:,.2f} but the voucher's "
+                f"जम्मा row states {stated_value:,.2f} "
+                f"(off by {computed - stated_value:+,.2f}). Please re-check the {side} amounts."
+            )
+
+    if result["checked_against_voucher"]:
+        result["reconciles"] = not discrepancy_found
+
+    return result
+
 
 def preprocess_image_with_opencv(image_bytes: bytes) -> bytes:
     """Kept for reference but not used for AI extraction - OpenCV grayscale conversion hurts OCR quality."""
@@ -136,7 +233,7 @@ def classify_voucher_image_content(image_bytes: bytes, filename: str) -> List[di
 
 @app.get("/api/health")
 def health_check():
-    active_engine = "OpenAI Vision (GPT-4o)" if openai_available else ("Gemini 1.5 Flash" if genai_available else "Goshwara Dr/Cr Accounting Engine")
+    active_engine = f"OpenAI Vision ({OPENAI_VISION_MODEL})" if openai_available else ("Gemini 1.5 Flash" if genai_available else "Goshwara Dr/Cr Accounting Engine")
     return {
         "status": "online",
         "service": "Scan2Tally FastAPI Server",
@@ -156,20 +253,36 @@ async def extract_receipt(file: UploadFile = File(...)):
     # Send original image bytes directly to AI — OpenCV grayscale conversion hurts OCR accuracy
     extracted_transactions = []
     error_msg = None
+    stated_totals = {}  # the voucher's own जम्मा row, when the engine could read it
 
     prompt = """
-    You are an expert Nepalese Accounting OCR assistant specialized in reading handwritten Goshwara Vouchers (गोश्वरा भौचर).
-    Examine this handwritten voucher image carefully and extract all Debit (Dr) and Credit (Cr) line items.
-    The image may be rotated sideways or upside down; please adjust and read it carefully regardless of its orientation.
+You are an expert Nepalese accounting OCR assistant reading a handwritten Goshwara Voucher (गोश्वरा भौचर).
+The image may be rotated sideways or upside down; read it in whatever orientation makes the text upright.
 
-    For each row in the voucher:
-    - Determine if it is a Debit ("Dr") or Credit ("Cr") row.
-    - Transcribe the exact Ledger Name.
-    - Extract Debit Amount (debit_amount) for Dr rows, or Credit Amount (credit_amount) for Cr rows.
-    - Combine Rupees and Paisa into decimal amounts (e.g., 1237 Rs 35 Paisa = 1237.35).
+COLUMN STRUCTURE — this is the most common source of error, read it carefully:
+The amount area is split into two sides: खर्च (डेबिट) = Debit, and आम्दानी (क्रेडिट) = Credit.
+EACH side is split again into two narrow sub-columns:
+    रु. = rupees (the whole number)   |   पै. = paisa (hundredths, 00-99)
+Combine them as rupees + paisa/100.   e.g. रु.=1237, पै.=35  ->  1237.35
 
-    Return ONLY a JSON object with a "transactions" key containing a JSON array of objects:
+CRITICAL RULE: if a row's पै. (paisa) cell is EMPTY, the amount is exactly .00.
+Never invent paisa, and never carry a paisa value over from a neighbouring row.
+    e.g. रु.=690 with an empty पै. cell  ->  690.00   (NOT 690.12, NOT 690.50)
+Read every digit of the rupees cell carefully — do not drop, merge or duplicate digits.
+A row's amount belongs to whichever side (Debit or Credit) its digits are physically written under.
+
+TOTAL ROW: the bottom row labelled जम्मा holds the voucher's own stated total for each side.
+Transcribe those two numbers into "stated_total_debit" and "stated_total_credit".
+Never emit the जम्मा row itself as a transaction line item.
+Do not adjust any line item to make it agree with the total — report exactly what is written
+in each cell, even if the line items do not add up to the stated total.
+
+For every other row: classify it Dr or Cr, transcribe the ledger name exactly, and give the amount.
+
+Return ONLY a JSON object in this shape:
     {
+      "stated_total_debit": 14408.35,
+      "stated_total_credit": 14408.35,
       "transactions": [
         {
           "voucher_date": "2083-03-15",
@@ -195,13 +308,13 @@ async def extract_receipt(file: UploadFile = File(...)):
 
     # 1. Live OpenAI Extraction
     if openai_available:
-        print(f"🤖 Sending image to OpenAI GPT-4o... (size: {len(raw_bytes)} bytes)")
+        print(f"🤖 Sending image to OpenAI {OPENAI_VISION_MODEL}... (size: {len(raw_bytes)} bytes)")
         try:
             base64_image = base64.b64encode(raw_bytes).decode('utf-8')
             media_type = file.content_type if file.content_type.startswith("image/") else "image/jpeg"
 
             response = openai_client.chat.completions.create(
-                model="gpt-4o",
+                model=OPENAI_VISION_MODEL,
                 response_format={"type": "json_object"},
                 messages=[
                     {
@@ -218,7 +331,7 @@ async def extract_receipt(file: UploadFile = File(...)):
                         ]
                     }
                 ],
-                max_tokens=2000
+                **openai_sampling_params(OPENAI_VISION_MODEL)
             )
 
             raw_content = response.choices[0].message.content
@@ -229,12 +342,13 @@ async def extract_receipt(file: UploadFile = File(...)):
                 raw_response = raw_content.strip()
                 print(f"📥 OpenAI raw response:\n{raw_response}")
                 parsed_json = json.loads(raw_response)
-                
+
                 if isinstance(parsed_json, dict) and "transactions" in parsed_json:
                     extracted_transactions = parsed_json["transactions"]
+                    stated_totals = read_stated_totals(parsed_json)
                 elif isinstance(parsed_json, list):
                     extracted_transactions = parsed_json
-                
+
                 print(f"✅ Extracted {len(extracted_transactions)} transactions from OpenAI")
         except Exception as err:
             error_msg = extraction_error_message("OpenAI Vision", err)
@@ -261,6 +375,7 @@ async def extract_receipt(file: UploadFile = File(...)):
                 parsed_json = json.loads(cleaned_text)
                 if isinstance(parsed_json, dict) and "transactions" in parsed_json:
                     extracted_transactions = parsed_json["transactions"]
+                    stated_totals = read_stated_totals(parsed_json)
                 elif isinstance(parsed_json, list):
                     extracted_transactions = parsed_json
                 print(f"✅ Extracted {len(extracted_transactions)} transactions from Gemini")
@@ -278,12 +393,26 @@ async def extract_receipt(file: UploadFile = File(...)):
 
     print(f"🔚 Final result: {len(extracted_transactions)} transactions, error={error_msg}")
 
+    # Reconcile against the voucher's own printed totals. Reporting only —
+    # a discrepancy never rewrites an amount, it just tells the reviewer where
+    # to look, so extraction stays "Extracted" and the rows remain editable.
+    verification = verify_against_stated_totals(extracted_transactions, stated_totals)
+    if verification["warnings"]:
+        for warning in verification["warnings"]:
+            print(f"⚠️ Verification: {warning}")
+    elif verification["checked_against_voucher"]:
+        print("✅ Verification: line items reconcile with the voucher's जम्मा totals")
+
     return {
         "filename": file.filename,
-        "engine_used": "OpenAI GPT-4o" if openai_available else ("Gemini Vision" if genai_available else "Dr/Cr Accounting Engine"),
+        "engine_used": (
+            f"OpenAI {OPENAI_VISION_MODEL}" if openai_available
+            else ("Gemini Vision" if genai_available else "Dr/Cr Accounting Engine")
+        ),
         "status": "Extracted" if not error_msg else "Failed",
         "transactions": extracted_transactions,
-        "error": error_msg
+        "error": error_msg,
+        "verification": verification
     }
 
 @app.post("/api/export-tally-excel")

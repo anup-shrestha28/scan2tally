@@ -32,6 +32,10 @@ export interface Receipt {
   status: ReceiptStatus;
   previewUrl: string;
   error_message?: string;
+  // Reconciliation notices from the backend (e.g. the extracted rows disagree
+  // with the voucher's printed जम्मा total). Advisory only — the receipt is
+  // still Extracted and editable; these just point the reviewer at what to check.
+  verification_warnings?: string[];
 }
 
 export interface ScanBatch {

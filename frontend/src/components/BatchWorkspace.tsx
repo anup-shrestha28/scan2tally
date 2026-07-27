@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FolderPlus, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, RotateCw, RotateCcw } from 'lucide-react';
+import { FolderPlus, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw } from 'lucide-react';
 import { ScanBatch, Receipt, UserRole, Transaction, EntryType } from '../types';
 
 const NOT_JOURNAL_ENTRY_ERROR = 'The uploaded image is not a journal entry. Please check and try again.';
@@ -147,7 +147,12 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
       return null;
     }
 
-    updateReceipt(batchId, receipt.id, { status: 'Processing', error_message: undefined });
+    // Clear any prior notices up front so a retry never shows stale results.
+    updateReceipt(batchId, receipt.id, {
+      status: 'Processing',
+      error_message: undefined,
+      verification_warnings: undefined
+    });
 
     try {
       const formData = new FormData();
@@ -198,8 +203,19 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
         };
       });
 
+      // Reconciliation notices are advisory: the extraction still succeeded, so
+      // the receipt stays Extracted and editable — the warning just tells the
+      // reviewer which side of the voucher disagrees with its printed total.
+      const warnings: string[] = Array.isArray(data.verification?.warnings)
+        ? data.verification.warnings
+        : [];
+
       setReceiptTransactionsMap(prev => ({ ...prev, [receipt.id]: mappedTx }));
-      updateReceipt(batchId, receipt.id, { status: 'Extracted', error_message: undefined });
+      updateReceipt(batchId, receipt.id, {
+        status: 'Extracted',
+        error_message: undefined,
+        verification_warnings: warnings.length > 0 ? warnings : undefined
+      });
       return mappedTx;
     } catch (err: any) {
       updateReceipt(batchId, receipt.id, {
@@ -477,6 +493,15 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
                                 {rcpt.error_message}
                               </span>
                             )}
+                            {rcpt.status === 'Extracted' && rcpt.verification_warnings?.map((warning, i) => (
+                              <span
+                                key={i}
+                                style={{ fontSize: '0.72rem', color: '#f59e0b', maxWidth: '320px', display: 'flex', gap: '4px' }}
+                              >
+                                <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: '2px' }} />
+                                {warning}
+                              </span>
+                            ))}
                           </div>
                         </td>
                         <td>
