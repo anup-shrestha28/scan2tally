@@ -152,7 +152,7 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', maxWidth: '1050px', margin: '0 auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' }}>
-        <button className="btn btn-secondary btn-sm" onClick={onBack}>
+        <button className="btn btn-secondary" onClick={onBack}>
           <ArrowLeft size={16} />
           Back to Review & Edit
         </button>
