@@ -70,6 +70,14 @@ class TransactionItem(BaseModel):
     amount: Optional[float] = 0.0
     narration: Optional[str] = ""
 
+INVALID_JOURNAL_IMAGE_ERROR = "The uploaded image is not a journal entry. Please check and try again."
+
+def extraction_error_message(engine: str, err: Exception) -> str:
+    err_text = str(err)
+    if "'NoneType' object has no attribute 'strip'" in err_text:
+        return INVALID_JOURNAL_IMAGE_ERROR
+    return f"{engine} Extraction Exception: {err}"
+
 def preprocess_image_with_opencv(image_bytes: bytes) -> bytes:
     """Kept for reference but not used for AI extraction - OpenCV grayscale conversion hurts OCR quality."""
     np_arr = np.frombuffer(image_bytes, np.uint8)
@@ -213,18 +221,23 @@ async def extract_receipt(file: UploadFile = File(...)):
                 max_tokens=2000
             )
 
-            raw_response = response.choices[0].message.content.strip()
-            print(f"📥 OpenAI raw response:\n{raw_response}")
-            parsed_json = json.loads(raw_response)
-            
-            if isinstance(parsed_json, dict) and "transactions" in parsed_json:
-                extracted_transactions = parsed_json["transactions"]
-            elif isinstance(parsed_json, list):
-                extracted_transactions = parsed_json
-            
-            print(f"✅ Extracted {len(extracted_transactions)} transactions from OpenAI")
+            raw_content = response.choices[0].message.content
+            if not raw_content or not raw_content.strip():
+                error_msg = INVALID_JOURNAL_IMAGE_ERROR
+                print(f"❌ OpenAI returned no readable journal entry content")
+            else:
+                raw_response = raw_content.strip()
+                print(f"📥 OpenAI raw response:\n{raw_response}")
+                parsed_json = json.loads(raw_response)
+                
+                if isinstance(parsed_json, dict) and "transactions" in parsed_json:
+                    extracted_transactions = parsed_json["transactions"]
+                elif isinstance(parsed_json, list):
+                    extracted_transactions = parsed_json
+                
+                print(f"✅ Extracted {len(extracted_transactions)} transactions from OpenAI")
         except Exception as err:
-            error_msg = f"OpenAI Vision Extraction Exception: {err}"
+            error_msg = extraction_error_message("OpenAI Vision", err)
             print(f"❌ {error_msg}")
     else:
         print("⚠️ OpenAI not available (key missing or invalid)")
@@ -237,18 +250,22 @@ async def extract_receipt(file: UploadFile = File(...)):
             pil_img = Image.open(io.BytesIO(raw_bytes))
             model = genai.GenerativeModel('gemini-1.5-flash')
             response = model.generate_content([prompt, pil_img])
-            raw_text = response.text.strip()
-            print(f"📥 Gemini raw response:\n{raw_text}")
-            cleaned_text = re.sub(r'^```json\s*', '', raw_text)
-            cleaned_text = re.sub(r'\s*```$', '', cleaned_text)
-            parsed_json = json.loads(cleaned_text)
-            if isinstance(parsed_json, dict) and "transactions" in parsed_json:
-                extracted_transactions = parsed_json["transactions"]
-            elif isinstance(parsed_json, list):
-                extracted_transactions = parsed_json
-            print(f"✅ Extracted {len(extracted_transactions)} transactions from Gemini")
+            if not response.text or not response.text.strip():
+                error_msg = INVALID_JOURNAL_IMAGE_ERROR
+                print(f"❌ Gemini returned no readable journal entry content")
+            else:
+                raw_text = response.text.strip()
+                print(f"📥 Gemini raw response:\n{raw_text}")
+                cleaned_text = re.sub(r'^```json\s*', '', raw_text)
+                cleaned_text = re.sub(r'\s*```$', '', cleaned_text)
+                parsed_json = json.loads(cleaned_text)
+                if isinstance(parsed_json, dict) and "transactions" in parsed_json:
+                    extracted_transactions = parsed_json["transactions"]
+                elif isinstance(parsed_json, list):
+                    extracted_transactions = parsed_json
+                print(f"✅ Extracted {len(extracted_transactions)} transactions from Gemini")
         except Exception as err:
-            error_msg = f"Gemini Extraction Exception: {err}"
+            error_msg = extraction_error_message("Gemini", err)
             print(f"❌ {error_msg}")
 
     # 3. Goshwara Accounting Classification Engine (offline demo fallback only —

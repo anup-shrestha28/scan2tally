@@ -2,6 +2,19 @@ import React, { useState } from 'react';
 import { FolderPlus, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, RotateCw } from 'lucide-react';
 import { ScanBatch, Receipt, UserRole, Transaction } from '../types';
 
+const NOT_JOURNAL_ENTRY_ERROR = 'The uploaded image is not a journal entry. Please check and try again.';
+
+function getExtractionErrorMessage(error?: string): string {
+  if (!error) return 'No transaction data could be extracted from this receipt.';
+  if (
+    error.includes("'NoneType' object has no attribute 'strip'") ||
+    error.includes('not a journal entry')
+  ) {
+    return NOT_JOURNAL_ENTRY_ERROR;
+  }
+  return error;
+}
+
 interface BatchWorkspaceProps {
   userRole: UserRole;
   onSelectBatch: (batch: ScanBatch, selectedReceipt?: Receipt, extractedTx?: Transaction[], txMap?: Record<string, Transaction[]>) => void;
@@ -135,7 +148,7 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
       if (data.error || !data.transactions || !data.transactions.length) {
         updateReceipt(batchId, receipt.id, {
           status: 'Failed',
-          error_message: data.error || 'No transaction data could be extracted from this receipt.'
+          error_message: getExtractionErrorMessage(data.error)
         });
         return null;
       }
@@ -315,12 +328,12 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
               {isProcessing ? (
                 <>
                   <Loader2 size={16} className="animate-spin" />
-                  Running OpenCV & Vision AI...
+                  Extracting details...
                 </>
               ) : (
                 <>
                   <Play size={16} />
-                  Run Vision AI Extraction{extractableCount ? ` (${extractableCount})` : ''}
+                  Extract Data from Image{extractableCount ? ` (${extractableCount})` : ''}
                 </>
               )}
             </button>
