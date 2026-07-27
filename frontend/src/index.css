@@ -276,6 +276,72 @@ body {
   box-shadow: 0 0 0 2px var(--primary-glow);
 }
 
+/* Reviewer grid cells
+   Inputs sit flush in the table and read as plain text until you interact
+   with them, so the grid scans like a ledger instead of a wall of boxes. */
+.cell-input {
+  width: 100%;
+  min-width: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  color: var(--text-main);
+  outline: none;
+  transition: var(--transition);
+  text-overflow: ellipsis;
+}
+
+.cell-input:hover {
+  background-color: var(--bg-input);
+  border-color: var(--border-color);
+}
+
+.cell-input:focus {
+  background-color: var(--bg-input);
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px var(--primary-glow);
+  text-overflow: clip;
+}
+
+.cell-input::placeholder {
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+/* Currency variant — replaces raw number inputs, whose native spinner arrows
+   sat on top of the value and clipped longer amounts. */
+.amount-input {
+  text-align: right;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.amount-debit { color: #818cf8; }
+.amount-credit { color: #34d399; }
+
+/* Placeholder shown in the unused side of a Dr/Cr row */
+.amount-empty {
+  display: block;
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  opacity: 0.5;
+}
+
+/* Any remaining number input should never render native steppers */
+input[type='number'] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
 /* Table Styles */
 .table-container {
   width: 100%;
@@ -312,6 +378,21 @@ body {
 
 .custom-table tr:hover td {
   background-color: rgba(255, 255, 255, 0.02);
+}
+
+/* Transaction editor grid (reviewer).
+   Declared after .custom-table so its tighter padding wins at equal
+   specificity. Fixed layout makes the column widths authoritative —
+   otherwise each input's ~20ch intrinsic width bullies the table wider
+   than its panel and squeezes Particulars down to nothing. */
+.tx-table {
+  table-layout: fixed;
+}
+
+.tx-table th,
+.tx-table td {
+  padding: 8px 10px;
+  overflow: hidden;
 }
 
 /* Status Pill */

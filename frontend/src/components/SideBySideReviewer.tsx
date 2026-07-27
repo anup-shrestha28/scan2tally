@@ -11,6 +11,49 @@ interface SideBySideReviewerProps {
   onExportExcel: (transactions: Transaction[]) => void;
 }
 
+/**
+ * Currency cell for the reviewer grid.
+ *
+ * Uses a text input rather than type="number" so the native spinner arrows
+ * never overlap the amount. Shows an Indian-grouped, 2-decimal value while
+ * idle and the raw editable number while focused.
+ */
+function AmountInput({
+  value,
+  tone,
+  onChange
+}: {
+  value: number;
+  tone: 'debit' | 'credit';
+  onChange: (amount: number) => void;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+
+  const formatted = value
+    ? value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    : '';
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      // size=1 kills the ~20ch intrinsic width an <input> otherwise demands,
+      // which would override the table's column widths.
+      size={1}
+      className={`cell-input amount-input amount-${tone}`}
+      placeholder="0.00"
+      value={draft !== null ? draft : formatted}
+      onFocus={() => setDraft(value ? String(value) : '')}
+      onBlur={() => setDraft(null)}
+      onChange={(e) => {
+        const raw = e.target.value.replace(/[^0-9.]/g, '');
+        setDraft(raw);
+        onChange(parseFloat(raw) || 0);
+      }}
+    />
+  );
+}
+
 function blankRow(date?: string): Transaction {
   return {
     id: `tx-blank-${Date.now()}`,
@@ -370,14 +413,14 @@ export default function SideBySideReviewer({
               <div><strong>Voucher No:</strong> {(transactions[0] as any)?.voucher_no || '-'}</div>
             </div>
             <div className="table-container">
-              <table className="custom-table">
+              <table className="custom-table tx-table">
                 <thead>
                   <tr>
-                    <th style={{ width: '70px' }}>Type</th>
+                    <th style={{ width: '52px' }}>Type</th>
                     <th>Particulars</th>
-                    <th style={{ width: '120px', textAlign: 'right' }}>Debit (Rs.)</th>
-                    <th style={{ width: '120px', textAlign: 'right' }}>Credit (Rs.)</th>
-                    <th style={{ width: '40px' }}></th>
+                    <th style={{ width: '112px', textAlign: 'right' }}>Debit (Rs.)</th>
+                    <th style={{ width: '112px', textAlign: 'right' }}>Credit (Rs.)</th>
+                    <th style={{ width: '44px' }}></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -391,36 +434,34 @@ export default function SideBySideReviewer({
                       <td>
                         <input
                           type="text"
-                          className="form-input"
-                          style={{ padding: '4px 8px', fontSize: '0.85rem', width: '100%', fontWeight: tx.entry_type === 'Dr' ? 600 : 400 }}
+                          size={1}
+                          className="cell-input"
+                          style={{ fontWeight: tx.entry_type === 'Dr' ? 600 : 400 }}
                           value={tx.ledger_name || tx.debit_ledger || tx.credit_ledger || ''}
+                          title={tx.ledger_name || tx.debit_ledger || tx.credit_ledger || ''}
                           onChange={(e) => handleUpdateTransaction(tx.id, 'ledger_name', e.target.value)}
                         />
                       </td>
                       <td>
                         {tx.entry_type === 'Dr' ? (
-                          <input
-                            type="number"
-                            className="form-input"
-                            style={{ padding: '4px 8px', fontSize: '0.85rem', fontWeight: 600, textAlign: 'right', color: '#818cf8', width: '100%' }}
-                            value={tx.debit_amount || tx.amount || ''}
-                            onChange={(e) => handleUpdateTransaction(tx.id, 'debit_amount', parseFloat(e.target.value) || 0)}
+                          <AmountInput
+                            tone="debit"
+                            value={tx.debit_amount || 0}
+                            onChange={(amount) => handleUpdateTransaction(tx.id, 'debit_amount', amount)}
                           />
                         ) : (
-                          <span style={{ color: 'var(--text-dim)', fontSize: '0.85rem', display: 'block', textAlign: 'right' }}>-</span>
+                          <span className="amount-empty">–</span>
                         )}
                       </td>
                       <td>
                         {tx.entry_type === 'Cr' ? (
-                          <input
-                            type="number"
-                            className="form-input"
-                            style={{ padding: '4px 8px', fontSize: '0.85rem', fontWeight: 600, textAlign: 'right', color: '#34d399', width: '100%' }}
-                            value={tx.credit_amount || ''}
-                            onChange={(e) => handleUpdateTransaction(tx.id, 'credit_amount', parseFloat(e.target.value) || 0)}
+                          <AmountInput
+                            tone="credit"
+                            value={tx.credit_amount || 0}
+                            onChange={(amount) => handleUpdateTransaction(tx.id, 'credit_amount', amount)}
                           />
                         ) : (
-                          <span style={{ color: 'var(--text-dim)', fontSize: '0.85rem', display: 'block', textAlign: 'right' }}>-</span>
+                          <span className="amount-empty">–</span>
                         )}
                       </td>
                       <td>
