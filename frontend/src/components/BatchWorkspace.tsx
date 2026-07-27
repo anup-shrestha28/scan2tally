@@ -45,6 +45,7 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
 
   const activeBatch = batches.find(b => b.id === activeBatchId) || batches[0];
   const extractableCount = activeBatch.receipts.filter(r => r.status === 'Pending' || r.status === 'Failed').length;
+  const hasFailedExtraction = activeBatch.receipts.some(r => r.status === 'Failed');
 
   const handleCreateBatch = () => {
     const todayStr = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
@@ -347,7 +348,7 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
             <button
               className="btn btn-primary"
               onClick={handleTriggerExtraction}
-              disabled={!extractableCount || isProcessing}
+              disabled={!extractableCount || isProcessing || hasFailedExtraction}
             >
               {isProcessing ? (
                 <>
