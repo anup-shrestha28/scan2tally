@@ -7,7 +7,8 @@ import hashlib
 import asyncio
 from collections import Counter
 from typing import List, Optional
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+import httpx
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -23,6 +24,21 @@ load_dotenv(override=True)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+# Creating a login needs the service role key, which must never reach a browser,
+# so account creation is proxied through this server rather than done in the app.
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+supabase_admin_available = bool(
+    SUPABASE_URL
+    and SUPABASE_SERVICE_ROLE_KEY
+    and "placeholder" not in SUPABASE_URL.lower()
+    and "placeholder" not in SUPABASE_SERVICE_ROLE_KEY.lower()
+)
+if supabase_admin_available:
+    print("✅ Supabase admin API configured (user creation enabled)")
+else:
+    print("⚠️ Supabase admin API not configured — user creation endpoint disabled")
 
 # Vision model, overridable without a code change. gpt-5.5 reads marginal /
 # low-resolution vouchers noticeably better than gpt-4o in side-by-side tests.
@@ -552,6 +568,142 @@ async def extract_receipt(file: UploadFile = File(...)):
         "error": error_msg,
         "verification": verification
     }
+
+class CreateUserRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+    role: str  # 'Super Admin' | 'Admin' | 'Operator'
+    designation: Optional[str] = ""
+    phone: Optional[str] = ""
+    # Only honoured for a Super Admin caller. An Admin always creates into their
+    # own organisation, whatever the request body claims.
+    organization_id: Optional[str] = None
+
+
+def _svc_headers() -> dict:
+    return {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+async def resolve_caller(authorization: Optional[str]) -> dict:
+    """Identify who is making the request, from their own session token.
+
+    The caller's role is read from the database rather than taken from anything
+    they sent, so a client cannot promote itself by editing a request body.
+    """
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="You must be signed in to do this.")
+    token = authorization.split(" ", 1)[1].strip()
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        # Validates the token: Supabase rejects anything expired or forged.
+        who = await client.get(
+            f"{SUPABASE_URL}/auth/v1/user",
+            headers={"apikey": SUPABASE_SERVICE_ROLE_KEY, "Authorization": f"Bearer {token}"},
+        )
+        if who.status_code != 200:
+            raise HTTPException(status_code=401, detail="Your session has expired. Please sign in again.")
+        auth_id = who.json().get("id")
+
+        profile = await client.get(
+            f"{SUPABASE_URL}/rest/v1/users",
+            headers=_svc_headers(),
+            params={"select": "id,role,organization_id,status", "id": f"eq.{auth_id}"},
+        )
+        rows = profile.json() if profile.status_code == 200 else []
+
+    if not rows:
+        raise HTTPException(status_code=403, detail="Your account has no profile set up.")
+    caller = rows[0]
+    if caller.get("status") == "Inactive":
+        raise HTTPException(status_code=403, detail="This account has been deactivated.")
+    return caller
+
+
+@app.post("/api/users")
+async def create_user(payload: CreateUserRequest, authorization: Optional[str] = Header(None)):
+    """Creates a login on behalf of an administrator."""
+    if not supabase_admin_available:
+        raise HTTPException(status_code=503, detail="User management is not configured on this server.")
+
+    caller = await resolve_caller(authorization)
+    caller_role = caller.get("role")
+
+    email = (payload.email or "").strip().lower()
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Please enter the person's name.")
+    if "@" not in email or "." not in email.split("@")[-1]:
+        raise HTTPException(status_code=400, detail="Please enter a valid email address.")
+    if len(payload.password or "") < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+    if payload.role not in ("Super Admin", "Admin", "Operator"):
+        raise HTTPException(status_code=400, detail="Unknown role.")
+
+    # Who may create whom. An Admin is confined to their own organisation and
+    # cannot mint a Super Admin, which would be a straight privilege escalation.
+    if caller_role == "Super Admin":
+        organization_id = payload.organization_id
+        if payload.role != "Super Admin" and not organization_id:
+            raise HTTPException(status_code=400, detail="Choose an organisation for this user.")
+        if payload.role == "Super Admin":
+            organization_id = None
+    elif caller_role == "Admin":
+        if payload.role not in ("Admin", "Operator"):
+            raise HTTPException(status_code=403, detail="Admins can only create Admin or Operator accounts.")
+        organization_id = caller.get("organization_id")
+        if not organization_id:
+            raise HTTPException(status_code=403, detail="Your account is not linked to an organisation.")
+    else:
+        raise HTTPException(status_code=403, detail="Only administrators can create accounts.")
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        existing = await client.get(
+            f"{SUPABASE_URL}/rest/v1/users",
+            headers=_svc_headers(),
+            params={"select": "id", "email": f"eq.{email}"},
+        )
+        if existing.status_code == 200 and existing.json():
+            raise HTTPException(status_code=409, detail="An account with that email already exists.")
+
+        created = await client.post(
+            f"{SUPABASE_URL}/auth/v1/admin/users",
+            headers=_svc_headers(),
+            json={"email": email, "password": payload.password, "email_confirm": True},
+        )
+        if created.status_code not in (200, 201):
+            detail = created.json().get("msg") or created.json().get("message") or "Could not create the login."
+            raise HTTPException(status_code=400, detail=detail)
+        new_id = created.json().get("id")
+
+        profile = await client.post(
+            f"{SUPABASE_URL}/rest/v1/users",
+            headers={**_svc_headers(), "Prefer": "return=representation"},
+            json={
+                "id": new_id,
+                "organization_id": organization_id,
+                "name": name,
+                "email": email,
+                "phone": payload.phone or None,
+                "designation": payload.designation or None,
+                "role": payload.role,
+                "status": "Active",
+                "created_by": caller.get("id"),
+            },
+        )
+        if profile.status_code not in (200, 201):
+            # Undo the login, or the person could sign in to an account with no
+            # profile and the app could only show them an error.
+            await client.delete(f"{SUPABASE_URL}/auth/v1/admin/users/{new_id}", headers=_svc_headers())
+            raise HTTPException(status_code=400, detail="Could not create the user profile, so the login was removed.")
+
+    return {"id": new_id, "name": name, "email": email, "role": payload.role,
+            "organization_id": organization_id, "status": "Active"}
+
 
 @app.post("/api/export-tally-excel")
 def export_tally_excel(transactions: List[TransactionItem]):

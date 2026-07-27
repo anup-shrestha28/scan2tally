@@ -1,5 +1,5 @@
 import React from 'react';
-import { Layers, User as UserIcon, LogOut, Building2, Sun, Moon } from 'lucide-react';
+import { Layers, User as UserIcon, LogOut, Building2, Sun, Moon, Users, LayoutGrid } from 'lucide-react';
 import { User, UserRole } from '../types';
 
 interface NavbarProps {
@@ -7,9 +7,16 @@ interface NavbarProps {
   onLogout: () => void;
   isDark: boolean;
   onToggleTheme: () => void;
+  /** Absent for roles that cannot manage staff, which hides the control entirely. */
+  onManageUsers?: () => void;
+  onGoToWorkspace?: () => void;
+  showingUsers?: boolean;
 }
 
-export default function Navbar({ currentUser, onLogout, isDark, onToggleTheme }: NavbarProps) {
+export default function Navbar({
+  currentUser, onLogout, isDark, onToggleTheme,
+  onManageUsers, onGoToWorkspace, showingUsers
+}: NavbarProps) {
   const getRoleClass = (role: UserRole) => {
     switch (role) {
       case 'Super Admin': return 'role-super';
@@ -52,6 +59,20 @@ export default function Navbar({ currentUser, onLogout, isDark, onToggleTheme }:
 
         {currentUser && (
           <div className="nav-user">
+            {onManageUsers && (
+              showingUsers ? (
+                <button className="btn btn-secondary btn-sm" onClick={onGoToWorkspace} title="Back to scan batches">
+                  <LayoutGrid size={15} />
+                  <span>Workspace</span>
+                </button>
+              ) : (
+                <button className="btn btn-secondary btn-sm" onClick={onManageUsers} title="Manage team members">
+                  <Users size={15} />
+                  <span>Team</span>
+                </button>
+              )
+            )}
+
             <div className="user-badge">
               <Building2 size={16} color="#94a3b8" />
               <span style={{ fontWeight: 600 }}>{currentUser.orgName || 'Platform Owner'}</span>
