@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FolderPlus, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, RotateCw } from 'lucide-react';
+import { FolderPlus, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, RotateCw, RotateCcw } from 'lucide-react';
 import { ScanBatch, Receipt, UserRole, Transaction } from '../types';
 
 const NOT_JOURNAL_ENTRY_ERROR = 'The uploaded image is not a journal entry. Please check and try again.';
@@ -35,6 +35,8 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
   const [editingBatchId, setEditingBatchId] = useState<string | null>(null);
   const [editedBatchName, setEditedBatchName] = useState<string>('');
   const [deletingBatchId, setDeletingBatchId] = useState<string | null>(null);
+  const [previewReceipt, setPreviewReceipt] = useState<Receipt | null>(null);
+  const [previewRotation, setPreviewRotation] = useState(0);
   const [dragOver, setDragOver] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   
@@ -104,7 +106,24 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
   };
 
   const handleDeleteReceipt = (receiptId: string) => {
-    setBatches(batches.map(b => {
+    const receipt = activeBatch.receipts.find(r => r.id === receiptId);
+    if (receipt?.previewUrl) {
+      URL.revokeObjectURL(receipt.previewUrl);
+    }
+
+    setUploadedFilesMap(prev => {
+      const next = { ...prev };
+      delete next[receiptId];
+      return next;
+    });
+
+    setReceiptTransactionsMap(prev => {
+      const next = { ...prev };
+      delete next[receiptId];
+      return next;
+    });
+
+    setBatches(prev => prev.map(b => {
       if (b.id === activeBatchId) {
         return { ...b, receipts: b.receipts.filter(r => r.id !== receiptId) };
       }
@@ -218,8 +237,13 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
   };
 
   const handleReviewSingleReceipt = (receipt: Receipt) => {
-    const extractedForThisReceipt = receiptTransactionsMap[receipt.id];
-    onSelectBatch(activeBatch, receipt, extractedForThisReceipt, receiptTransactionsMap);
+    setPreviewRotation(0);
+    setPreviewReceipt(receipt);
+  };
+
+  const isPdfReceipt = (receipt: Receipt) => {
+    const file = uploadedFilesMap[receipt.id];
+    return file?.type === 'application/pdf' || receipt.filename.toLowerCase().endsWith('.pdf');
   };
 
   return (
@@ -446,7 +470,7 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
                               className="btn btn-secondary btn-sm"
                               onClick={() => handleReviewSingleReceipt(rcpt)}
                             >
-                              Review & Edit
+                              Preview Image
                             </button>
 
                             {rcpt.status === 'Failed' && (
@@ -460,11 +484,11 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
                               </button>
                             )}
 
-                            {rcpt.status === 'Pending' && (
+                            {rcpt.status !== 'Processing' && (
                               <button
                                 className="btn btn-danger btn-sm"
                                 onClick={() => handleDeleteReceipt(rcpt.id)}
-                                title="Delete Pending Receipt"
+                                title="Delete Receipt"
                                 disabled={isProcessing}
                               >
                                 <Trash2 size={14} />
@@ -529,6 +553,138 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
                 onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1)'; (e.currentTarget as HTMLButtonElement).style.boxShadow = '0 2px 8px rgba(239,68,68,0.4)'; }}
               >
                 <Trash2 size={15} /> Yes, Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {previewReceipt && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 1100,
+            background: 'rgba(0,0,0,0.65)',
+            backdropFilter: 'blur(3px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '20px'
+          }}
+          onClick={() => setPreviewReceipt(null)}
+        >
+          <div
+            className="card"
+            style={{
+              width: 'min(920px, 96vw)',
+              maxHeight: '92vh',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '12px',
+              padding: '18px'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+              <h3 style={{ fontSize: '1rem', fontWeight: 700, margin: 0 }}>Image Preview</h3>
+              <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>{previewReceipt.filename}</span>
+            </div>
+
+            <div
+              style={{
+                border: '1px solid var(--border-color)',
+                borderRadius: '10px',
+                overflow: 'hidden',
+                background: 'var(--bg-input)',
+                minHeight: '360px',
+                height: '68vh',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                position: 'relative'
+              }}
+            >
+              {isPdfReceipt(previewReceipt) ? (
+                <iframe
+                  src={previewReceipt.previewUrl}
+                  title={previewReceipt.filename}
+                  style={{ width: '100%', height: '100%', border: 'none' }}
+                />
+              ) : (
+                <img
+                  src={previewReceipt.previewUrl}
+                  alt={previewReceipt.filename}
+                  style={{
+                    transform: `rotate(${previewRotation}deg)`,
+                    transition: 'transform 0.3s ease',
+                    maxWidth: Math.abs(previewRotation % 180) === 90 ? '68vh' : '100%',
+                    maxHeight: Math.abs(previewRotation % 180) === 90 ? '100%' : '68vh',
+                    objectFit: 'contain',
+                    display: 'block'
+                  }}
+                />
+              )}
+
+              {!isPdfReceipt(previewReceipt) && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    bottom: '16px',
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    display: 'flex',
+                    gap: '10px',
+                    zIndex: 2
+                  }}
+                >
+                  <button
+                    type="button"
+                    title="Rotate Left"
+                    onClick={() => setPreviewRotation(r => r - 90)}
+                    style={{
+                      width: '44px',
+                      height: '44px',
+                      borderRadius: '50%',
+                      border: 'none',
+                      background: 'rgba(15, 23, 42, 0.75)',
+                      color: '#fff',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: 'pointer',
+                      boxShadow: '0 4px 14px rgba(0,0,0,0.35)'
+                    }}
+                  >
+                    <RotateCcw size={22} />
+                  </button>
+                  <button
+                    type="button"
+                    title="Rotate Right"
+                    onClick={() => setPreviewRotation(r => r + 90)}
+                    style={{
+                      width: '44px',
+                      height: '44px',
+                      borderRadius: '50%',
+                      border: 'none',
+                      background: 'rgba(15, 23, 42, 0.75)',
+                      color: '#fff',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: 'pointer',
+                      boxShadow: '0 4px 14px rgba(0,0,0,0.35)'
+                    }}
+                  >
+                    <RotateCw size={22} />
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button className="btn btn-secondary" onClick={() => setPreviewReceipt(null)}>
+                Close
               </button>
             </div>
           </div>
