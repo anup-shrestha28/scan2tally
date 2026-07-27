@@ -210,7 +210,8 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
           ledger_name: t.ledger_name || t.debit_ledger || t.credit_ledger || 'General Account',
           debit_amount: entryType === 'Dr' ? (debit || legacy) : 0,
           credit_amount: entryType === 'Cr' ? (credit || legacy) : 0,
-          narration: t.narration || ''
+          narration: t.narration || '',
+          needs_review: t.needs_review === true
         };
       });
 

@@ -4,6 +4,8 @@ import json
 import re
 import base64
 import hashlib
+import asyncio
+from collections import Counter
 from typing import List, Optional
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,6 +27,12 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 # Vision model, overridable without a code change. gpt-5.5 reads marginal /
 # low-resolution vouchers noticeably better than gpt-4o in side-by-side tests.
 OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5.5")
+
+# Independent transcription passes per receipt. Handwriting the model cannot
+# resolve comes back differently on each pass, so comparing runs is what turns a
+# silently-invented amount into a flagged one. Runs are issued concurrently, so
+# this costs extra tokens rather than extra wall-clock. 1 disables the check.
+OCR_CONSENSUS_RUNS = max(1, int(os.getenv("OCR_CONSENSUS_RUNS", "3")))
 
 
 def openai_sampling_params(model: str) -> dict:
@@ -99,6 +107,172 @@ def extraction_error_message(engine: str, err: Exception) -> str:
         return INVALID_JOURNAL_IMAGE_ERROR
     return f"{engine} Extraction Exception: {err}"
 
+MISREAD_RISK_NOTE = (
+    "The handwriting in one or more amount cells could not be read consistently. "
+    "Please check the highlighted rows against the original voucher."
+)
+
+# Transcription prompt. Deliberately says NOTHING about the जम्मा total: shown the
+# total, the model reconciles against it and back-solves individual cells, which
+# yields confidently wrong line items that happen to add up.
+TRANSCRIBE_PROMPT = """
+You are an expert Nepalese accounting OCR assistant reading a handwritten Goshwara Voucher (गोश्वरा भौचर).
+The image may be rotated sideways or upside down; read it in whatever orientation makes the text upright.
+
+COLUMN STRUCTURE — the most common source of error, read it carefully:
+The amount area is split into two sides: खर्च (डेबिट) = Debit, and आम्दानी (क्रेडिट) = Credit.
+EACH side is split again into two narrow sub-columns:
+    रु. = rupees (the whole number)   |   पै. = paisa (hundredths, 00-99)
+Combine them as rupees + paisa/100.   e.g. रु.=1237, पै.=35  ->  1237.35
+
+CRITICAL RULE: if a row's पै. (paisa) cell is EMPTY, the amount is exactly .00.
+Never invent paisa, and never carry a paisa value over from a neighbouring row.
+    e.g. रु.=690 with an empty पै. cell  ->  690.00   (NOT 690.12, NOT 690.50)
+Read every digit of the rupees cell one at a time — do not drop, merge or duplicate digits.
+A row's amount belongs to whichever side (Debit or Credit) its digits are physically written under.
+
+You are TRANSCRIBING, not accounting. Report exactly the digits you can see in each cell.
+Do NOT add anything up. Do NOT make the rows agree with each other or with any total.
+If a digit is genuinely unclear, give your single best reading of that cell and nothing more —
+never adjust another cell to compensate.
+
+Ignore the bottom row labelled जम्मा entirely. It is a total, not a transaction; do not report it.
+
+Return ONLY a JSON object in this shape:
+    {
+      "voucher_date": "2083-03-15",
+      "transactions": [
+        {
+          "voucher_date": "2083-03-15",
+          "voucher_type": "Journal",
+          "entry_type": "Dr",
+          "ledger_name": "Freight outward",
+          "debit_amount": 1237.35,
+          "credit_amount": 0,
+          "narration": "(Being Expenses Recorded)"
+        },
+        {
+          "voucher_date": "2083-03-15",
+          "voucher_type": "Journal",
+          "entry_type": "Cr",
+          "ledger_name": "TDS payable",
+          "debit_amount": 0,
+          "credit_amount": 16.42,
+          "narration": "(Being Expenses Recorded)"
+        }
+      ]
+    }
+"""
+
+# Separate request, so the total is an INDEPENDENT check rather than something
+# the transcription was allowed to steer toward.
+TOTALS_PROMPT = """
+Look ONLY at the bottom row of this handwritten Nepalese Goshwara voucher — the row
+labelled जम्मा, which holds the voucher's own stated totals.
+
+That row has a total under the खर्च (डेबिट) / Debit side and one under the
+आम्दानी (क्रेडिट) / Credit side. Each is split into रु. (rupees) and पै. (paisa)
+sub-columns; combine as rupees + paisa/100. An empty पै. cell means .00.
+
+Transcribe only those two numbers. Ignore every other row. Do not compute anything.
+
+Return ONLY a JSON object of this shape:
+    {"stated_total_debit": 14408.35, "stated_total_credit": 14408.35}
+"""
+
+
+def _openai_vision_json(prompt: str, base64_image: str, media_type: str) -> dict:
+    """One vision request returning parsed JSON."""
+    response = openai_client.chat.completions.create(
+        model=OPENAI_VISION_MODEL,
+        response_format={"type": "json_object"},
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {
+                    "url": f"data:{media_type};base64,{base64_image}", "detail": "high"}},
+            ],
+        }],
+        **openai_sampling_params(OPENAI_VISION_MODEL)
+    )
+    content = response.choices[0].message.content
+    if not content or not content.strip():
+        return {}
+    return json.loads(content.strip())
+
+
+def openai_transcribe(base64_image: str, media_type: str) -> List[dict]:
+    parsed = _openai_vision_json(TRANSCRIBE_PROMPT, base64_image, media_type)
+    if isinstance(parsed, dict):
+        return parsed.get("transactions") or []
+    if isinstance(parsed, list):
+        return parsed
+    return []
+
+
+def openai_read_totals(base64_image: str, media_type: str) -> dict:
+    return read_stated_totals(_openai_vision_json(TOTALS_PROMPT, base64_image, media_type))
+
+
+def _row_amount(row: dict) -> float:
+    """The single amount on a row, whichever side it sits on."""
+    return round(_to_float(row.get("debit_amount")) + _to_float(row.get("credit_amount")), 2)
+
+
+def build_consensus(transcripts: List[List[dict]]):
+    """Merge independent transcriptions of the same voucher.
+
+    Each run is an independent reading, so a cell every run agrees on is
+    trustworthy while a cell that changes between runs is one the model cannot
+    actually resolve — exactly the cells that were previously being invented
+    with full confidence. Disagreements are marked `needs_review` on the row
+    rather than resolved silently: the majority reading is used as the value so
+    the reviewer has a sensible starting point, but the row is flagged so the
+    wrong number is never presented as verified.
+    """
+    notes: List[str] = []
+    if not transcripts:
+        return [], notes
+
+    # Runs that disagree on the number of rows disagree about the voucher's
+    # structure; take the most common shape and note the instability.
+    counts = Counter(len(t) for t in transcripts)
+    row_count, _ = counts.most_common(1)[0]
+    usable = [t for t in transcripts if len(t) == row_count]
+    if len(counts) > 1:
+        notes.append(
+            f"Extraction runs disagreed on how many rows this voucher has "
+            f"({', '.join(str(c) for c in sorted(counts))}); using the most common reading of {row_count}."
+        )
+
+    merged: List[dict] = []
+    for i in range(row_count):
+        variants = [run[i] for run in usable if isinstance(run[i], dict)]
+        if not variants:
+            continue
+
+        amounts = [_row_amount(v) for v in variants]
+        tally = Counter(amounts)
+        winner, hits = tally.most_common(1)[0]
+
+        # Prefer a variant that actually carries the winning amount, so the
+        # ledger name and side stay consistent with the number we keep.
+        row = dict(next((v for v in variants if _row_amount(v) == winner), variants[0]))
+        disagreed = len(tally) > 1
+
+        if disagreed and len(usable) > 1:
+            row["needs_review"] = True
+            seen = ", ".join(f"{a:,.2f}" for a in sorted(tally))
+            notes.append(
+                f"Row {i + 1} ({row.get('ledger_name') or 'unnamed'}): readings differed "
+                f"across attempts ({seen}) — using {winner:,.2f}, please verify."
+            )
+        merged.append(row)
+
+    return merged, notes
+
+
 def _to_float(value) -> float:
     """Tolerant numeric coercion — models sometimes return '14,408.35' as a string."""
     if value is None:
@@ -145,6 +319,8 @@ def verify_against_stated_totals(transactions: List[dict], stated: dict) -> dict
         "balanced": abs(computed_debit - computed_credit) < 0.005,
         "checked_against_voucher": False,
         "reconciles": None,
+        "consensus_disagreement": False,
+        "rows_needing_review": [],
         "warnings": [],
     }
 
@@ -254,57 +430,9 @@ async def extract_receipt(file: UploadFile = File(...)):
     extracted_transactions = []
     error_msg = None
     stated_totals = {}  # the voucher's own जम्मा row, when the engine could read it
+    consensus_notes: List[str] = []
 
-    prompt = """
-You are an expert Nepalese accounting OCR assistant reading a handwritten Goshwara Voucher (गोश्वरा भौचर).
-The image may be rotated sideways or upside down; read it in whatever orientation makes the text upright.
-
-COLUMN STRUCTURE — this is the most common source of error, read it carefully:
-The amount area is split into two sides: खर्च (डेबिट) = Debit, and आम्दानी (क्रेडिट) = Credit.
-EACH side is split again into two narrow sub-columns:
-    रु. = rupees (the whole number)   |   पै. = paisa (hundredths, 00-99)
-Combine them as rupees + paisa/100.   e.g. रु.=1237, पै.=35  ->  1237.35
-
-CRITICAL RULE: if a row's पै. (paisa) cell is EMPTY, the amount is exactly .00.
-Never invent paisa, and never carry a paisa value over from a neighbouring row.
-    e.g. रु.=690 with an empty पै. cell  ->  690.00   (NOT 690.12, NOT 690.50)
-Read every digit of the rupees cell carefully — do not drop, merge or duplicate digits.
-A row's amount belongs to whichever side (Debit or Credit) its digits are physically written under.
-
-TOTAL ROW: the bottom row labelled जम्मा holds the voucher's own stated total for each side.
-Transcribe those two numbers into "stated_total_debit" and "stated_total_credit".
-Never emit the जम्मा row itself as a transaction line item.
-Do not adjust any line item to make it agree with the total — report exactly what is written
-in each cell, even if the line items do not add up to the stated total.
-
-For every other row: classify it Dr or Cr, transcribe the ledger name exactly, and give the amount.
-
-Return ONLY a JSON object in this shape:
-    {
-      "stated_total_debit": 14408.35,
-      "stated_total_credit": 14408.35,
-      "transactions": [
-        {
-          "voucher_date": "2083-03-15",
-          "voucher_type": "Journal",
-          "entry_type": "Dr",
-          "ledger_name": "Freight outward",
-          "debit_amount": 1237.35,
-          "credit_amount": 0,
-          "narration": "(Being Expenses Recorded)"
-        },
-        {
-          "voucher_date": "2083-03-15",
-          "voucher_type": "Journal",
-          "entry_type": "Cr",
-          "ledger_name": "TDS payable",
-          "debit_amount": 0,
-          "credit_amount": 16.42,
-          "narration": "(Being Expenses Recorded)"
-        }
-      ]
-    }
-    """
+    prompt = TRANSCRIBE_PROMPT
 
     # 1. Live OpenAI Extraction
     if openai_available:
@@ -313,43 +441,41 @@ Return ONLY a JSON object in this shape:
             base64_image = base64.b64encode(raw_bytes).decode('utf-8')
             media_type = file.content_type if file.content_type.startswith("image/") else "image/jpeg"
 
-            response = openai_client.chat.completions.create(
-                model=OPENAI_VISION_MODEL,
-                response_format={"type": "json_object"},
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{media_type};base64,{base64_image}",
-                                    "detail": "high"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                **openai_sampling_params(OPENAI_VISION_MODEL)
+            # Transcription and total-reading are issued as SEPARATE requests, run
+            # concurrently. Keeping the जम्मा total out of the transcription prompt
+            # is the whole point: when the model is shown the total in the same
+            # breath it back-solves the line items to match it, producing different
+            # invented numbers on every run that all sum to the stated total.
+            # Several independent transcriptions then let us see which individual
+            # cells the model cannot read consistently.
+            runs = await asyncio.gather(
+                *[asyncio.to_thread(openai_transcribe, base64_image, media_type)
+                  for _ in range(OCR_CONSENSUS_RUNS)],
+                asyncio.to_thread(openai_read_totals, base64_image, media_type),
+                return_exceptions=True
             )
+            transcripts = [r for r in runs[:-1] if not isinstance(r, Exception) and r]
+            totals_result = runs[-1]
 
-            raw_content = response.choices[0].message.content
-            if not raw_content or not raw_content.strip():
+            failures = [r for r in runs if isinstance(r, Exception)]
+            if failures and not transcripts:
+                raise failures[0]
+
+            if not transcripts:
                 error_msg = INVALID_JOURNAL_IMAGE_ERROR
-                print(f"❌ OpenAI returned no readable journal entry content")
+                print("❌ OpenAI returned no readable journal entry content")
             else:
-                raw_response = raw_content.strip()
-                print(f"📥 OpenAI raw response:\n{raw_response}")
-                parsed_json = json.loads(raw_response)
-
-                if isinstance(parsed_json, dict) and "transactions" in parsed_json:
-                    extracted_transactions = parsed_json["transactions"]
-                    stated_totals = read_stated_totals(parsed_json)
-                elif isinstance(parsed_json, list):
-                    extracted_transactions = parsed_json
-
-                print(f"✅ Extracted {len(extracted_transactions)} transactions from OpenAI")
+                extracted_transactions, consensus_notes = build_consensus(transcripts)
+                if isinstance(totals_result, Exception):
+                    # Never fail the extraction over this — but say so, otherwise
+                    # a broken totals call silently disables the whole check.
+                    print(f"⚠️ Could not read the जम्मा total row: {totals_result}")
+                elif totals_result:
+                    stated_totals = totals_result
+                print(f"✅ Extracted {len(extracted_transactions)} transactions from OpenAI "
+                      f"({len(transcripts)}/{OCR_CONSENSUS_RUNS} transcription runs agreed on structure)")
+                for note in consensus_notes:
+                    print(f"⚠️ Consensus: {note}")
         except Exception as err:
             error_msg = extraction_error_message("OpenAI Vision", err)
             print(f"❌ {error_msg}")
@@ -397,6 +523,18 @@ Return ONLY a JSON object in this shape:
     # a discrepancy never rewrites an amount, it just tells the reviewer where
     # to look, so extraction stays "Extracted" and the rows remain editable.
     verification = verify_against_stated_totals(extracted_transactions, stated_totals)
+
+    # Cells the transcription passes disagreed on are surfaced first: they point
+    # at a specific row to re-check, which is more actionable than a bare total
+    # mismatch, and they catch misreads that happen to leave the totals intact.
+    if consensus_notes:
+        verification["warnings"] = consensus_notes + verification["warnings"]
+        verification["consensus_disagreement"] = True
+    verification["rows_needing_review"] = [
+        t.get("ledger_name") or f"row {i + 1}"
+        for i, t in enumerate(extracted_transactions) if t.get("needs_review")
+    ]
+
     if verification["warnings"]:
         for warning in verification["warnings"]:
             print(f"⚠️ Verification: {warning}")

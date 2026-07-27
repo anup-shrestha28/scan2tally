@@ -334,6 +334,20 @@ body {
 .amount-debit { color: #818cf8; }
 .amount-credit { color: #34d399; }
 
+/* Amount the extraction passes could not agree on — shown so the reviewer
+   checks this specific cell rather than trusting the whole voucher. */
+.amount-uncertain {
+  background-color: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.55);
+}
+.amount-uncertain:hover {
+  border-color: var(--accent-amber);
+}
+
+.row-needs-review td {
+  background-color: rgba(245, 158, 11, 0.06);
+}
+
 /* Placeholder shown in the unused side of a Dr/Cr row */
 .amount-empty {
   display: block;

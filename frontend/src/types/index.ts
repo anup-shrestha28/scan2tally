@@ -61,4 +61,8 @@ export interface Transaction {
   debit_amount: number;
   credit_amount: number;
   narration: string;
+  // Set when independent extraction passes disagreed on this row's amount, i.e.
+  // the handwriting could not be read reliably. The value shown is the majority
+  // reading, so it is a starting point to verify — not a trusted figure.
+  needs_review?: boolean;
 }

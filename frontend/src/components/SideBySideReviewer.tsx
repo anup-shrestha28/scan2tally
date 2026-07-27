@@ -21,10 +21,12 @@ interface SideBySideReviewerProps {
 function AmountInput({
   value,
   tone,
+  uncertain,
   onChange
 }: {
   value: number;
   tone: 'debit' | 'credit';
+  uncertain?: boolean;
   onChange: (amount: number) => void;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
@@ -40,7 +42,8 @@ function AmountInput({
       // size=1 kills the ~20ch intrinsic width an <input> otherwise demands,
       // which would override the table's column widths.
       size={1}
-      className={`cell-input amount-input amount-${tone}`}
+      className={`cell-input amount-input amount-${tone}${uncertain ? ' amount-uncertain' : ''}`}
+      title={uncertain ? 'Extraction passes disagreed on this amount — please verify against the voucher' : undefined}
       placeholder="0.00"
       value={draft !== null ? draft : formatted}
       onFocus={() => setDraft(value ? String(value) : '')}
@@ -425,7 +428,11 @@ export default function SideBySideReviewer({
                 </thead>
                 <tbody>
                   {transactions.map((tx) => (
-                    <tr key={tx.id} style={{ background: tx.entry_type === 'Dr' ? 'rgba(99, 102, 241, 0.03)' : 'transparent' }}>
+                    <tr
+                      key={tx.id}
+                      className={tx.needs_review ? 'row-needs-review' : undefined}
+                      style={{ background: tx.entry_type === 'Dr' ? 'rgba(99, 102, 241, 0.03)' : 'transparent' }}
+                    >
                       <td>
                         <span className={`status-pill ${tx.entry_type === 'Dr' ? 'status-processing' : 'status-extracted'}`} style={{ fontWeight: 700 }}>
                           {tx.entry_type}
@@ -446,6 +453,7 @@ export default function SideBySideReviewer({
                         {tx.entry_type === 'Dr' ? (
                           <AmountInput
                             tone="debit"
+                            uncertain={tx.needs_review}
                             value={tx.debit_amount || 0}
                             onChange={(amount) => handleUpdateTransaction(tx.id, 'debit_amount', amount)}
                           />
@@ -457,6 +465,7 @@ export default function SideBySideReviewer({
                         {tx.entry_type === 'Cr' ? (
                           <AmountInput
                             tone="credit"
+                            uncertain={tx.needs_review}
                             value={tx.credit_amount || 0}
                             onChange={(amount) => handleUpdateTransaction(tx.id, 'credit_amount', amount)}
                           />
