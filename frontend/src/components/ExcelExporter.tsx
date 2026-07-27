@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { FileSpreadsheet, Download, CheckCircle2, RefreshCw, ArrowLeft } from 'lucide-react';
+import React from 'react';
+import { Download, ArrowLeft } from 'lucide-react';
 import ExcelJS from 'exceljs';
 import { Transaction } from '../types';
 
@@ -37,8 +37,6 @@ const formatAmt = (n: number | undefined | null): string => {
 };
 
 export default function ExcelExporter({ transactions, onBack }: ExcelExporterProps) {
-  const [downloaded, setDownloaded] = useState<boolean>(false);
-
   // Group transactions by receipt_id so we can format each receipt as a separate voucher block
   const groupedTransactions: Record<string, Transaction[]> = {};
   transactions.forEach(t => {
@@ -144,69 +142,45 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
     link.click();
     document.body.removeChild(link);
 
-    setDownloaded(true);
   };
 
   const totalDebit = transactions.reduce((acc, curr) => acc + (Number(curr.debit_amount) || 0), 0);
   const totalCredit = transactions.reduce((acc, curr) => acc + (Number(curr.credit_amount) || 0), 0);
+  const balanceDifference = totalDebit - totalCredit;
+  const isBalanced = Math.abs(balanceDifference) < 0.01;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', maxWidth: '1050px', margin: '0 auto' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' }}>
         <button className="btn btn-secondary btn-sm" onClick={onBack}>
           <ArrowLeft size={16} />
-          Back to Verification Editor
+          Back to Review & Edit
         </button>
-      </div>
-
-      <div className="card" style={{ padding: '32px', textAlign: 'center' }}>
-        <div style={{
-          width: '64px',
-          height: '64px',
-          background: 'rgba(16, 185, 129, 0.1)',
-          color: '#10b981',
-          borderRadius: '50%',
-          display: 'inline-flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          marginBottom: '16px'
-        }}>
-          <FileSpreadsheet size={32} />
-        </div>
-
-        <h2 style={{ fontSize: '1.5rem', fontWeight: 700 }}>Tally Goshwara Excel File Ready</h2>
-        <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: '4px', maxWidth: '540px', margin: '4px auto 24px auto' }}>
-          Your extracted handwritten voucher line items have been formatted into a Tally-compatible spreadsheet ready for 1-click import into Tally Prime.
-        </p>
-
-        <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
-          <button className="btn btn-primary" onClick={generateAndDownloadExcel} style={{ padding: '12px 24px', fontSize: '1rem' }}>
-            <Download size={18} />
-            Download Tally Excel Spreadsheet (.xlsx)
-          </button>
-          
-          <button className="btn btn-secondary" onClick={generateAndDownloadExcel}>
-            <RefreshCw size={16} />
-            Regenerate Fresh Copy
-          </button>
-        </div>
-
-        {downloaded && (
-          <div style={{ marginTop: '16px', color: '#10b981', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
-            <CheckCircle2 size={18} /> Excel file successfully saved to your downloads!
-          </div>
-        )}
+        <button className="btn btn-primary export-download-btn" onClick={generateAndDownloadExcel}>
+          <Download size={18} />
+          Download Excel (.xlsx)
+        </button>
       </div>
 
       <div className="card">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-          <h3 style={{ fontSize: '1.1rem', fontWeight: 600 }}>
-            Tally Import File Preview ({transactions.length} rows total)
-          </h3>
+          <div>
+            <h3 style={{ fontSize: '1.1rem', fontWeight: 600 }}>Excel File Preview</h3>
+            <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+              {groups.length} {groups.length === 1 ? 'voucher' : 'vouchers'}
+            </span>
+          </div>
 
-          <div style={{ display: 'flex', gap: '16px', fontSize: '0.875rem' }}>
-            <span>Total Debit: <strong style={{ color: '#818cf8' }}>Rs. {totalDebit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong></span>
-            <span>Total Credit: <strong style={{ color: '#34d399' }}>Rs. {totalCredit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong></span>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px', fontSize: '0.875rem' }}>
+            <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+              <span>Total Debit: <strong style={{ color: '#818cf8' }}>Rs. {totalDebit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong></span>
+              <span>Total Credit: <strong style={{ color: '#34d399' }}>Rs. {totalCredit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong></span>
+            </div>
+            {!isBalanced && (
+              <span style={{ color: '#f87171', fontWeight: 600 }}>
+                Unbalanced by Rs. {Math.abs(balanceDifference).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+              </span>
+            )}
           </div>
         </div>
 

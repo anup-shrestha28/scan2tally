@@ -189,6 +189,18 @@ body {
   box-shadow: 0 0 12px var(--primary-glow);
 }
 
+.export-download-btn {
+  padding: 10px 20px;
+  font-size: 0.9rem;
+  box-shadow: 0 4px 12px var(--primary-glow);
+  transition: transform 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
+}
+
+.export-download-btn:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 10px 20px var(--primary-glow);
+}
+
 .btn-secondary {
   background-color: var(--bg-card);
   border-color: var(--border-color);
