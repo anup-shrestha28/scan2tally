@@ -35,6 +35,9 @@ export interface Receipt {
   // small to read reliably before spending an extraction on them.
   image_width?: number;
   image_height?: number;
+  // Path inside the private 'receipts' storage bucket. previewUrl is a
+  // short-lived signed URL derived from this, so only the path is durable.
+  storage_path?: string;
   error_message?: string;
   // Reconciliation notices from the backend (e.g. the extracted rows disagree
   // with the voucher's printed जम्मा total). Advisory only — the receipt is

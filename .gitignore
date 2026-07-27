@@ -17,3 +17,8 @@
 .DS_Store
 .vscode/
 .idea/
+
+# Credential scratch files - never commit
+cred.txt
+cred*.txt
+*credentials*.txt

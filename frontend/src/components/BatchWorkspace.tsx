@@ -1,6 +1,20 @@
 import React, { useEffect, useState } from 'react';
 import { FolderPlus, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw } from 'lucide-react';
-import { ScanBatch, Receipt, UserRole, Transaction, EntryType } from '../types';
+import { ScanBatch, Receipt, User, UserRole, Transaction, EntryType } from '../types';
+import {
+  newId,
+  fetchBatches,
+  createBatch,
+  renameBatch,
+  deleteBatch,
+  createReceipt,
+  updateReceiptRow,
+  deleteReceipt,
+  uploadReceiptImage,
+  getReceiptImageUrl,
+  downloadReceiptImage,
+  saveTransactionsForReceipt,
+} from '../lib/db';
 
 const NOT_JOURNAL_ENTRY_ERROR = 'The uploaded image is not a journal entry. Please check and try again.';
 
@@ -43,21 +57,17 @@ function getExtractionErrorMessage(error?: string): string {
 
 interface BatchWorkspaceProps {
   userRole: UserRole;
+  currentUser: User;
   onSelectBatch: (batch: ScanBatch, selectedReceipt?: Receipt, extractedTx?: Transaction[], txMap?: Record<string, Transaction[]>) => void;
 }
 
-export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspaceProps) {
-  const [batches, setBatches] = useState<ScanBatch[]>([
-    {
-      id: 'batch-001',
-      name: 'Scan Batch - July 25, 2026',
-      status: 'Active',
-      created_at: '2026-07-25 10:15 AM',
-      receipts: []
-    }
-  ]);
+export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }: BatchWorkspaceProps) {
+  const [batches, setBatches] = useState<ScanBatch[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
-  const [activeBatchId, setActiveBatchId] = useState<string>('batch-001');
+  const [activeBatchId, setActiveBatchId] = useState<string>('');
   const [editingBatchId, setEditingBatchId] = useState<string | null>(null);
   const [editedBatchName, setEditedBatchName] = useState<string>('');
   const [deletingBatchId, setDeletingBatchId] = useState<string | null>(null);
@@ -69,14 +79,53 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
   const [uploadedFilesMap, setUploadedFilesMap] = useState<Record<string, File>>({});
   const [receiptTransactionsMap, setReceiptTransactionsMap] = useState<Record<string, Transaction[]>>({});
 
-  const activeBatch = batches.find(b => b.id === activeBatchId) || batches[0];
-  const extractableCount = activeBatch.receipts.filter(r => r.status === 'Pending' || r.status === 'Failed').length;
-  const hasFailedExtraction = activeBatch.receipts.some(r => r.status === 'Failed');
+  // May be undefined before the first load finishes, or when the user has no
+  // batches yet — every read below has to tolerate that.
+  const activeBatch: ScanBatch | undefined =
+    batches.find(b => b.id === activeBatchId) || batches[0];
+  const activeReceipts = activeBatch?.receipts ?? [];
+  const extractableCount = activeReceipts.filter(r => r.status === 'Pending' || r.status === 'Failed').length;
+  const hasFailedExtraction = activeReceipts.some(r => r.status === 'Failed');
   // Only counts receipts still awaiting extraction — no point nagging about
   // photos that have already been processed.
-  const lowResPendingCount = activeBatch.receipts.filter(
+  const lowResPendingCount = activeReceipts.filter(
     r => (r.status === 'Pending' || r.status === 'Failed') && isLowResolution(r)
   ).length;
+
+  // Load everything this user is allowed to see. Row-level security decides
+  // that server-side, so there is no organisation filter here.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const loaded = await fetchBatches();
+        if (cancelled) return;
+
+        // Swap stored paths for signed URLs so thumbnails work after a refresh.
+        await Promise.all(
+          loaded.flatMap(b =>
+            b.receipts.map(async r => {
+              if (!r.storage_path) return;
+              try {
+                r.previewUrl = await getReceiptImageUrl(r.storage_path);
+              } catch {
+                r.previewUrl = '';
+              }
+            })
+          )
+        );
+
+        if (cancelled) return;
+        setBatches(loaded);
+        setActiveBatchId(prev => prev || loaded[0]?.id || '');
+      } catch (err: any) {
+        if (!cancelled) setLoadError(err?.message || 'Could not load your scan batches.');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (!deletingBatchId) return;
@@ -89,46 +138,83 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
     };
   }, [deletingBatchId]);
 
-  const handleCreateBatch = () => {
+  const handleCreateBatch = async () => {
+    if (!currentUser.organization_id) {
+      setSaveError('Your account is not linked to an organisation, so batches cannot be created.');
+      return;
+    }
     const todayStr = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
     const countToday = batches.filter(b => b.name.includes(todayStr)).length;
     const defaultName = `Scan Batch - ${todayStr}${countToday > 0 ? ` (#${countToday + 1})` : ''}`;
 
     const newBatch: ScanBatch = {
-      id: `batch-${Date.now()}`,
+      // A real UUID, because that is the primary key type in Postgres.
+      id: newId(),
       name: defaultName,
       status: 'Active',
       created_at: new Date().toLocaleString(),
       receipts: []
     };
 
-    setBatches([newBatch, ...batches]);
-    setActiveBatchId(newBatch.id);
+    try {
+      await createBatch({
+        id: newBatch.id,
+        name: newBatch.name,
+        organizationId: currentUser.organization_id,
+        userId: currentUser.id,
+      });
+      setBatches(prev => [newBatch, ...prev]);
+      setActiveBatchId(newBatch.id);
+      setSaveError(null);
+    } catch (err: any) {
+      setSaveError(err?.message || 'Could not create the batch.');
+    }
   };
 
-  const handleRenameBatch = (id: string) => {
+  const handleRenameBatch = async (id: string) => {
     if (!editedBatchName.trim()) return;
-    setBatches(batches.map(b => b.id === id ? { ...b, name: editedBatchName } : b));
+    const name = editedBatchName.trim();
+    const previous = batches.find(b => b.id === id)?.name;
+    setBatches(prev => prev.map(b => (b.id === id ? { ...b, name } : b)));
     setEditingBatchId(null);
+    try {
+      await renameBatch(id, name);
+      setSaveError(null);
+    } catch (err: any) {
+      // Put the old name back rather than leaving the screen disagreeing
+      // with what is actually stored.
+      setBatches(prev => prev.map(b => (b.id === id && previous ? { ...b, name: previous } : b)));
+      setSaveError(err?.message || 'Could not rename the batch.');
+    }
   };
 
-  const handleDeleteBatch = (id: string) => {
+  const handleDeleteBatch = async (id: string) => {
+    const snapshot = batches;
     const remaining = batches.filter(b => b.id !== id);
     setBatches(remaining);
     if (activeBatchId === id) {
       setActiveBatchId(remaining[0]?.id || '');
     }
     setDeletingBatchId(null);
+    try {
+      await deleteBatch(id);
+      setSaveError(null);
+    } catch (err: any) {
+      setBatches(snapshot);
+      setSaveError(err?.message || 'Could not delete the batch.');
+    }
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement> | { target: { files: FileList | File[] } }) => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
+    if (!activeBatch || !currentUser.organization_id) return;
 
+    const batchId = activeBatch.id;
     const newFilesMap: Record<string, File> = { ...uploadedFilesMap };
 
-    const newReceipts: Receipt[] = files.map((file, idx) => {
-      const rcptId = `rcpt-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 7)}`;
+    const newReceipts: Receipt[] = files.map(file => {
+      const rcptId = newId();
       newFilesMap[rcptId] = file;
       return {
         id: rcptId,
@@ -140,30 +226,63 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
 
     setUploadedFilesMap(newFilesMap);
 
-    setBatches(batches.map(b => {
-      if (b.id === activeBatchId) {
+    setBatches(prev => prev.map(b => {
+      if (b.id === batchId) {
         return { ...b, receipts: [...b.receipts, ...newReceipts] };
       }
       return b;
     }));
 
+    // Persist the row first so the receipt survives a refresh even if the
+    // image upload is still running, then attach the stored image.
+    newReceipts.forEach(async receipt => {
+      const file = newFilesMap[receipt.id];
+      try {
+        await createReceipt({
+          id: receipt.id,
+          batchId,
+          userId: currentUser.id,
+          filename: receipt.filename,
+        });
+        const path = await uploadReceiptImage(file, {
+          organizationId: currentUser.organization_id!,
+          batchId,
+          receiptId: receipt.id,
+        });
+        await updateReceiptRow(receipt.id, { file_path: path });
+        updateReceipt(batchId, receipt.id, { storage_path: path });
+        setSaveError(null);
+      } catch (err: any) {
+        setSaveError(
+          `"${receipt.filename}" could not be saved to the server (${err?.message || 'unknown error'}). ` +
+          `It is still usable in this session but will not survive a refresh.`
+        );
+      }
+    });
+
     // Measure in the background so the thumbnails appear immediately. PDFs are
     // skipped — there is no bitmap to measure.
-    const batchId = activeBatchId;
     newReceipts.forEach(receipt => {
       const file = newFilesMap[receipt.id];
       if (file?.type === 'application/pdf') return;
       measureImage(receipt.previewUrl).then(size => {
-        if (size) {
-          updateReceipt(batchId, receipt.id, { image_width: size.width, image_height: size.height });
-        }
+        if (!size) return;
+        updateReceipt(batchId, receipt.id, { image_width: size.width, image_height: size.height });
+        updateReceiptRow(receipt.id, {
+          image_width: size.width,
+          image_height: size.height,
+        }).catch(() => { /* dimensions are advisory; a failure here is not worth interrupting for */ });
       });
     });
   };
 
-  const handleDeleteReceipt = (receiptId: string) => {
+  const handleDeleteReceipt = async (receiptId: string) => {
+    if (!activeBatch) return;
+    const batchId = activeBatch.id;
     const receipt = activeBatch.receipts.find(r => r.id === receiptId);
-    if (receipt?.previewUrl) {
+    const snapshot = batches;
+
+    if (receipt?.previewUrl?.startsWith('blob:')) {
       URL.revokeObjectURL(receipt.previewUrl);
     }
 
@@ -180,11 +299,19 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
     });
 
     setBatches(prev => prev.map(b => {
-      if (b.id === activeBatchId) {
+      if (b.id === batchId) {
         return { ...b, receipts: b.receipts.filter(r => r.id !== receiptId) };
       }
       return b;
     }));
+
+    try {
+      await deleteReceipt(receiptId);
+      setSaveError(null);
+    } catch (err: any) {
+      setBatches(snapshot);
+      setSaveError(err?.message || 'Could not delete the receipt.');
+    }
   };
 
   const updateReceipt = (batchId: string, receiptId: string, patch: Partial<Receipt>) => {
@@ -194,11 +321,38 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
     }));
   };
 
+  /**
+   * Mirrors a receipt's extraction outcome into the database.
+   *
+   * Kept separate from updateReceipt so the on-screen state updates instantly
+   * while the write happens in the background; a failed write must not wedge
+   * the extraction loop, so it only records a message.
+   */
+  const persistReceiptState = (
+    receiptId: string,
+    patch: { status?: string; error_message?: string | null; verification_warnings?: string[] }
+  ) => {
+    updateReceiptRow(receiptId, patch).catch((err: any) => {
+      setSaveError(`Could not save extraction status: ${err?.message || 'unknown error'}`);
+    });
+  };
+
   const extractSingleReceipt = async (batchId: string, receipt: Receipt): Promise<Transaction[] | null> => {
-    const actualFile = uploadedFilesMap[receipt.id];
+    // After a refresh the in-memory file is gone, so fall back to the copy in
+    // storage. Without this, retrying an old receipt could only ever fail.
+    let actualFile = uploadedFilesMap[receipt.id];
+    if (!actualFile && receipt.storage_path) {
+      const downloaded = await downloadReceiptImage(receipt.storage_path);
+      if (downloaded) {
+        actualFile = downloaded;
+        setUploadedFilesMap(prev => ({ ...prev, [receipt.id]: downloaded }));
+      }
+    }
 
     if (!actualFile) {
-      updateReceipt(batchId, receipt.id, { status: 'Failed', error_message: 'Original file is no longer available in this session.' });
+      const message = 'The original image is no longer available. Please upload it again.';
+      updateReceipt(batchId, receipt.id, { status: 'Failed', error_message: message });
+      persistReceiptState(receipt.id, { status: 'Failed', error_message: message });
       return null;
     }
 
@@ -207,6 +361,11 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
       status: 'Processing',
       error_message: undefined,
       verification_warnings: undefined
+    });
+    persistReceiptState(receipt.id, {
+      status: 'Processing',
+      error_message: null,
+      verification_warnings: [],
     });
 
     try {
@@ -219,17 +378,18 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
       });
 
       if (!response.ok) {
-        updateReceipt(batchId, receipt.id, { status: 'Failed', error_message: `Extraction server responded with status ${response.status}.` });
+        const message = `Extraction server responded with status ${response.status}.`;
+        updateReceipt(batchId, receipt.id, { status: 'Failed', error_message: message });
+        persistReceiptState(receipt.id, { status: 'Failed', error_message: message });
         return null;
       }
 
       const data = await response.json();
 
       if (data.error || !data.transactions || !data.transactions.length) {
-        updateReceipt(batchId, receipt.id, {
-          status: 'Failed',
-          error_message: getExtractionErrorMessage(data.error)
-        });
+        const message = getExtractionErrorMessage(data.error);
+        updateReceipt(batchId, receipt.id, { status: 'Failed', error_message: message });
+        persistReceiptState(receipt.id, { status: 'Failed', error_message: message });
         return null;
       }
 
@@ -247,7 +407,8 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
             : (debit || (legacy && !credit)) ? 'Dr' : 'Cr';
 
         return {
-          id: `tx-${receipt.id}-${i}`,
+          // UUID because these rows are written straight to Postgres.
+          id: newId(),
           voucher_date: t.voucher_date || '2083-03-15',
           voucher_type: t.voucher_type || 'Journal',
           entry_type: entryType,
@@ -272,17 +433,36 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
         error_message: undefined,
         verification_warnings: warnings.length > 0 ? warnings : undefined
       });
+      persistReceiptState(receipt.id, {
+        status: 'Extracted',
+        error_message: null,
+        verification_warnings: warnings,
+      });
+
+      // Store the extracted lines immediately, so a crash between extraction
+      // and review does not throw away work the user already paid for.
+      if (currentUser.organization_id) {
+        try {
+          await saveTransactionsForReceipt(
+            receipt.id,
+            { batchId, organizationId: currentUser.organization_id, userId: currentUser.id },
+            mappedTx
+          );
+        } catch (err: any) {
+          setSaveError(`Extracted rows could not be saved: ${err?.message || 'unknown error'}`);
+        }
+      }
       return mappedTx;
     } catch (err: any) {
-      updateReceipt(batchId, receipt.id, {
-        status: 'Failed',
-        error_message: err?.message || 'Network error while contacting the extraction service.'
-      });
+      const message = err?.message || 'Network error while contacting the extraction service.';
+      updateReceipt(batchId, receipt.id, { status: 'Failed', error_message: message });
+      persistReceiptState(receipt.id, { status: 'Failed', error_message: message });
       return null;
     }
   };
 
   const handleTriggerExtraction = async () => {
+    if (!activeBatch) return;
     setIsProcessing(true);
 
     // US-25: only process receipts that are new or previously failed —
@@ -333,8 +513,49 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
     return file?.type === 'application/pdf' || receipt.filename.toLowerCase().endsWith('.pdf');
   };
 
+  if (loading) {
+    return (
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px',
+        minHeight: '50vh', color: 'var(--text-muted)'
+      }}>
+        <Loader2 size={18} className="animate-spin" />
+        Loading your scan batches...
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="card" style={{ maxWidth: '560px', margin: '40px auto', textAlign: 'center' }}>
+        <AlertCircle size={28} color="#f43f5e" style={{ marginBottom: '10px' }} />
+        <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '6px' }}>
+          Could not load your batches
+        </h3>
+        <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>{loadError}</p>
+      </div>
+    );
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+      {saveError && (
+        <div style={{
+          display: 'flex', alignItems: 'flex-start', gap: '8px',
+          background: 'rgba(245, 158, 11, 0.12)', border: '1px solid rgba(245, 158, 11, 0.4)',
+          color: '#f59e0b', borderRadius: 'var(--radius-md)', padding: '10px 14px', fontSize: '0.82rem'
+        }}>
+          <AlertTriangle size={15} style={{ flexShrink: 0, marginTop: '1px' }} />
+          <span style={{ flex: 1 }}>{saveError}</span>
+          <button
+            onClick={() => setSaveError(null)}
+            style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: '1rem', lineHeight: 1 }}
+            title="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+      )}
       <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: '24px' }}>
         <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '12px', minHeight: 'calc(100vh - 120px)', position: 'sticky', top: '24px', alignSelf: 'start' }}>
           <h3 style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text-muted)' }}>Scan Batches</h3>
@@ -416,6 +637,17 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
           </div>
         </div>
 
+        {!activeBatch ? (
+          <div className="card" style={{ textAlign: 'center', padding: '48px 24px' }}>
+            <FolderPlus size={32} color="var(--text-dim)" style={{ marginBottom: '12px' }} />
+            <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '6px' }}>
+              No scan batches yet
+            </h3>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>
+              Create a scan batch to start uploading handwritten voucher photos.
+            </p>
+          </div>
+        ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
           <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div>
@@ -616,6 +848,7 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
             )}
           </div>
         </div>
+        )}
       </div>
 
       {/* Delete Confirmation Modal */}

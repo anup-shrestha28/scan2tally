@@ -1,59 +1,36 @@
 import React, { useState } from 'react';
-import { ShieldCheck, UserCheck, KeyRound, Building, Layers } from 'lucide-react';
-import { User, UserRole } from '../types';
+import { KeyRound, Layers, AlertCircle, Loader2 } from 'lucide-react';
+import { signIn } from '../lib/db';
 
 interface LoginModalProps {
-  onLogin: (user: User) => void;
+  /** Called after Supabase confirms the credentials; the profile is loaded by App. */
+  onAuthenticated: () => void;
 }
 
-export default function LoginModal({ onLogin }: LoginModalProps) {
-  const [email, setEmail] = useState('operator@scan2tally.com');
-  const [password, setPassword] = useState('password123');
+export default function LoginModal({ onAuthenticated }: LoginModalProps) {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    onLogin({
-      id: 'usr-001',
-      name: 'John Accountant',
-      email: email,
-      role: 'Operator',
-      status: 'Active',
-      orgId: '00000000-0000-0000-0000-000000000001',
-      orgName: 'Alpha Accounts Pvt Ltd'
-    });
-  };
-
-  const handleDemoRole = (role: UserRole) => {
-    if (role === 'Super Admin') {
-      onLogin({
-        id: 'usr-super',
-        name: 'Alex Platform Owner',
-        email: 'superadmin@scan2tally.com',
-        role: 'Super Admin',
-        status: 'Active',
-        orgId: null,
-        orgName: 'Global System Owner'
-      });
-    } else if (role === 'Admin') {
-      onLogin({
-        id: 'usr-admin',
-        name: 'Sarah Company Admin',
-        email: 'admin@alpha-accounts.com',
-        role: 'Admin',
-        status: 'Active',
-        orgId: '00000000-0000-0000-0000-000000000001',
-        orgName: 'Alpha Accounts Pvt Ltd'
-      });
-    } else {
-      onLogin({
-        id: 'usr-operator',
-        name: 'David Data Entry Specialist',
-        email: 'operator@alpha-accounts.com',
-        role: 'Operator',
-        status: 'Active',
-        orgId: '00000000-0000-0000-0000-000000000001',
-        orgName: 'Alpha Accounts Pvt Ltd'
-      });
+    setError(null);
+    setBusy(true);
+    try {
+      await signIn(email.trim(), password);
+      onAuthenticated();
+    } catch (err: any) {
+      // Supabase phrases this as "Invalid login credentials", which reads like
+      // a system fault rather than a typo.
+      const message = String(err?.message || '');
+      setError(
+        /invalid login credentials/i.test(message)
+          ? 'That email and password do not match an account.'
+          : message || 'Could not sign in. Please try again.'
+      );
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -89,63 +66,81 @@ export default function LoginModal({ onLogin }: LoginModalProps) {
         <form onSubmit={handleSubmit}>
           <div className="form-group">
             <label className="form-label">Email Address</label>
-            <input 
-              type="email" 
-              className="form-input" 
+            <input
+              type="email"
+              className="form-input"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              autoComplete="username"
+              placeholder="you@company.com"
+              disabled={busy}
               required
+              autoFocus
             />
           </div>
 
           <div className="form-group">
             <label className="form-label">Password</label>
-            <input 
-              type="password" 
-              className="form-input" 
+            <input
+              type="password"
+              className="form-input"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              autoComplete="current-password"
+              disabled={busy}
               required
             />
           </div>
 
-          <button type="submit" className="btn btn-primary" style={{ width: '100%', padding: '12px', marginTop: '8px' }}>
-            <KeyRound size={18} />
-            Sign In to Dashboard
+          {error && (
+            <div style={{
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: '8px',
+              background: 'rgba(244, 63, 94, 0.12)',
+              border: '1px solid rgba(244, 63, 94, 0.35)',
+              color: '#f43f5e',
+              borderRadius: 'var(--radius-md)',
+              padding: '10px 12px',
+              fontSize: '0.82rem',
+              marginBottom: '12px'
+            }}>
+              <AlertCircle size={15} style={{ flexShrink: 0, marginTop: '1px' }} />
+              <span>{error}</span>
+            </div>
+          )}
+
+          <button
+            type="submit"
+            className="btn btn-primary"
+            style={{ width: '100%', padding: '12px', marginTop: '8px' }}
+            disabled={busy}
+          >
+            {busy ? (
+              <>
+                <Loader2 size={18} className="animate-spin" />
+                Signing in...
+              </>
+            ) : (
+              <>
+                <KeyRound size={18} />
+                Sign In to Dashboard
+              </>
+            )}
           </button>
         </form>
 
-        <div style={{ margin: '24px 0 16px 0', borderTop: '1px solid var(--border-color)', position: 'relative' }}>
-          <span style={{
-            position: 'absolute',
-            top: '-10px',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            background: 'var(--bg-card)',
-            padding: '0 8px',
-            fontSize: '0.75rem',
-            color: 'var(--text-muted)'
-          }}>
-            QUICK ROLE DEMO LOGIN
-          </span>
-        </div>
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <button className="btn btn-secondary" onClick={() => handleDemoRole('Super Admin')} style={{ justifyContent: 'flex-start' }}>
-            <ShieldCheck size={16} color="#a855f7" />
-            <span>Login as <strong>Super Admin</strong> (Platform Owner)</span>
-          </button>
-          
-          <button className="btn btn-secondary" onClick={() => handleDemoRole('Admin')} style={{ justifyContent: 'flex-start' }}>
-            <Building size={16} color="#6366f1" />
-            <span>Login as <strong>Admin</strong> (Company Manager)</span>
-          </button>
-
-          <button className="btn btn-secondary" onClick={() => handleDemoRole('Operator')} style={{ justifyContent: 'flex-start' }}>
-            <UserCheck size={16} color="#10b981" />
-            <span>Login as <strong>Operator</strong> (Data Entry Staff)</span>
-          </button>
-        </div>
+        <p style={{
+          marginTop: '20px',
+          textAlign: 'center',
+          fontSize: '0.78rem',
+          color: 'var(--text-muted)',
+          lineHeight: 1.6
+        }}>
+          Accounts are created by your administrator.
+          <br />
+          Contact them if you cannot sign in.
+        </p>
       </div>
     </div>
   );

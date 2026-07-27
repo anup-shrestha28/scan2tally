@@ -113,8 +113,56 @@ python3 main.py
 1. Create a free project at [Supabase.com](https://supabase.com/).
 2. Open the **SQL Editor** in your Supabase dashboard.
 3. Paste and run the contents of [`supabase_schema.sql`](./supabase_schema.sql).
-4. Create a public storage bucket named **`receipts`** under Supabase Storage.
-5. Copy your `SUPABASE_URL` and `SUPABASE_ANON_KEY` into `frontend/.env` and `backend/.env`.
+   This also creates the private `receipts` storage bucket and its access
+   policies — there is no bucket to create by hand.
+4. From **Project Settings → API**, copy the project URL and the **anon** key
+   into `frontend/.env` as `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
+
+The bucket is deliberately **private**: receipt images are served through
+short-lived signed URLs, so one organization cannot read another's scans by
+guessing a path.
+
+---
+
+### 4️⃣ Create the first login
+
+Accounts are created by an administrator; there is no public signup. Use the
+service role key (Project Settings → API → **service_role**) — keep it off the
+frontend and out of version control.
+
+```bash
+node scripts/create-user.mjs \
+  --url https://<your-project>.supabase.co \
+  --service-key <service_role key> \
+  --email admin@yourcompany.com \
+  --password 'a strong password' \
+  --name 'Your Name' \
+  --role Admin \
+  --org 'Your Company Pvt Ltd'
+```
+
+`--role` is `Super Admin`, `Admin` or `Operator`. A Super Admin belongs to no
+organization, so `--org` is only needed for the other two. The organization is
+created automatically the first time you name it.
+
+---
+
+### 5️⃣ Working against a local database (optional)
+
+To develop without touching the cloud project, run the whole Supabase stack
+locally with Docker:
+
+```bash
+npx supabase init      # once
+npx supabase start     # prints the local URL and keys
+
+# apply the schema to the local database
+psql "postgresql://postgres:postgres@127.0.0.1:54322/postgres" -f supabase_schema.sql
+```
+
+Put the printed local URL and anon key in `frontend/.env.local`, which Vite
+prefers over `.env` and which git ignores, so local credentials never end up in
+a commit.
 
 ---
 

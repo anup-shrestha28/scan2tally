@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2, RotateCcw, RotateCw, ChevronLeft, ChevronRight } from 'lucide-react';
-import { ScanBatch, Receipt, Transaction } from '../types';
+import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2, RotateCcw, RotateCw, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
+import { ScanBatch, Receipt, Transaction, User } from '../types';
+import { saveTransactionsForReceipt, getReceiptImageUrl } from '../lib/db';
 
 interface SideBySideReviewerProps {
   batch: ScanBatch | null;
+  currentUser: User;
   selectedReceipt?: Receipt | null;
   initialTransactions?: Transaction[];
   allReceiptTransactions?: Record<string, Transaction[]>;
@@ -72,6 +74,7 @@ function blankRow(date?: string): Transaction {
 
 export default function SideBySideReviewer({
   batch,
+  currentUser,
   selectedReceipt,
   initialTransactions,
   allReceiptTransactions = {},
@@ -100,6 +103,9 @@ export default function SideBySideReviewer({
   });
 
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [imageUrl, setImageUrl] = useState<string>('');
   const [rotation, setRotation] = useState(0);
   const [showImbalanceModal, setShowImbalanceModal] = useState(false);
   const [pendingExportData, setPendingExportData] = useState<Transaction[] | null>(null);
@@ -135,6 +141,72 @@ export default function SideBySideReviewer({
   useEffect(() => {
     setTxMap(prev => ({ ...prev, ...allReceiptTransactions }));
   }, [allReceiptTransactions]);
+
+  /**
+   * Auto-save.
+   *
+   * Every edit is written back roughly a second after typing stops, so closing
+   * the tab cannot lose corrections. The timer restarts on each keystroke, which
+   * keeps a burst of typing to a single write.
+   *
+   * The first render is skipped deliberately: it would otherwise re-save rows
+   * that were only just loaded, and would write a blank placeholder row over a
+   * receipt that has not been extracted yet.
+   */
+  const AUTOSAVE_DELAY_MS = 1000;
+  const skipFirstSave = useRef(true);
+
+  useEffect(() => {
+    if (skipFirstSave.current) {
+      skipFirstSave.current = false;
+      return;
+    }
+    if (!currentReceipt || !batch || !currentUser.organization_id) return;
+    // A single empty row is the placeholder shown for an unextracted receipt,
+    // not user work; saving it would create a phantom voucher line.
+    const isJustBlankPlaceholder =
+      transactions.length === 1 &&
+      !transactions[0].ledger_name &&
+      !transactions[0].debit_amount &&
+      !transactions[0].credit_amount;
+    if (isJustBlankPlaceholder) return;
+
+    const receiptId = currentReceipt.id;
+    const rows = transactions;
+    const timer = setTimeout(() => {
+      setSaveState('saving');
+      saveTransactionsForReceipt(
+        receiptId,
+        { batchId: batch.id, organizationId: currentUser.organization_id!, userId: currentUser.id },
+        rows
+      )
+        .then(() => {
+          setSaveState('saved');
+          setSaveError(null);
+        })
+        .catch((err: any) => {
+          setSaveState('error');
+          setSaveError(err?.message || 'Changes could not be saved.');
+        });
+    }, AUTOSAVE_DELAY_MS);
+
+    return () => clearTimeout(timer);
+  }, [transactions, currentReceipt?.id, batch?.id]);
+
+  // Resolve a signed URL for the stored image; blob URLs from this session are
+  // used as-is, and only the storage path survives a refresh.
+  useEffect(() => {
+    let cancelled = false;
+    if (!currentReceipt) { setImageUrl(''); return; }
+    if (currentReceipt.previewUrl) { setImageUrl(currentReceipt.previewUrl); return; }
+    if (!currentReceipt.storage_path) { setImageUrl(''); return; }
+
+    getReceiptImageUrl(currentReceipt.storage_path)
+      .then(url => { if (!cancelled) setImageUrl(url); })
+      .catch(() => { if (!cancelled) setImageUrl(''); });
+
+    return () => { cancelled = true; };
+  }, [currentReceipt?.id, currentReceipt?.previewUrl, currentReceipt?.storage_path]);
 
   const rotateLeft = () => setRotation(r => r - 90);
   const rotateRight = () => setRotation(r => r + 90);
@@ -180,9 +252,27 @@ export default function SideBySideReviewer({
     setTransactions(transactions.filter(t => t.id !== id));
   };
 
-  const handleSaveProgress = () => {
+  const handleSaveProgress = async () => {
     if (currentReceipt) {
       setTxMap(prev => ({ ...prev, [currentReceipt.id]: transactions }));
+    }
+    // Writes through rather than only confirming: this button previously
+    // reported success while nothing left the browser.
+    if (currentReceipt && batch && currentUser.organization_id) {
+      setSaveState('saving');
+      try {
+        await saveTransactionsForReceipt(
+          currentReceipt.id,
+          { batchId: batch.id, organizationId: currentUser.organization_id, userId: currentUser.id },
+          transactions
+        );
+        setSaveState('saved');
+        setSaveError(null);
+      } catch (err: any) {
+        setSaveState('error');
+        setSaveError(err?.message || 'Changes could not be saved.');
+        return;
+      }
     }
     setSavedSuccess(true);
     setTimeout(() => setSavedSuccess(false), 3000);
@@ -279,13 +369,33 @@ export default function SideBySideReviewer({
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          {/* Reflects what has actually reached the database, so "Saved" is
+              never claimed for work that only exists in the browser. */}
+          {saveState === 'saving' && (
+            <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '5px' }}>
+              <Loader2 size={15} className="animate-spin" /> Saving...
+            </span>
+          )}
+          {saveState === 'saved' && !savedSuccess && (
+            <span style={{ color: '#10b981', fontSize: '0.85rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <CheckCircle2 size={16} /> All changes saved
+            </span>
+          )}
+          {saveState === 'error' && (
+            <span
+              style={{ color: '#f43f5e', fontSize: '0.85rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}
+              title={saveError || undefined}
+            >
+              <AlertTriangle size={16} /> Not saved
+            </span>
+          )}
           {savedSuccess && (
             <span style={{ color: '#10b981', fontSize: '0.85rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
               <CheckCircle2 size={16} /> Saved!
             </span>
           )}
-          <button className="btn btn-secondary" onClick={handleSaveProgress}>
-            <Save size={16} /> Save Progress
+          <button className="btn btn-secondary" onClick={handleSaveProgress} disabled={saveState === 'saving'}>
+            <Save size={16} /> Save Now
           </button>
           <button className="btn btn-primary" onClick={handleExportAll}>
             <FileSpreadsheet size={16} /> Export Tally Excel (.xlsx)
@@ -377,9 +487,9 @@ export default function SideBySideReviewer({
           </div>
 
           <div className="image-viewer" style={{ overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            {currentReceipt?.previewUrl ? (
+            {imageUrl ? (
               <img
-                src={currentReceipt.previewUrl}
+                src={imageUrl}
                 alt="Uploaded Handwritten Bill Receipt"
                 className="receipt-img"
                 style={{ transform: `rotate(${rotation}deg)`, transition: 'transform 0.3s ease', maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
