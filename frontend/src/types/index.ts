@@ -31,6 +31,10 @@ export interface Receipt {
   filename: string;
   status: ReceiptStatus;
   previewUrl: string;
+  // Measured from the image after upload, so we can warn about photos too
+  // small to read reliably before spending an extraction on them.
+  image_width?: number;
+  image_height?: number;
   error_message?: string;
   // Reconciliation notices from the backend (e.g. the extracted rows disagree
   // with the voucher's printed जम्मा total). Advisory only — the receipt is

@@ -4,6 +4,32 @@ import { ScanBatch, Receipt, UserRole, Transaction, EntryType } from '../types';
 
 const NOT_JOURNAL_ENTRY_ERROR = 'The uploaded image is not a journal entry. Please check and try again.';
 
+/**
+ * Minimum short edge, in pixels, for a voucher photo we trust.
+ *
+ * The vision API works at roughly 768px on the short edge, so anything below
+ * that has already lost handwriting detail before extraction even starts. 1000
+ * leaves a margin. For reference, vouchers that extract cleanly measure around
+ * 1350x1800; a 368x547 photo produced amounts the model could not read
+ * consistently and had to flag.
+ */
+const MIN_IMAGE_SHORT_EDGE = 1000;
+
+function isLowResolution(receipt: Receipt): boolean {
+  if (!receipt.image_width || !receipt.image_height) return false;
+  return Math.min(receipt.image_width, receipt.image_height) < MIN_IMAGE_SHORT_EDGE;
+}
+
+/** Reads an image's pixel dimensions without blocking the upload. */
+function measureImage(url: string): Promise<{ width: number; height: number } | null> {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
+}
+
 function getExtractionErrorMessage(error?: string): string {
   if (!error) return 'No transaction data could be extracted from this receipt.';
   if (
@@ -46,6 +72,11 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
   const activeBatch = batches.find(b => b.id === activeBatchId) || batches[0];
   const extractableCount = activeBatch.receipts.filter(r => r.status === 'Pending' || r.status === 'Failed').length;
   const hasFailedExtraction = activeBatch.receipts.some(r => r.status === 'Failed');
+  // Only counts receipts still awaiting extraction — no point nagging about
+  // photos that have already been processed.
+  const lowResPendingCount = activeBatch.receipts.filter(
+    r => (r.status === 'Pending' || r.status === 'Failed') && isLowResolution(r)
+  ).length;
 
   useEffect(() => {
     if (!deletingBatchId) return;
@@ -115,6 +146,19 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
       }
       return b;
     }));
+
+    // Measure in the background so the thumbnails appear immediately. PDFs are
+    // skipped — there is no bitmap to measure.
+    const batchId = activeBatchId;
+    newReceipts.forEach(receipt => {
+      const file = newFilesMap[receipt.id];
+      if (file?.type === 'application/pdf') return;
+      measureImage(receipt.previewUrl).then(size => {
+        if (size) {
+          updateReceipt(batchId, receipt.id, { image_width: size.width, image_height: size.height });
+        }
+      });
+    });
   };
 
   const handleDeleteReceipt = (receiptId: string) => {
@@ -379,6 +423,14 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
               <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
                 {activeBatch.receipts.length} total receipt images uploaded
               </p>
+              {lowResPendingCount > 0 && (
+                <p style={{ fontSize: '0.8rem', color: '#f59e0b', display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px' }}>
+                  <AlertTriangle size={14} style={{ flexShrink: 0 }} />
+                  {lowResPendingCount === 1
+                    ? '1 photo is low resolution — you may want to retake it before extracting.'
+                    : `${lowResPendingCount} photos are low resolution — you may want to retake them before extracting.`}
+                </p>
+              )}
             </div>
 
             <button
@@ -484,6 +536,18 @@ export default function BatchWorkspace({ userRole, onSelectBatch }: BatchWorkspa
                             <FileText size={16} color="var(--primary)" />
                             {rcpt.filename}
                           </div>
+                          {isLowResolution(rcpt) && (
+                            <div
+                              style={{ fontSize: '0.72rem', color: '#f59e0b', display: 'flex', gap: '4px', marginTop: '4px', fontWeight: 400 }}
+                              title={`This photo is ${rcpt.image_width}x${rcpt.image_height}. Vouchers read reliably at about 1350x1800.`}
+                            >
+                              <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: '2px' }} />
+                              <span>
+                                Low resolution ({rcpt.image_width}&times;{rcpt.image_height}) — handwriting may be
+                                misread. A clearer, closer photo will extract far better.
+                              </span>
+                            </div>
+                          )}
                         </td>
                         <td>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
