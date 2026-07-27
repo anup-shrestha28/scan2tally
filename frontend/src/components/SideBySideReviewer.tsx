@@ -45,7 +45,7 @@ function AmountInput({
       // which would override the table's column widths.
       size={1}
       className={`cell-input amount-input amount-${tone}${uncertain ? ' amount-uncertain' : ''}`}
-      title={uncertain ? 'Extraction passes disagreed on this amount — please verify against the voucher' : undefined}
+      title={uncertain ? 'This amount may be inaccurate. Please verify it with the receipt.' : undefined}
       placeholder="0.00"
       value={draft !== null ? draft : formatted}
       onFocus={() => setDraft(value ? String(value) : '')}
@@ -352,19 +352,17 @@ export default function SideBySideReviewer({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', height: '100%' }}>
-      {/* Header Bar */}
-      <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 20px' }}>
+      {/* Review header */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', padding: '14px 20px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '16px', flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <button className="btn btn-secondary btn-sm" onClick={onBack}>
+          <button className="btn btn-secondary" onClick={onBack}>
             <ArrowLeft size={16} /> Back to Batches
           </button>
           <div>
             <h3 style={{ fontSize: '1.05rem', fontWeight: 700 }}>
               {batch?.name || 'Scan Batch Review'}
             </h3>
-            <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-              Side-by-Side Goshwara Voucher Verification &amp; Tally Ledger Mapping
-            </span>
           </div>
         </div>
 
@@ -398,19 +396,17 @@ export default function SideBySideReviewer({
             <Save size={16} /> Save Now
           </button>
           <button className="btn btn-primary" onClick={handleExportAll}>
-            <FileSpreadsheet size={16} /> Export Tally Excel (.xlsx)
+            <FileSpreadsheet size={16} /> Review Excel File
           </button>
         </div>
       </div>
 
-      {/* Navigation Bar */}
+      {/* Receipt navigation */}
       {receipts.length > 1 && (
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '16px',
-          padding: '10px 20px',
-          background: 'var(--bg-card)',
-          border: '1px solid var(--border-color)',
-          borderRadius: 'var(--radius-lg)',
+          paddingTop: '12px',
+          borderTop: '1px solid var(--border-color)',
         }}>
           <button
             style={btnStyle(hasPrev)}
@@ -457,6 +453,7 @@ export default function SideBySideReviewer({
           </button>
         </div>
       )}
+      </div>
 
       {/* Split Reviewer Workspace */}
       <div className="split-reviewer">
@@ -502,20 +499,32 @@ export default function SideBySideReviewer({
 
         {/* Right Panel: Extracted Transaction Editor */}
         <div className="data-panel">
-          <div className="panel-header">
-            <span>✏️ Extracted Tally Transaction Data ({transactions.length} rows)</span>
+          <div className="panel-header" style={{ gap: '12px', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+              <span>✏️ Voucher entries</span>
+              <span style={{ color: 'var(--text-muted)', fontSize: '0.78rem', fontWeight: 500 }}>
+                {transactions.length} {transactions.length === 1 ? 'ledger line' : 'ledger lines'}
+              </span>
+            </div>
             <span style={{
-              fontSize: '0.85rem',
+              fontSize: '0.82rem',
               color: isBalanced ? '#10b981' : '#f59e0b',
               fontWeight: 600,
               display: 'flex',
               alignItems: 'center',
-              gap: '4px'
+              gap: '5px',
+              padding: '7px 10px',
+              borderRadius: '999px',
+              background: isBalanced ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)',
+              border: `1px solid ${isBalanced ? 'rgba(16, 185, 129, 0.45)' : 'rgba(245, 158, 11, 0.45)'}`,
+              boxShadow: isBalanced ? '0 0 12px rgba(16, 185, 129, 0.16)' : '0 0 12px rgba(245, 158, 11, 0.16)',
+              whiteSpace: 'nowrap',
+              flexShrink: 0
             }}>
               {isBalanced ? (
-                <><CheckCircle2 size={14} /> Total Debit == Total Credit Check Passed</>
+                <><CheckCircle2 size={14} /> Voucher balanced</>
               ) : (
-                <><AlertTriangle size={14} /> Debit / Credit Imbalance Detected</>
+                <><AlertTriangle size={14} /> Voucher out of balance</>
               )}
             </span>
           </div>
