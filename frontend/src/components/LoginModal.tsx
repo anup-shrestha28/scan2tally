@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { KeyRound, Layers, AlertCircle, Loader2 } from 'lucide-react';
+import { KeyRound, Layers, AlertCircle, Loader2, Mail, LockKeyhole } from 'lucide-react';
 import { signIn } from '../lib/db';
 
 interface LoginModalProps {
@@ -8,8 +8,9 @@ interface LoginModalProps {
 }
 
 export default function LoginModal({ onAuthenticated }: LoginModalProps) {
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState(() => localStorage.getItem('scan2tally-remembered-email') || '');
   const [password, setPassword] = useState('');
+  const [rememberMe, setRememberMe] = useState(() => Boolean(localStorage.getItem('scan2tally-remembered-email')));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -18,6 +19,11 @@ export default function LoginModal({ onAuthenticated }: LoginModalProps) {
     setError(null);
     setBusy(true);
     try {
+      if (rememberMe) {
+        localStorage.setItem('scan2tally-remembered-email', email.trim());
+      } else {
+        localStorage.removeItem('scan2tally-remembered-email');
+      }
       await signIn(email.trim(), password);
       onAuthenticated();
     } catch (err: any) {
@@ -35,76 +41,63 @@ export default function LoginModal({ onAuthenticated }: LoginModalProps) {
   };
 
   return (
-    <div style={{
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      minHeight: 'calc(100vh - 100px)',
-      padding: '20px'
-    }}>
-      <div className="card" style={{ width: '100%', maxWidth: '440px', padding: '32px' }}>
-        <div style={{ textAlign: 'center', marginBottom: '24px' }}>
-          <div style={{
-            width: '48px',
-            height: '48px',
-            background: 'linear-gradient(135deg, #6366f1, #a855f7)',
-            borderRadius: '12px',
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: 'white',
-            marginBottom: '12px'
-          }}>
+    <div className="login-page">
+      <div className="login-card">
+        <div className="login-header">
+          <div className="login-logo">
             <Layers size={28} />
           </div>
-          <h2 style={{ fontSize: '1.5rem', fontWeight: 700 }}>Scan2Tally Login</h2>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem', marginTop: '4px' }}>
-            Automated Handwritten Bill to Tally Bridge
-          </p>
+          <h2 className="login-title">Sign in to Scan2Tally</h2>
         </div>
 
         <form onSubmit={handleSubmit}>
-          <div className="form-group">
+          <div className="form-group login-form-group">
             <label className="form-label">Email Address</label>
-            <input
-              type="email"
-              className="form-input"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              autoComplete="username"
-              placeholder="you@company.com"
-              disabled={busy}
-              required
-              autoFocus
-            />
+            <div className="login-input-wrap">
+              <Mail size={17} />
+              <input
+                type="email"
+                className="form-input login-input"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                autoComplete="username"
+                placeholder="Enter your email address"
+                disabled={busy}
+                required
+                autoFocus
+              />
+            </div>
           </div>
 
-          <div className="form-group">
+          <div className="form-group login-form-group">
             <label className="form-label">Password</label>
-            <input
-              type="password"
-              className="form-input"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="current-password"
-              disabled={busy}
-              required
-            />
+            <div className="login-input-wrap">
+              <LockKeyhole size={17} />
+              <input
+                type="password"
+                className="form-input login-input"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+                placeholder="Enter your password"
+                disabled={busy}
+                required
+              />
+            </div>
           </div>
+
+          <label className="remember-me">
+            <input
+              type="checkbox"
+              checked={rememberMe}
+              onChange={(e) => setRememberMe(e.target.checked)}
+              disabled={busy}
+            />
+            <span>Remember me</span>
+          </label>
 
           {error && (
-            <div style={{
-              display: 'flex',
-              alignItems: 'flex-start',
-              gap: '8px',
-              background: 'rgba(244, 63, 94, 0.12)',
-              border: '1px solid rgba(244, 63, 94, 0.35)',
-              color: '#f43f5e',
-              borderRadius: 'var(--radius-md)',
-              padding: '10px 12px',
-              fontSize: '0.82rem',
-              marginBottom: '12px'
-            }}>
+            <div className="login-error">
               <AlertCircle size={15} style={{ flexShrink: 0, marginTop: '1px' }} />
               <span>{error}</span>
             </div>
@@ -112,8 +105,7 @@ export default function LoginModal({ onAuthenticated }: LoginModalProps) {
 
           <button
             type="submit"
-            className="btn btn-primary"
-            style={{ width: '100%', padding: '12px', marginTop: '8px' }}
+            className="btn btn-primary login-submit"
             disabled={busy}
           >
             {busy ? (
@@ -124,23 +116,12 @@ export default function LoginModal({ onAuthenticated }: LoginModalProps) {
             ) : (
               <>
                 <KeyRound size={18} />
-                Sign In to Dashboard
+                Sign In
               </>
             )}
           </button>
         </form>
 
-        <p style={{
-          marginTop: '20px',
-          textAlign: 'center',
-          fontSize: '0.78rem',
-          color: 'var(--text-muted)',
-          lineHeight: 1.6
-        }}>
-          Accounts are created by your administrator.
-          <br />
-          Contact them if you cannot sign in.
-        </p>
       </div>
     </div>
   );
