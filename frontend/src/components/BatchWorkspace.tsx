@@ -9,6 +9,7 @@ import {
   deleteBatch,
   createReceipt,
   updateReceiptRow,
+  fetchTransactionsForBatch,
   deleteReceipt,
   uploadReceiptImage,
   getReceiptImageUrl,
@@ -17,6 +18,7 @@ import {
   fetchTransactionsForBatch,
 } from '../lib/db';
 
+<<<<<<< Updated upstream
 /**
  * How often to re-check receipts the server is still working on.
  *
@@ -25,6 +27,10 @@ import {
  * last closed.
  */
 const EXTRACTION_POLL_MS = 3000;
+=======
+const NOT_JOURNAL_ENTRY_ERROR = 'The uploaded image is not a journal entry. Please check and try again.';
+const ACTIVE_BATCH_STORAGE_KEY = 'scan2tally-active-batch';
+>>>>>>> Stashed changes
 
 /**
  * Minimum short edge, in pixels, for a voucher photo we trust.
@@ -109,6 +115,7 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
   const batchIsProcessing = (batch: ScanBatch) => batch.receipts.some(r => r.status === 'Processing');
   const isProcessing = startingExtraction || activeReceipts.some(r => r.status === 'Processing');
   const extractableCount = activeReceipts.filter(r => r.status === 'Pending' || r.status === 'Failed').length;
+  const allReceiptsExtracted = activeReceipts.length > 0 && activeReceipts.every(r => r.status === 'Extracted');
   const hasFailedExtraction = activeReceipts.some(r => r.status === 'Failed');
   // Only counts receipts still awaiting extraction — no point nagging about
   // photos that have already been processed.
@@ -141,7 +148,12 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
 
         if (cancelled) return;
         setBatches(loaded);
-        setActiveBatchId(prev => prev || loaded[0]?.id || '');
+        const rememberedBatchId = sessionStorage.getItem(ACTIVE_BATCH_STORAGE_KEY);
+        const nextBatchId = rememberedBatchId && loaded.some(b => b.id === rememberedBatchId)
+          ? rememberedBatchId
+          : loaded[0]?.id || '';
+        setActiveBatchId(nextBatchId);
+        if (nextBatchId) sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, nextBatchId);
       } catch (err: any) {
         if (!cancelled) setLoadError(err?.message || 'Could not load your scan batches.');
       } finally {
@@ -327,6 +339,7 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
       });
       setBatches(prev => [newBatch, ...prev]);
       setActiveBatchId(newBatch.id);
+      sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, newBatch.id);
       setSaveError(null);
     } catch (err: any) {
       setSaveError(err?.message || 'Could not create the batch.');
@@ -363,7 +376,10 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
     const remaining = batches.filter(b => b.id !== id);
     setBatches(remaining);
     if (activeBatchId === id) {
-      setActiveBatchId(remaining[0]?.id || '');
+      const nextBatchId = remaining[0]?.id || '';
+      setActiveBatchId(nextBatchId);
+      if (nextBatchId) sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, nextBatchId);
+      else sessionStorage.removeItem(ACTIVE_BATCH_STORAGE_KEY);
     }
     setDeletingBatchId(null);
     try {
@@ -583,6 +599,25 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
     setPreviewReceipt(receipt);
   };
 
+  const handleContinueReview = async () => {
+    if (!activeBatch) return;
+    try {
+      const transactionMap = await fetchTransactionsForBatch(activeBatch.id);
+      setReceiptTransactionsMap(transactionMap);
+      const firstExtractedReceipt = activeBatch.receipts.find(r => r.status === 'Extracted');
+      if (firstExtractedReceipt) {
+        onSelectBatch(
+          activeBatch,
+          firstExtractedReceipt,
+          transactionMap[firstExtractedReceipt.id] || [],
+          transactionMap
+        );
+      }
+    } catch (err: any) {
+      setSaveError(err?.message || 'Could not load the extracted data for review.');
+    }
+  };
+
   const isPdfReceipt = (receipt: Receipt) => {
     const file = uploadedFilesMap[receipt.id];
     return file?.type === 'application/pdf' || receipt.filename.toLowerCase().endsWith('.pdf');
@@ -643,7 +678,10 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
             {batches.map(b => (
               <div 
                 key={b.id} 
-                onClick={() => setActiveBatchId(b.id)}
+                onClick={() => {
+                  setActiveBatchId(b.id);
+                  sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, b.id);
+                }}
                 ref={editingBatchId === b.id ? editingBatchRef : undefined}
                 className={`batch-item${b.id === activeBatchId ? ' batch-item-active' : ''}`}
               >
@@ -679,12 +717,15 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                     <div className="batch-actions">
                       <button 
                         className="btn btn-secondary btn-sm batch-action" 
+                        disabled={isProcessing && b.id === activeBatchId}
                         onClick={(e) => {
                           e.stopPropagation();
                           setEditingBatchId(b.id);
                           setEditedBatchName(b.name);
                         }}
-                        title="Rename Batch"
+                        title={isProcessing && b.id === activeBatchId
+                          ? 'Cannot edit while extraction is in progress'
+                          : 'Rename Batch'}
                       >
                         <Edit2 size={12} />
                       </button>
@@ -747,8 +788,8 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
 
             <button
               className="btn btn-primary"
-              onClick={handleTriggerExtraction}
-              disabled={!extractableCount || isProcessing || hasFailedExtraction}
+              onClick={allReceiptsExtracted ? handleContinueReview : handleTriggerExtraction}
+              disabled={isProcessing || (!extractableCount && !allReceiptsExtracted) || hasFailedExtraction}
             >
               {isProcessing ? (
                 <>
@@ -757,10 +798,11 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                 </>
               ) : (
                 <>
-                  <Play size={16} />
-                  {extractableCount
-                    ? `Extract ${extractableCount} ${extractableCount === 1 ? 'Receipt' : 'Receipts'}`
-                    : 'Extract Receipts'}
+                  {allReceiptsExtracted
+                    ? <><FileText size={16} /> Continue Review</>
+                    : extractableCount
+                    ? <><Play size={16} /> Extract {extractableCount} {extractableCount === 1 ? 'Receipt' : 'Receipts'}</>
+                    : <><Play size={16} /> Extract Receipts</>}
                 </>
               )}
             </button>

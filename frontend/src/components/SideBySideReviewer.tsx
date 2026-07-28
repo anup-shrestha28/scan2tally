@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2, RotateCcw, RotateCw, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
 import { ScanBatch, Receipt, Transaction, User } from '../types';
-import { saveTransactionsForReceipt, getReceiptImageUrl } from '../lib/db';
+import { saveTransactionsForReceipt, getReceiptImageUrl, deleteReceipt } from '../lib/db';
 
 interface SideBySideReviewerProps {
   batch: ScanBatch | null;
@@ -106,11 +106,17 @@ export default function SideBySideReviewer({
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [saveError, setSaveError] = useState<string | null>(null);
   const [imageUrl, setImageUrl] = useState<string>('');
+  const dirtyRef = useRef(false);
+  const changeVersionRef = useRef(0);
   const [rotation, setRotation] = useState(0);
   const [showImbalanceModal, setShowImbalanceModal] = useState(false);
   const [pendingExportData, setPendingExportData] = useState<Transaction[] | null>(null);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deletingReceipt, setDeletingReceipt] = useState(false);
+  const [deletedReceiptIds, setDeletedReceiptIds] = useState<Set<string>>(new Set());
 
-  const currentReceipt = receipts[currentIndex] || null;
+  const visibleReceipts = receipts.filter(receipt => !deletedReceiptIds.has(receipt.id));
+  const currentReceipt = visibleReceipts[currentIndex] || null;
 
   // Get transactions for the currently viewed receipt
   const getTxForReceipt = (receipt: Receipt | null): Transaction[] => {
@@ -128,14 +134,15 @@ export default function SideBySideReviewer({
     if (currentReceipt) {
       setTxMap(prev => ({ ...prev, [currentReceipt.id]: transactions }));
     }
+    dirtyRef.current = false;
     setCurrentIndex(nextIndex);
     setRotation(0);
   };
 
   // When currentIndex changes, load that receipt's transactions
   useEffect(() => {
-    setTransactions(getTxForReceipt(receipts[currentIndex] || null));
-  }, [currentIndex]);
+    setTransactions(getTxForReceipt(visibleReceipts[currentIndex] || null));
+  }, [currentIndex, deletedReceiptIds]);
 
   // When allReceiptTransactions changes (fresh extraction), merge in
   useEffect(() => {
@@ -154,13 +161,8 @@ export default function SideBySideReviewer({
    * receipt that has not been extracted yet.
    */
   const AUTOSAVE_DELAY_MS = 1000;
-  const skipFirstSave = useRef(true);
-
   useEffect(() => {
-    if (skipFirstSave.current) {
-      skipFirstSave.current = false;
-      return;
-    }
+    if (!dirtyRef.current) return;
     if (!currentReceipt || !batch || !currentUser.organization_id) return;
     // A single empty row is the placeholder shown for an unextracted receipt,
     // not user work; saving it would create a phantom voucher line.
@@ -173,6 +175,7 @@ export default function SideBySideReviewer({
 
     const receiptId = currentReceipt.id;
     const rows = transactions;
+    const changeVersion = changeVersionRef.current;
     const timer = setTimeout(() => {
       setSaveState('saving');
       saveTransactionsForReceipt(
@@ -181,8 +184,12 @@ export default function SideBySideReviewer({
         rows
       )
         .then(() => {
-          setSaveState('saved');
-          setSaveError(null);
+          if (changeVersion === changeVersionRef.current) {
+            dirtyRef.current = false;
+            setSaveState('saved');
+            setSaveError(null);
+            window.setTimeout(() => setSaveState('idle'), 2500);
+          }
         })
         .catch((err: any) => {
           setSaveState('error');
@@ -212,6 +219,8 @@ export default function SideBySideReviewer({
   const rotateRight = () => setRotation(r => r + 90);
 
   const handleUpdateTransaction = (id: string, field: keyof Transaction, value: any) => {
+    dirtyRef.current = true;
+    changeVersionRef.current += 1;
     setTransactions(transactions.map(t => {
       if (t.id === id) {
         const updated = { ...t, [field]: value };
@@ -235,6 +244,8 @@ export default function SideBySideReviewer({
   };
 
   const handleAddTransaction = (entryType: 'Dr' | 'Cr' = 'Dr') => {
+    dirtyRef.current = true;
+    changeVersionRef.current += 1;
     const newTx: Transaction = {
       id: `tx-${Date.now()}`,
       voucher_date: transactions[0]?.voucher_date || new Date().toISOString().split('T')[0],
@@ -249,10 +260,13 @@ export default function SideBySideReviewer({
   };
 
   const handleDeleteTransaction = (id: string) => {
+    dirtyRef.current = true;
+    changeVersionRef.current += 1;
     setTransactions(transactions.filter(t => t.id !== id));
   };
 
   const handleSaveProgress = async () => {
+    if (!dirtyRef.current) return;
     if (currentReceipt) {
       setTxMap(prev => ({ ...prev, [currentReceipt.id]: transactions }));
     }
@@ -268,6 +282,9 @@ export default function SideBySideReviewer({
         );
         setSaveState('saved');
         setSaveError(null);
+        dirtyRef.current = false;
+        window.setTimeout(() => setSaveState('idle'), 2500);
+        window.setTimeout(() => setSaveState('idle'), 2500);
       } catch (err: any) {
         setSaveState('error');
         setSaveError(err?.message || 'Changes could not be saved.');
@@ -278,10 +295,39 @@ export default function SideBySideReviewer({
     setTimeout(() => setSavedSuccess(false), 3000);
   };
 
+  const handleBack = () => {
+    onBack();
+  };
+
+  const handleDeleteCurrentReceipt = async () => {
+    if (!currentReceipt) return;
+    setDeletingReceipt(true);
+    try {
+      const remainingReceipts = visibleReceipts.filter(receipt => receipt.id !== currentReceipt.id);
+      await deleteReceipt(currentReceipt.id);
+      setDeletedReceiptIds(prev => new Set([...prev, currentReceipt.id]));
+      setTxMap(prev => {
+        const next = { ...prev };
+        delete next[currentReceipt.id];
+        return next;
+      });
+      setShowDeleteModal(false);
+      if (remainingReceipts.length === 0) {
+        onBack();
+      } else {
+        setCurrentIndex(index => Math.min(index, remainingReceipts.length - 1));
+      }
+    } catch (err: any) {
+      setSaveError(err?.message || 'Could not delete this receipt.');
+    } finally {
+      setDeletingReceipt(false);
+    }
+  };
+
   // Export collects all receipts' transactions merged
   const handleExportAll = () => {
     const saved = currentReceipt ? { ...txMap, [currentReceipt.id]: transactions } : txMap;
-    const all = receipts.flatMap(r => (saved[r.id] || []).map(t => ({ ...t, receipt_id: r.id })));
+    const all = visibleReceipts.flatMap(r => (saved[r.id] || []).map(t => ({ ...t, receipt_id: r.id })));
     const exportData = all.length > 0 ? all : transactions.map(t => ({ ...t, receipt_id: currentReceipt?.id }));
 
     // Check for imbalance across all receipts being exported
@@ -332,11 +378,13 @@ export default function SideBySideReviewer({
   const narration = transactions[0]?.narration || 'Being Expenses paid via cheque no.';
 
   const handleUpdateNarration = (value: string) => {
+    dirtyRef.current = true;
+    changeVersionRef.current += 1;
     setTransactions(prev => prev.map(t => ({ ...t, narration: value })));
   };
 
   const hasPrev = currentIndex > 0;
-  const hasNext = currentIndex < receipts.length - 1;
+  const hasNext = currentIndex < visibleReceipts.length - 1;
 
   const btnStyle = (active: boolean) => ({
     display: 'inline-flex', alignItems: 'center', gap: '6px',
@@ -356,7 +404,7 @@ export default function SideBySideReviewer({
       <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', padding: '14px 20px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '16px', flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <button className="btn btn-secondary" onClick={onBack}>
+          <button className="btn btn-secondary" onClick={handleBack}>
             <ArrowLeft size={16} /> Back to Batches
           </button>
           <div>
@@ -402,7 +450,7 @@ export default function SideBySideReviewer({
       </div>
 
       {/* Receipt navigation */}
-      {receipts.length > 1 && (
+      {visibleReceipts.length > 1 && (
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '16px',
           paddingTop: '12px',
@@ -417,7 +465,7 @@ export default function SideBySideReviewer({
           </button>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            {receipts.map((r, i) => (
+            {visibleReceipts.map((r, i) => (
               <button
                 key={r.id}
                 title={r.filename}
@@ -440,7 +488,7 @@ export default function SideBySideReviewer({
           <div style={{ textAlign: 'center', minWidth: '140px' }}>
             <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>Viewing receipt</div>
             <div style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--text-main)' }}>
-              {currentIndex + 1} / {receipts.length}
+              {currentIndex + 1} / {visibleReceipts.length}
             </div>
           </div>
 
@@ -462,6 +510,14 @@ export default function SideBySideReviewer({
           <div className="panel-header">
             <span>📷 {currentReceipt?.filename || 'Handwritten Voucher'}</span>
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <button
+                className="btn btn-danger btn-sm"
+                onClick={() => setShowDeleteModal(true)}
+                title="Delete this receipt"
+                disabled={deletingReceipt}
+              >
+                <Trash2 size={14} />
+              </button>
               <button
                 onClick={rotateLeft}
                 title="Rotate Left"
@@ -698,6 +754,35 @@ export default function SideBySideReviewer({
                 style={{ padding: '8px 16px', background: '#f59e0b', color: '#fff', border: 'none' }}
               >
                 Proceed to Export
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showDeleteModal && currentReceipt && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          backgroundColor: 'rgba(0, 0, 0, 0.68)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: '20px', backdropFilter: 'blur(4px)'
+        }}>
+          <div className="card" style={{ width: '100%', maxWidth: '430px', padding: '24px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: '#f43f5e', marginBottom: '12px' }}>
+              <Trash2 size={22} />
+              <h3 style={{ fontSize: '1.15rem', fontWeight: 700, color: 'var(--text-main)' }}>
+                Delete receipt?
+              </h3>
+            </div>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', lineHeight: 1.5 }}>
+              This will permanently delete <strong style={{ color: 'var(--text-main)' }}>{currentReceipt.filename}</strong> and its extracted data. This action cannot be undone.
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '22px' }}>
+              <button className="btn btn-secondary" onClick={() => setShowDeleteModal(false)} disabled={deletingReceipt}>
+                Cancel
+              </button>
+              <button className="btn btn-danger" onClick={handleDeleteCurrentReceipt} disabled={deletingReceipt}>
+                {deletingReceipt ? <><Loader2 size={15} className="animate-spin" /> Deleting...</> : <><Trash2 size={15} /> Delete Receipt</>}
               </button>
             </div>
           </div>

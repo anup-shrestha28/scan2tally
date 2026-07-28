@@ -164,6 +164,35 @@ body {
   font-size: 0.875rem;
 }
 
+.user-context {
+  gap: 8px;
+  max-width: 430px;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.context-org,
+.context-user {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.context-org {
+  max-width: 135px;
+  font-weight: 600;
+}
+
+.context-user {
+  max-width: 170px;
+}
+
+.context-divider {
+  width: 1px;
+  height: 18px;
+  flex: 0 0 auto;
+  background: var(--border-color);
+}
+
 .role-tag {
   font-size: 0.75rem;
   font-weight: 600;
