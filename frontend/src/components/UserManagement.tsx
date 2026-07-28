@@ -17,6 +17,11 @@ const ROLE_STYLES: Record<UserRole, { cls: string; icon: React.ReactNode }> = {
   'Operator': { cls: 'role-operator', icon: <UserCheck size={12} /> },
 };
 
+const toTitleCase = (value: string) =>
+  value.trim().toLocaleLowerCase().replace(/(^|[\s'-])(\p{L})/gu, (_, separator, letter) =>
+    `${separator}${letter.toLocaleUpperCase()}`
+  );
+
 export default function UserManagement({ currentUser, onBack }: UserManagementProps) {
   const isSuperAdmin = currentUser.role === 'Super Admin';
 
@@ -58,6 +63,17 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
 
   useEffect(() => { load(); }, []);
 
+  const displayedUsers = isSuperAdmin
+    ? [...users].sort((a, b) => {
+        const getSortRank = (user: User) => {
+          if (user.role === 'Super Admin') return 0;
+          const roleRank = user.role === 'Admin' ? 0 : 1;
+          return user.status === 'Active' ? 1 + roleRank : 3 + roleRank;
+        };
+        return getSortRank(a) - getSortRank(b) || a.name.localeCompare(b.name);
+      })
+    : users;
+
   const resetForm = () => {
     setName(''); setEmail(''); setPassword(''); setDesignation('');
     setRole('Operator'); setOrgId(''); setFormError(null); setShowPassword(false);
@@ -68,8 +84,14 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
     setFormError(null);
     setBusy(true);
     try {
+      const normalizedName = toTitleCase(name);
+      const normalizedDesignation = toTitleCase(designation);
       const created = await createUserAccount({
-        name, email, password, role, designation,
+        name: normalizedName,
+        email,
+        password,
+        role,
+        designation: normalizedDesignation,
         // Ignored by the server for an Admin, who is always confined to their
         // own organisation regardless of what is sent.
         organizationId: isSuperAdmin ? (role === 'Super Admin' ? null : orgId) : undefined,
@@ -117,8 +139,8 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           {onBack && (
-            <button className="btn btn-secondary btn-sm" onClick={onBack}>
-              <ArrowLeft size={15} /> Back
+            <button className="btn btn-secondary" onClick={onBack}>
+              <ArrowLeft size={16} /> Back
             </button>
           )}
           <div>
@@ -133,9 +155,11 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
           </div>
         </div>
 
-        <button className="btn btn-primary" onClick={() => { setShowForm(v => !v); setFormError(null); }}>
-          <UserPlus size={17} /> {showForm ? 'Cancel' : 'Add Team Member'}
-        </button>
+        {!showForm && (
+          <button className="btn btn-primary" onClick={() => { setShowForm(true); setFormError(null); }}>
+            <UserPlus size={17} /> Add Team Member
+          </button>
+        )}
       </div>
 
       {notice && (
@@ -162,8 +186,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
         <div className="card">
           <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '4px' }}>Add a team member</h3>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.82rem', marginBottom: '18px' }}>
-            They will sign in with the email and password you set here. Share the password with
-            them directly — it is not emailed out.
+            Set their login details and share the password securely. It will not be emailed.
           </p>
 
           <form onSubmit={handleCreate}>
@@ -217,7 +240,6 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
                         onChange={e => setRole(e.target.value as UserRole)}>
                   <option value="Operator">Operator — uploads and reviews vouchers</option>
                   <option value="Admin">Admin — also manages team members</option>
-                  {isSuperAdmin && <option value="Super Admin">Super Admin — manages every organization</option>}
                 </select>
               </div>
             </div>
@@ -280,6 +302,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
               <tr>
                 <th>Name</th>
                 <th>Email</th>
+                <th>Organization</th>
                 <th style={{ width: '150px' }}>Role</th>
                 <th style={{ width: '110px' }}>Status</th>
                 <th style={{ width: '130px' }}>Actions</th>
@@ -288,11 +311,11 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
             <tbody>
               {users.length === 0 ? (
                 <tr>
-                  <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '28px' }}>
+                  <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '28px' }}>
                     No team members yet.
                   </td>
                 </tr>
-              ) : users.map(u => {
+              ) : displayedUsers.map(u => {
                 const isSelf = u.id === currentUser.id;
                 const style = ROLE_STYLES[u.role];
                 return (
@@ -311,6 +334,11 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
                       )}
                     </td>
                     <td style={{ color: 'var(--text-muted)' }}>{u.email}</td>
+                    <td>
+                      {isSuperAdmin
+                        ? (orgs.find(o => o.id === u.organization_id)?.name || 'Platform')
+                        : (currentUser.orgName || 'Your organization')}
+                    </td>
                     <td>
                       <span className={`role-tag ${style.cls}`} style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
                         {style.icon} {u.role}

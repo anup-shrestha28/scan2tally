@@ -619,7 +619,8 @@ async def create_user(payload: CreateUserRequest, authorization: Optional[str] =
     caller_role = caller.get("role")
 
     email = (payload.email or "").strip().lower()
-    name = (payload.name or "").strip()
+    name = (payload.name or "").strip().lower().title()
+    designation = (payload.designation or "").strip().lower().title()
     if not name:
         raise HTTPException(status_code=400, detail="Please enter the person's name.")
     if "@" not in email or "." not in email.split("@")[-1]:
@@ -629,14 +630,17 @@ async def create_user(payload: CreateUserRequest, authorization: Optional[str] =
     if payload.role not in ("Super Admin", "Admin", "Operator"):
         raise HTTPException(status_code=400, detail="Unknown role.")
 
+    # Super Admin accounts are provisioned outside team management. No user,
+    # including an existing Super Admin, may create another one here.
+    if payload.role == "Super Admin":
+        raise HTTPException(status_code=403, detail="Super Admin accounts cannot be created here.")
+
     # Who may create whom. An Admin is confined to their own organisation and
     # cannot mint a Super Admin, which would be a straight privilege escalation.
     if caller_role == "Super Admin":
         organization_id = payload.organization_id
         if payload.role != "Super Admin" and not organization_id:
             raise HTTPException(status_code=400, detail="Choose an organisation for this user.")
-        if payload.role == "Super Admin":
-            organization_id = None
     elif caller_role == "Admin":
         if payload.role not in ("Admin", "Operator"):
             raise HTTPException(status_code=403, detail="Admins can only create Admin or Operator accounts.")
@@ -690,7 +694,7 @@ async def create_user(payload: CreateUserRequest, authorization: Optional[str] =
                 "name": name,
                 "email": email,
                 "phone": payload.phone or None,
-                "designation": payload.designation or None,
+                "designation": designation or None,
                 "role": payload.role,
                 "status": "Active",
                 "created_by": caller.get("id"),

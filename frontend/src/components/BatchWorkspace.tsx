@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { FolderPlus, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw } from 'lucide-react';
 import { ScanBatch, Receipt, User, UserRole, Transaction, EntryType } from '../types';
 import {
   newId,
@@ -32,6 +32,12 @@ const MIN_IMAGE_SHORT_EDGE = 1000;
 function isLowResolution(receipt: Receipt): boolean {
   if (!receipt.image_width || !receipt.image_height) return false;
   return Math.min(receipt.image_width, receipt.image_height) < MIN_IMAGE_SHORT_EDGE;
+}
+
+function formatBatchDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 /** Reads an image's pixel dimensions without blocking the upload. */
@@ -69,6 +75,7 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
 
   const [activeBatchId, setActiveBatchId] = useState<string>('');
   const [editingBatchId, setEditingBatchId] = useState<string | null>(null);
+  const editingBatchRef = useRef<HTMLDivElement | null>(null);
   const [editedBatchName, setEditedBatchName] = useState<string>('');
   const [deletingBatchId, setDeletingBatchId] = useState<string | null>(null);
   const [previewReceipt, setPreviewReceipt] = useState<Receipt | null>(null);
@@ -138,14 +145,33 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
     };
   }, [deletingBatchId]);
 
+  useEffect(() => {
+    if (!editingBatchId) return;
+
+    const closeEditOnOutsideClick = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!editingBatchRef.current?.contains(target)) {
+        setEditingBatchId(null);
+      }
+    };
+
+    document.addEventListener('pointerdown', closeEditOnOutsideClick);
+    return () => document.removeEventListener('pointerdown', closeEditOnOutsideClick);
+  }, [editingBatchId]);
+
   const handleCreateBatch = async () => {
     if (!currentUser.organization_id) {
       setSaveError('Your account is not linked to an organisation, so batches cannot be created.');
       return;
     }
-    const todayStr = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
-    const countToday = batches.filter(b => b.name.includes(todayStr)).length;
-    const defaultName = `Scan Batch - ${todayStr}${countToday > 0 ? ` (#${countToday + 1})` : ''}`;
+    const batchNumbers = batches
+      .map(b => Number(b.name.match(/^Batch[- ](\d+)/i)?.[1] || 0))
+      .filter(Number.isFinite);
+    const nextBatchNumber = Math.max(0, ...batchNumbers) + 1;
+    const batchDate = new Date().toLocaleDateString('en-US', {
+      month: 'short', day: 'numeric', year: 'numeric'
+    });
+    const defaultName = `Batch ${nextBatchNumber} · ${batchDate}`;
 
     const newBatch: ScanBatch = {
       // A real UUID, because that is the primary key type in Postgres.
@@ -189,6 +215,10 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
   };
 
   const handleDeleteBatch = async (id: string) => {
+    if (isProcessing && id === activeBatchId) {
+      setSaveError('This batch cannot be deleted while extraction is in progress.');
+      return;
+    }
     const snapshot = batches;
     const remaining = batches.filter(b => b.id !== id);
     setBatches(remaining);
@@ -558,26 +588,19 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
       )}
       <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: '24px' }}>
         <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '12px', minHeight: 'calc(100vh - 120px)', position: 'sticky', top: '24px', alignSelf: 'start' }}>
-          <h3 style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text-muted)' }}>Scan Batches</h3>
+          <h3 className="batch-sidebar-heading">Your Batches</h3>
           <button className="btn btn-primary" onClick={handleCreateBatch} style={{ width: '100%', padding: '12px 16px', fontSize: '0.9rem' }}>
             <FolderPlus size={18} />
-            Create New Scan Batch
+            Create New Batch
           </button>
           
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div className="batch-list">
             {batches.map(b => (
               <div 
                 key={b.id} 
                 onClick={() => setActiveBatchId(b.id)}
-                style={{
-                  padding: '12px',
-                  borderRadius: 'var(--radius-md)',
-                  border: '1px solid',
-                  borderColor: b.id === activeBatchId ? 'var(--primary)' : 'var(--border-color)',
-                  background: b.id === activeBatchId ? 'rgba(99, 102, 241, 0.1)' : 'var(--bg-input)',
-                  cursor: 'pointer',
-                  transition: 'var(--transition)'
-                }}
+                ref={editingBatchId === b.id ? editingBatchRef : undefined}
+                className={`batch-item${b.id === activeBatchId ? ' batch-item-active' : ''}`}
               >
                 {editingBatchId === b.id ? (
                   <div style={{ display: 'flex', gap: '6px' }} onClick={e => e.stopPropagation()}>
@@ -595,17 +618,22 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                     />
                   </div>
                 ) : (
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                    <div>
-                      <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{b.name}</div>
-                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-                        {b.receipts.length} receipts • {b.created_at}
+                  <div className="batch-item-content">
+                    <div className="batch-item-details">
+                      <div className="batch-item-name">
+                        <span>{b.name}</span>
+                        {b.id === activeBatchId && <span className="batch-current-badge">Current</span>}
+                      </div>
+                      <div className="batch-item-meta">
+                        <span>{b.receipts.length} {b.receipts.length === 1 ? 'receipt' : 'receipts'}</span>
+                        <span>•</span>
+                        <span>{formatBatchDate(b.created_at)}</span>
                       </div>
                     </div>
 
-                    <div style={{ display: 'flex', gap: '6px' }}>
+                    <div className="batch-actions">
                       <button 
-                        className="btn btn-secondary btn-sm" 
+                        className="btn btn-secondary btn-sm batch-action" 
                         onClick={(e) => {
                           e.stopPropagation();
                           setEditingBatchId(b.id);
@@ -616,7 +644,8 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                         <Edit2 size={12} />
                       </button>
                       <button 
-                        className="btn btn-danger btn-sm" 
+                        className="btn btn-danger btn-sm batch-action" 
+                        disabled={isProcessing && b.id === activeBatchId}
                         onClick={(e) => {
                           e.stopPropagation();
                           if (b.receipts.length === 0) {
@@ -625,7 +654,9 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                             setDeletingBatchId(b.id);
                           }
                         }}
-                        title="Delete Batch"
+                        title={isProcessing && b.id === activeBatchId
+                          ? 'Cannot delete while extraction is in progress'
+                          : 'Delete Batch'}
                       >
                         <Trash2 size={12} />
                       </button>
@@ -638,22 +669,26 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
         </div>
 
         {!activeBatch ? (
-          <div className="card" style={{ textAlign: 'center', padding: '48px 24px' }}>
-            <FolderPlus size={32} color="var(--text-dim)" style={{ marginBottom: '12px' }} />
-            <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '6px' }}>
-              No scan batches yet
+          <div className="card empty-batches">
+            <div className="empty-batches-art" aria-hidden="true">
+              <div className="empty-folder"><FolderOpen size={48} /></div>
+              <div className="empty-file empty-file-left"><FileText size={19} /></div>
+              <div className="empty-file empty-file-right"><Camera size={18} /></div>
+            </div>
+            <h3>
+              Start your first scan
             </h3>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>
-              Create a scan batch to start uploading handwritten voucher photos.
+            <p>
+              Create a batch to upload handwritten vouchers.
             </p>
           </div>
         ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div className="batch-header">
             <div>
               <h3 style={{ fontSize: '1.2rem', fontWeight: 700 }}>{activeBatch.name}</h3>
               <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-                {activeBatch.receipts.length} total receipt images uploaded
+                {activeBatch.receipts.length} receipt images · Upload and review files below
               </p>
               {lowResPendingCount > 0 && (
                 <p style={{ fontSize: '0.8rem', color: '#f59e0b', display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px' }}>
@@ -678,7 +713,9 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
               ) : (
                 <>
                   <Play size={16} />
-                  Extract Data from Image{extractableCount ? ` (${extractableCount})` : ''}
+                  {extractableCount
+                    ? `Extract ${extractableCount} ${extractableCount === 1 ? 'Receipt' : 'Receipts'}`
+                    : 'Extract Receipts'}
                 </>
               )}
             </button>
@@ -729,10 +766,10 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
             </div>
 
             <h4 style={{ fontSize: '1.1rem', fontWeight: 600 }}>
-              {isProcessing ? 'Extraction in Progress — Uploads Locked' : 'Drag & Drop Handwritten Bill Receipts Here'}
+              {isProcessing ? 'Extraction in Progress — Uploads Locked' : `Upload to ${activeBatch.name}`}
             </h4>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem', marginTop: '4px' }}>
-              {isProcessing ? 'Please wait for the current batch to finish processing before adding more receipts.' : 'Supports JPG, PNG, WEBP, or PDF paper voucher scans'}
+              {isProcessing ? 'Please wait for the current batch to finish processing before adding more receipts.' : 'Drag and drop handwritten vouchers here, or browse your files'}
             </p>
             <div style={{ marginTop: '12px', display: 'flex', gap: '8px', justifyContent: 'center' }}>
               <span className="btn btn-secondary btn-sm">
@@ -743,7 +780,7 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
 
           <div className="card">
             <h4 style={{ fontSize: '1rem', fontWeight: 600, marginBottom: '16px' }}>
-              Uploaded Receipt Files ({activeBatch.receipts.length})
+              Files in {activeBatch.name} ({activeBatch.receipts.length})
             </h4>
 
             {!activeBatch.receipts.length ? (
@@ -775,8 +812,7 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                             >
                               <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: '2px' }} />
                               <span>
-                                Low resolution ({rcpt.image_width}&times;{rcpt.image_height}) — handwriting may be
-                                misread. A clearer, closer photo will extract far better.
+                                This photo may be difficult to read. Try uploading a closer, clearer photo.
                               </span>
                             </div>
                           )}
@@ -797,15 +833,6 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                                 {rcpt.error_message}
                               </span>
                             )}
-                            {rcpt.status === 'Extracted' && rcpt.verification_warnings?.map((warning, i) => (
-                              <span
-                                key={i}
-                                style={{ fontSize: '0.72rem', color: '#f59e0b', maxWidth: '320px', display: 'flex', gap: '4px' }}
-                              >
-                                <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: '2px' }} />
-                                {warning}
-                              </span>
-                            ))}
                           </div>
                         </td>
                         <td>

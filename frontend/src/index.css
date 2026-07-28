@@ -244,6 +244,120 @@ body {
   pointer-events: none;
 }
 
+.batch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.batch-sidebar-heading {
+  font-size: 1rem;
+  font-weight: 650;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+
+.batch-item {
+  padding: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--bg-input);
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease;
+}
+
+.batch-item:hover {
+  border-color: color-mix(in srgb, var(--primary) 55%, var(--border-color));
+  transform: translateY(-1px);
+}
+
+.batch-item-active {
+  border-color: var(--primary);
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.16), rgba(99, 102, 241, 0.06));
+  box-shadow: 0 6px 18px rgba(99, 102, 241, 0.12);
+}
+
+.batch-item-content {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.batch-item-details {
+  min-width: 0;
+}
+
+.batch-item-name {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 0.9rem;
+  font-weight: 650;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.batch-current-badge {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.18);
+  color: #a5b4fc;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.batch-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 5px;
+  color: var(--text-muted);
+  font-size: 0.74rem;
+}
+
+.batch-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.batch-action.btn {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.batch-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 4px 2px 2px;
+}
+
+.batch-header h3 {
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+.batch-header p {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin-top: 2px;
+}
+
+@media (max-width: 640px) {
+  .batch-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
@@ -258,6 +372,104 @@ body {
   border-radius: var(--radius-lg);
   padding: 20px;
   box-shadow: var(--shadow-md);
+}
+
+.empty-batches {
+  text-align: center;
+  min-height: 480px;
+  padding: 56px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.empty-batches h3 {
+  font-size: 1.05rem;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.empty-batches p {
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+
+.empty-batches-art {
+  width: 280px;
+  height: 220px;
+  margin: 0 auto 28px;
+  position: relative;
+  color: var(--primary);
+}
+
+.empty-folder {
+  position: absolute;
+  left: 78px;
+  top: 58px;
+  width: 126px;
+  height: 106px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, var(--bg-card));
+  border: 1px solid color-mix(in srgb, var(--primary) 38%, var(--border-color));
+  border-radius: 12px;
+  animation: empty-folder-float 3.5s ease-in-out infinite;
+}
+
+.empty-folder svg {
+  width: 92px;
+  height: 92px;
+}
+
+.empty-file {
+  position: absolute;
+  width: 68px;
+  height: 68px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  box-shadow: var(--shadow-sm);
+}
+
+.empty-file-left {
+  left: 12px;
+  top: 36px;
+  transform: rotate(-12deg);
+  animation: empty-file-left 3.5s ease-in-out infinite;
+}
+
+.empty-file-right {
+  right: 12px;
+  bottom: 25px;
+  transform: rotate(12deg);
+  animation: empty-file-right 3.5s ease-in-out infinite;
+}
+
+.empty-file svg {
+  width: 36px;
+  height: 36px;
+}
+
+@keyframes empty-folder-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+
+@keyframes empty-file-left {
+  0%, 100% { transform: rotate(-12deg) translateY(0); }
+  50% { transform: rotate(-8deg) translateY(-5px); }
+}
+
+@keyframes empty-file-right {
+  0%, 100% { transform: rotate(12deg) translateY(0); }
+  50% { transform: rotate(8deg) translateY(4px); }
 }
 
 /* Main Layout */
@@ -462,6 +674,15 @@ body.light .login-card {
 .form-input:focus, .form-select:focus, .form-textarea:focus {
   border-color: var(--border-focus);
   box-shadow: 0 0 0 2px var(--primary-glow);
+}
+
+/* Keep browser autofill from replacing the themed input background. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--text-main);
+  -webkit-box-shadow: 0 0 0 1000px var(--bg-input) inset;
+  transition: background-color 9999s ease-out 0s;
 }
 
 /* Reviewer grid cells
