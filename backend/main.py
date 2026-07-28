@@ -6,6 +6,7 @@ import base64
 import hashlib
 import asyncio
 from collections import Counter
+from contextlib import asynccontextmanager
 from typing import List, Optional
 import httpx
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
@@ -86,10 +87,20 @@ if not openai_available and GEMINI_API_KEY and GEMINI_API_KEY != "placeholder-ge
     except Exception as e:
         print(f"Warning: Could not configure Gemini AI: {e}")
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # An extraction that was running when this process last stopped left its
+    # receipt sitting on "Processing" with nobody to finish it. Pick those up
+    # now, so a server restart is a pause rather than a dead end.
+    await resume_interrupted_extractions()
+    yield
+
+
 app = FastAPI(
     title="Scan2Tally Backend API",
     description="Automated Handwritten Receipt OCR & Tally Excel Bridge API",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 app.add_middleware(
@@ -420,13 +431,13 @@ def health_check():
         "opencv": "Enabled"
     }
 
-@app.post("/api/extract-receipt")
-async def extract_receipt(file: UploadFile = File(...)):
-    if not file.content_type.startswith("image/") and file.content_type != "application/pdf":
-        raise HTTPException(status_code=400, detail="Only image files (JPG, PNG, WEBP) and PDFs are supported.")
+async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> dict:
+    """Reads one voucher image and returns the extraction result.
 
-    raw_bytes = await file.read()
-
+    Deliberately free of any request or database context: the same pipeline is
+    driven both by the direct endpoint below and by the background job runner,
+    which has no browser attached to it.
+    """
     # Send original image bytes directly to AI — OpenCV grayscale conversion hurts OCR accuracy
     extracted_transactions = []
     error_msg = None
@@ -440,7 +451,7 @@ async def extract_receipt(file: UploadFile = File(...)):
         print(f"🤖 Sending image to OpenAI {OPENAI_VISION_MODEL}... (size: {len(raw_bytes)} bytes)")
         try:
             base64_image = base64.b64encode(raw_bytes).decode('utf-8')
-            media_type = file.content_type if file.content_type.startswith("image/") else "image/jpeg"
+            media_type = content_type if content_type.startswith("image/") else "image/jpeg"
 
             # Transcription and total-reading are issued as SEPARATE requests, run
             # concurrently. Keeping the जम्मा total out of the transcription prompt
@@ -514,7 +525,7 @@ async def extract_receipt(file: UploadFile = File(...)):
     # never used once a real Vision AI engine is configured, so genuine
     # zero-result extractions aren't silently replaced with fake demo data)
     if not extracted_transactions and not openai_available and not genai_available:
-        extracted_transactions = classify_voucher_image_content(raw_bytes, file.filename)
+        extracted_transactions = classify_voucher_image_content(raw_bytes, filename)
         if extracted_transactions:
             print(f"📋 Using demo classification engine: {len(extracted_transactions)} rows")
 
@@ -543,7 +554,7 @@ async def extract_receipt(file: UploadFile = File(...)):
         print("✅ Verification: line items reconcile with the voucher's जम्मा totals")
 
     return {
-        "filename": file.filename,
+        "filename": filename,
         "engine_used": (
             f"OpenAI {OPENAI_VISION_MODEL}" if openai_available
             else ("Gemini Vision" if genai_available else "Dr/Cr Accounting Engine")
@@ -553,6 +564,20 @@ async def extract_receipt(file: UploadFile = File(...)):
         "error": error_msg,
         "verification": verification
     }
+
+
+@app.post("/api/extract-receipt")
+async def extract_receipt(file: UploadFile = File(...)):
+    """Extracts a voucher the caller uploads directly, and waits for the result.
+
+    Kept for one-off use; the app itself goes through /api/receipts/{id}/extract
+    so that closing the tab cannot abandon the work.
+    """
+    if not file.content_type.startswith("image/") and file.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Only image files (JPG, PNG, WEBP) and PDFs are supported.")
+
+    raw_bytes = await file.read()
+    return await run_extraction(raw_bytes, file.content_type, file.filename)
 
 class CreateUserRequest(BaseModel):
     name: str
@@ -708,6 +733,323 @@ async def create_user(payload: CreateUserRequest, authorization: Optional[str] =
 
     return {"id": new_id, "name": name, "email": email, "role": payload.role,
             "organization_id": organization_id, "status": "Active"}
+
+
+# ---------------------------------------------------------------- background extraction
+#
+# The browser must not own an extraction. Reading a voucher takes tens of
+# seconds, and while the work lives inside the tab's HTTP request, closing the
+# tab, refreshing, or shutting the laptop lid abandons it half-finished — the
+# receipt is left on "Processing" with nothing in existence able to complete it.
+#
+# So the server owns the job instead. It fetches the image from storage itself,
+# runs the extraction, and writes both the rows and the final status straight to
+# the database. The tab's only jobs are to start the work and to watch the
+# receipt row, which leaves it free to disappear at any moment.
+
+STORAGE_BUCKET = "receipts"
+
+# How many vouchers may be read at once. Each job issues OCR_CONSENSUS_RUNS + 1
+# vision requests, so extracting a large batch unthrottled would fire dozens of
+# concurrent calls at the API and start collecting rate-limit errors.
+EXTRACTION_CONCURRENCY = max(1, int(os.getenv("EXTRACTION_CONCURRENCY", "2")))
+
+# Nothing may sit on "Processing" forever. If a job wedges, this is what turns
+# it into an honest, retryable failure instead of a permanent spinner.
+EXTRACTION_TIMEOUT_SECONDS = max(60, int(os.getenv("EXTRACTION_TIMEOUT_SECONDS", "600")))
+
+DEFAULT_EXTRACTION_ERROR = "No transaction data could be extracted from this receipt."
+INTERRUPTED_NO_IMAGE_ERROR = (
+    "Extraction was interrupted and the original image is no longer available. "
+    "Please upload it again."
+)
+
+# Fields the job runner needs about a receipt, including its batch's
+# organisation — transactions rows cannot be written without that.
+RECEIPT_JOB_SELECT = "id,filename,file_path,status,batch_id,uploaded_by,scan_batches(organization_id)"
+
+_extraction_semaphore: Optional[asyncio.Semaphore] = None
+# Receipts this process is already extracting, so a double-click or an impatient
+# retry cannot start the same work twice.
+_jobs_in_flight: set = set()
+# create_task only holds a weak reference to its task, so without this a job can
+# be garbage collected mid-flight and simply vanish.
+_background_tasks: set = set()
+
+
+def _extraction_slot() -> asyncio.Semaphore:
+    """Created lazily so it binds to the running event loop, not import time."""
+    global _extraction_semaphore
+    if _extraction_semaphore is None:
+        _extraction_semaphore = asyncio.Semaphore(EXTRACTION_CONCURRENCY)
+    return _extraction_semaphore
+
+
+def _spawn(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+async def _patch_receipt(client: httpx.AsyncClient, receipt_id: str, patch: dict) -> None:
+    await client.patch(
+        f"{SUPABASE_URL}/rest/v1/receipts",
+        headers=_svc_headers(),
+        params={"id": f"eq.{receipt_id}"},
+        json=patch,
+    )
+
+
+async def _fail_receipt(receipt_id: str, message: str) -> None:
+    """Records a terminal failure. Never raises — this is the last line of defence."""
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            await _patch_receipt(client, receipt_id, {
+                "status": "Failed",
+                "error_message": message,
+                "verification_warnings": [],
+            })
+    except Exception as err:
+        print(f"⚠️ Could not record failure for receipt {receipt_id}: {err}")
+
+
+def normalize_transaction_rows(
+    transactions: List[dict],
+    receipt_id: str,
+    batch_id: str,
+    organization_id: str,
+    updated_by: Optional[str],
+) -> List[dict]:
+    """Turns model output into rows the transactions table will accept.
+
+    This mirrors the normalisation the browser used to do, for the same reason
+    it existed there: a model may report a line as a flat `amount` with no side,
+    and the table's CHECK constraint requires the unused side to be exactly zero.
+    """
+    rows = []
+    for position, t in enumerate(transactions):
+        debit = _to_float(t.get("debit_amount"))
+        credit = _to_float(t.get("credit_amount"))
+        legacy = _to_float(t.get("amount"))
+
+        entry_type = t.get("entry_type")
+        if entry_type not in ("Dr", "Cr"):
+            entry_type = "Dr" if (debit or (legacy and not credit)) else "Cr"
+
+        rows.append({
+            "receipt_id": receipt_id,
+            "batch_id": batch_id,
+            "organization_id": organization_id,
+            "position": position,
+            "voucher_date": t.get("voucher_date") or "2083-03-15",
+            "voucher_type": t.get("voucher_type") or "Journal",
+            "entry_type": entry_type,
+            "ledger_name": (
+                t.get("ledger_name") or t.get("debit_ledger")
+                or t.get("credit_ledger") or "General Account"
+            ),
+            "debit_amount": (debit or legacy) if entry_type == "Dr" else 0,
+            "credit_amount": (credit or legacy) if entry_type == "Cr" else 0,
+            "needs_review": t.get("needs_review") is True,
+            "narration": t.get("narration") or "",
+            "updated_by": updated_by,
+        })
+    return rows
+
+
+async def _extract_and_store(receipt: dict, user_id: Optional[str]) -> None:
+    receipt_id = receipt["id"]
+    filename = receipt.get("filename") or "receipt"
+
+    # The image comes from storage, never from the request — by the time this
+    # runs the browser that uploaded it may be long gone.
+    async with httpx.AsyncClient(timeout=60) as client:
+        obj = await client.get(
+            f"{SUPABASE_URL}/storage/v1/object/{STORAGE_BUCKET}/{receipt['file_path']}",
+            headers={
+                "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            },
+        )
+    if obj.status_code != 200:
+        raise RuntimeError(INTERRUPTED_NO_IMAGE_ERROR)
+
+    raw_bytes = obj.content
+    content_type = obj.headers.get("content-type") or "image/jpeg"
+    if not content_type.startswith("image/") and content_type != "application/pdf":
+        content_type = "image/jpeg"
+
+    result = await run_extraction(raw_bytes, content_type, filename)
+
+    error_msg = result.get("error")
+    transactions = result.get("transactions") or []
+    warnings = (result.get("verification") or {}).get("warnings") or []
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        if error_msg or not transactions:
+            await _patch_receipt(client, receipt_id, {
+                "status": "Failed",
+                "error_message": error_msg or DEFAULT_EXTRACTION_ERROR,
+                "verification_warnings": [],
+            })
+            print(f"❌ Extraction failed for {filename}: {error_msg or DEFAULT_EXTRACTION_ERROR}")
+            return
+
+        rows = normalize_transaction_rows(
+            transactions,
+            receipt_id=receipt_id,
+            batch_id=receipt["batch_id"],
+            organization_id=receipt["organization_id"],
+            updated_by=user_id or receipt.get("uploaded_by"),
+        )
+
+        # Replace rather than append, so a retry cannot leave the voucher with
+        # the rows from a previous attempt still attached to it.
+        await client.delete(
+            f"{SUPABASE_URL}/rest/v1/transactions",
+            headers=_svc_headers(),
+            params={"receipt_id": f"eq.{receipt_id}"},
+        )
+        inserted = await client.post(
+            f"{SUPABASE_URL}/rest/v1/transactions",
+            headers=_svc_headers(),
+            json=rows,
+        )
+        if inserted.status_code not in (200, 201, 204):
+            raise RuntimeError(f"The extracted rows could not be saved: {inserted.text}")
+
+        # Only now is the receipt Extracted. Flipping the status before the rows
+        # are safely stored would let the app show a finished receipt that has
+        # nothing behind it.
+        await _patch_receipt(client, receipt_id, {
+            "status": "Extracted",
+            "error_message": None,
+            "verification_warnings": warnings,
+        })
+
+    print(f"✅ Stored {len(rows)} transactions for {filename} (receipt {receipt_id})")
+
+
+async def _run_extraction_job(receipt: dict, user_id: Optional[str]) -> None:
+    receipt_id = receipt["id"]
+    try:
+        # Queueing time is deliberately outside the timeout: waiting for a slot
+        # is not the same as being stuck.
+        async with _extraction_slot():
+            await asyncio.wait_for(
+                _extract_and_store(receipt, user_id),
+                timeout=EXTRACTION_TIMEOUT_SECONDS,
+            )
+    except asyncio.TimeoutError:
+        await _fail_receipt(
+            receipt_id,
+            "Extraction took too long and was stopped. Please try again.",
+        )
+    except Exception as err:
+        await _fail_receipt(receipt_id, extraction_error_message("Extraction", err))
+        print(f"❌ Extraction job for receipt {receipt_id} failed: {err}")
+    finally:
+        _jobs_in_flight.discard(receipt_id)
+
+
+async def _load_receipt_for_caller(receipt_id: str, caller: dict) -> dict:
+    """Reads a receipt, refusing one the caller has no business touching.
+
+    This runs with the service role, which bypasses row-level security, so the
+    organisation check the policies would normally apply has to be made here.
+    """
+    async with httpx.AsyncClient(timeout=20) as client:
+        res = await client.get(
+            f"{SUPABASE_URL}/rest/v1/receipts",
+            headers=_svc_headers(),
+            params={"select": RECEIPT_JOB_SELECT, "id": f"eq.{receipt_id}"},
+        )
+    rows = res.json() if res.status_code == 200 else []
+    if not rows:
+        raise HTTPException(status_code=404, detail="That receipt no longer exists.")
+
+    receipt = rows[0]
+    receipt["organization_id"] = (receipt.get("scan_batches") or {}).get("organization_id")
+    if caller.get("role") != "Super Admin" and receipt["organization_id"] != caller.get("organization_id"):
+        raise HTTPException(status_code=403, detail="You do not have access to that receipt.")
+    return receipt
+
+
+@app.post("/api/receipts/{receipt_id}/extract", status_code=202)
+async def start_receipt_extraction(receipt_id: str, authorization: Optional[str] = Header(None)):
+    """Starts extraction and returns immediately.
+
+    The caller is not expected to wait: it should watch the receipt's status and
+    is free to close the tab in the meantime.
+    """
+    if not supabase_admin_available:
+        raise HTTPException(status_code=503, detail="Background extraction is not configured on this server.")
+
+    caller = await resolve_caller(authorization)
+    receipt = await _load_receipt_for_caller(receipt_id, caller)
+
+    if receipt_id in _jobs_in_flight:
+        return {"receipt_id": receipt_id, "status": "Processing", "detail": "Already being extracted."}
+    if not receipt.get("file_path"):
+        raise HTTPException(status_code=409, detail="The image is still uploading. Please try again in a moment.")
+    if not receipt.get("organization_id"):
+        raise HTTPException(status_code=400, detail="That receipt's batch is not linked to an organisation.")
+
+    # Claim the receipt before returning, so the status the caller sees next is
+    # already Processing and a second click finds the job in flight.
+    _jobs_in_flight.add(receipt_id)
+    async with httpx.AsyncClient(timeout=20) as client:
+        await _patch_receipt(client, receipt_id, {
+            "status": "Processing",
+            "error_message": None,
+            "verification_warnings": [],
+        })
+
+    _spawn(_run_extraction_job(receipt, caller.get("id")))
+    return {"receipt_id": receipt_id, "status": "Processing"}
+
+
+async def resume_interrupted_extractions() -> None:
+    """Restarts extractions that died with a previous server process.
+
+    Assumes a single server process: with several running, one starting up would
+    take over work another is actively doing.
+    """
+    if not supabase_admin_available:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            res = await client.get(
+                f"{SUPABASE_URL}/rest/v1/receipts",
+                headers=_svc_headers(),
+                params={"select": RECEIPT_JOB_SELECT, "status": "eq.Processing"},
+            )
+            if res.status_code != 200:
+                print(f"⚠️ Could not check for interrupted extractions: {res.text}")
+                return
+
+            stranded = res.json() or []
+            resumed = 0
+            for receipt in stranded:
+                receipt["organization_id"] = (receipt.get("scan_batches") or {}).get("organization_id")
+                if receipt["id"] in _jobs_in_flight:
+                    continue
+                # Without an image or an organisation there is nothing to retry,
+                # and leaving it Processing would strand it permanently.
+                if not receipt.get("file_path") or not receipt["organization_id"]:
+                    await _patch_receipt(client, receipt["id"], {
+                        "status": "Failed",
+                        "error_message": INTERRUPTED_NO_IMAGE_ERROR,
+                    })
+                    continue
+                _jobs_in_flight.add(receipt["id"])
+                _spawn(_run_extraction_job(receipt, receipt.get("uploaded_by")))
+                resumed += 1
+
+            if resumed:
+                print(f"↻ Resuming {resumed} extraction(s) interrupted by a restart")
+    except Exception as err:
+        print(f"⚠️ Could not check for interrupted extractions: {err}")
 
 
 if __name__ == "__main__":

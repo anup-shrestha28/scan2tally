@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw } from 'lucide-react';
-import { ScanBatch, Receipt, User, UserRole, Transaction, EntryType } from '../types';
+import { ScanBatch, Receipt, User, UserRole, Transaction } from '../types';
 import {
   newId,
   fetchBatches,
@@ -12,11 +12,19 @@ import {
   deleteReceipt,
   uploadReceiptImage,
   getReceiptImageUrl,
-  downloadReceiptImage,
-  saveTransactionsForReceipt,
+  startReceiptExtraction,
+  fetchReceiptStates,
+  fetchTransactionsForBatch,
 } from '../lib/db';
 
-const NOT_JOURNAL_ENTRY_ERROR = 'The uploaded image is not a journal entry. Please check and try again.';
+/**
+ * How often to re-check receipts the server is still working on.
+ *
+ * Extraction runs server-side, so this is the only way the page learns that a
+ * voucher has finished — including one that was started before the tab was
+ * last closed.
+ */
+const EXTRACTION_POLL_MS = 3000;
 
 /**
  * Minimum short edge, in pixels, for a voucher photo we trust.
@@ -50,17 +58,6 @@ function measureImage(url: string): Promise<{ width: number; height: number } | 
   });
 }
 
-function getExtractionErrorMessage(error?: string): string {
-  if (!error) return 'No transaction data could be extracted from this receipt.';
-  if (
-    error.includes("'NoneType' object has no attribute 'strip'") ||
-    error.includes('not a journal entry')
-  ) {
-    return NOT_JOURNAL_ENTRY_ERROR;
-  }
-  return error;
-}
-
 interface BatchWorkspaceProps {
   userRole: UserRole;
   currentUser: User;
@@ -81,16 +78,36 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
   const [previewReceipt, setPreviewReceipt] = useState<Receipt | null>(null);
   const [previewRotation, setPreviewRotation] = useState(0);
   const [dragOver, setDragOver] = useState<boolean>(false);
-  const [isProcessing, setIsProcessing] = useState<boolean>(false);
-  
+  // True only while extraction requests are being handed to the server. Once
+  // they are accepted the receipts' own Processing status takes over, so this
+  // covers just the brief gap before that shows up.
+  const [startingExtraction, setStartingExtraction] = useState<boolean>(false);
+
   const [uploadedFilesMap, setUploadedFilesMap] = useState<Record<string, File>>({});
   const [receiptTransactionsMap, setReceiptTransactionsMap] = useState<Record<string, Transaction[]>>({});
+
+  // The server reads the image out of storage, so an extraction must not be
+  // requested until that upload has actually landed.
+  const uploadsRef = useRef<Record<string, Promise<void>>>({});
+  // Read inside the polling loop, which must not close over a stale render.
+  const batchesRef = useRef<ScanBatch[]>([]);
+  // Batches whose stored transactions have already been loaded.
+  const loadedTxBatchesRef = useRef<Set<string>>(new Set());
+  // Set when this tab starts a run, so it can open the reviewer once the batch
+  // finishes. A tab that merely finds work already in progress does not jump.
+  // The receipt ids are kept too, so it lands on one this run produced rather
+  // than on an older extraction that happens to sit earlier in the batch.
+  const autoOpenRef = useRef<{ batchId: string; receiptIds: string[] } | null>(null);
 
   // May be undefined before the first load finishes, or when the user has no
   // batches yet — every read below has to tolerate that.
   const activeBatch: ScanBatch | undefined =
     batches.find(b => b.id === activeBatchId) || batches[0];
   const activeReceipts = activeBatch?.receipts ?? [];
+  // Derived from the receipts themselves rather than tracked separately, so a
+  // reopened tab shows work still running on the server.
+  const batchIsProcessing = (batch: ScanBatch) => batch.receipts.some(r => r.status === 'Processing');
+  const isProcessing = startingExtraction || activeReceipts.some(r => r.status === 'Processing');
   const extractableCount = activeReceipts.filter(r => r.status === 'Pending' || r.status === 'Failed').length;
   const hasFailedExtraction = activeReceipts.some(r => r.status === 'Failed');
   // Only counts receipts still awaiting extraction — no point nagging about
@@ -133,6 +150,125 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
     })();
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    batchesRef.current = batches;
+  }, [batches]);
+
+  // Pull in transactions that were extracted previously. Without this, a batch
+  // opened in a new session looks empty even though its rows are safely stored.
+  useEffect(() => {
+    const batchId = activeBatch?.id;
+    if (!batchId || loadedTxBatchesRef.current.has(batchId)) return;
+    loadedTxBatchesRef.current.add(batchId);
+
+    fetchTransactionsForBatch(batchId)
+      .then(stored => {
+        // Anything already in memory is at least as fresh, so it wins.
+        setReceiptTransactionsMap(prev => ({ ...stored, ...prev }));
+      })
+      .catch(() => {
+        // Allow a later attempt rather than leaving the batch permanently blank.
+        loadedTxBatchesRef.current.delete(batchId);
+      });
+  }, [activeBatch?.id]);
+
+  // Watch whatever the server is still extracting, wherever it was started
+  // from. This is what replaces the old "wait for the HTTP response" flow, and
+  // it works just as well for a run that began before this tab existed.
+  const processingIds = batches
+    .flatMap(b => b.receipts.filter(r => r.status === 'Processing').map(r => r.id))
+    .sort();
+  const processingKey = processingIds.join(',');
+
+  useEffect(() => {
+    if (!processingKey) return;
+    const watching = processingKey.split(',');
+    let cancelled = false;
+    let timer: number | undefined;
+
+    const check = async () => {
+      try {
+        const states = await fetchReceiptStates(watching);
+        if (cancelled) return;
+
+        const finished = states.filter(s => s.status !== 'Processing');
+        if (finished.length) {
+          const finishedIds = new Set(finished.map(f => f.id));
+
+          // Load the rows the server saved before flipping the status on
+          // screen, so a receipt never appears Extracted with nothing behind it.
+          const affectedBatchIds = new Set(
+            batchesRef.current
+              .filter(b => b.receipts.some(r => finishedIds.has(r.id)))
+              .map(b => b.id)
+          );
+          for (const batchId of affectedBatchIds) {
+            try {
+              const stored = await fetchTransactionsForBatch(batchId);
+              if (cancelled) return;
+              setReceiptTransactionsMap(prev => ({ ...prev, ...stored }));
+            } catch {
+              // The status update below still stands; the rows load on reopen.
+            }
+          }
+
+          setBatches(prev => prev.map(b => ({
+            ...b,
+            receipts: b.receipts.map(r => {
+              const update = finished.find(f => f.id === r.id);
+              return update
+                ? {
+                    ...r,
+                    status: update.status,
+                    error_message: update.error_message,
+                    verification_warnings: update.verification_warnings,
+                  }
+                : r;
+            }),
+          })));
+        }
+      } catch {
+        // Transient — the next tick tries again rather than surfacing a scary
+        // error for what is usually a momentary network blip.
+      }
+      if (!cancelled) timer = window.setTimeout(check, EXTRACTION_POLL_MS);
+    };
+
+    timer = window.setTimeout(check, EXTRACTION_POLL_MS);
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [processingKey]);
+
+  // Open the reviewer once a run this tab started has finished, preserving the
+  // old behaviour of not making the user click through manually.
+  useEffect(() => {
+    const pending = autoOpenRef.current;
+    if (!pending || startingExtraction) return;
+
+    const batch = batches.find(b => b.id === pending.batchId);
+    if (!batch) {
+      autoOpenRef.current = null;
+      return;
+    }
+    if (batch.receipts.some(r => r.status === 'Processing')) return;
+
+    autoOpenRef.current = null;
+    const firstExtracted = batch.receipts.find(
+      r => pending.receiptIds.includes(r.id) && r.status === 'Extracted'
+    );
+    // If every receipt failed, stay here so the Failed rows and Retry are visible.
+    if (firstExtracted) {
+      onSelectBatch(
+        batch,
+        firstExtracted,
+        receiptTransactionsMap[firstExtracted.id] || [],
+        receiptTransactionsMap
+      );
+    }
+  }, [batches, startingExtraction, receiptTransactionsMap]);
 
   useEffect(() => {
     if (!deletingBatchId) return;
@@ -215,7 +351,11 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
   };
 
   const handleDeleteBatch = async (id: string) => {
-    if (isProcessing && id === activeBatchId) {
+    // Extraction runs on the server now, so a batch can be busy even when it is
+    // not the one on screen. Deleting it would leave a job writing rows that
+    // no longer have anything to belong to.
+    const target = batches.find(b => b.id === id);
+    if ((target && batchIsProcessing(target)) || (startingExtraction && id === activeBatchId)) {
       setSaveError('This batch cannot be deleted while extraction is in progress.');
       return;
     }
@@ -264,30 +404,34 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
     }));
 
     // Persist the row first so the receipt survives a refresh even if the
-    // image upload is still running, then attach the stored image.
-    newReceipts.forEach(async receipt => {
+    // image upload is still running, then attach the stored image. The promise
+    // is kept because extraction happens server-side now: the server reads the
+    // image from storage, so it cannot be asked to start until this has landed.
+    newReceipts.forEach(receipt => {
       const file = newFilesMap[receipt.id];
-      try {
-        await createReceipt({
-          id: receipt.id,
-          batchId,
-          userId: currentUser.id,
-          filename: receipt.filename,
-        });
-        const path = await uploadReceiptImage(file, {
-          organizationId: currentUser.organization_id!,
-          batchId,
-          receiptId: receipt.id,
-        });
-        await updateReceiptRow(receipt.id, { file_path: path });
-        updateReceipt(batchId, receipt.id, { storage_path: path });
-        setSaveError(null);
-      } catch (err: any) {
-        setSaveError(
-          `"${receipt.filename}" could not be saved to the server (${err?.message || 'unknown error'}). ` +
-          `It is still usable in this session but will not survive a refresh.`
-        );
-      }
+      uploadsRef.current[receipt.id] = (async () => {
+        try {
+          await createReceipt({
+            id: receipt.id,
+            batchId,
+            userId: currentUser.id,
+            filename: receipt.filename,
+          });
+          const path = await uploadReceiptImage(file, {
+            organizationId: currentUser.organization_id!,
+            batchId,
+            receiptId: receipt.id,
+          });
+          await updateReceiptRow(receipt.id, { file_path: path });
+          updateReceipt(batchId, receipt.id, { storage_path: path });
+          setSaveError(null);
+        } catch (err: any) {
+          setSaveError(
+            `"${receipt.filename}" could not be saved to the server (${err?.message || 'unknown error'}). ` +
+            `It cannot be extracted until it uploads successfully.`
+          );
+        }
+      })();
     });
 
     // Measure in the background so the thumbnails appear immediately. PDFs are
@@ -367,170 +511,71 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
     });
   };
 
-  const extractSingleReceipt = async (batchId: string, receipt: Receipt): Promise<Transaction[] | null> => {
-    // After a refresh the in-memory file is gone, so fall back to the copy in
-    // storage. Without this, retrying an old receipt could only ever fail.
-    let actualFile = uploadedFilesMap[receipt.id];
-    if (!actualFile && receipt.storage_path) {
-      const downloaded = await downloadReceiptImage(receipt.storage_path);
-      if (downloaded) {
-        actualFile = downloaded;
-        setUploadedFilesMap(prev => ({ ...prev, [receipt.id]: downloaded }));
-      }
+  /**
+   * Hands one receipt to the server and returns once it has been accepted.
+   *
+   * Nothing here waits for the extraction itself. The server owns the work from
+   * this point, which is what lets the tab be closed without losing it — the
+   * result is picked up later by watching the receipt's status.
+   */
+  const beginExtraction = async (batchId: string, receipt: Receipt): Promise<void> => {
+    // The server fetches the image from storage, so the upload has to be
+    // finished first. Its own failure is reported by the upload itself.
+    try {
+      await uploadsRef.current[receipt.id];
+    } catch {
+      /* handled where the upload was started */
     }
 
-    if (!actualFile) {
-      const message = 'The original image is no longer available. Please upload it again.';
-      updateReceipt(batchId, receipt.id, { status: 'Failed', error_message: message });
-      persistReceiptState(receipt.id, { status: 'Failed', error_message: message });
-      return null;
-    }
-
-    // Clear any prior notices up front so a retry never shows stale results.
+    // Shown immediately so the row reacts to the click; the server sets the
+    // same status durably, which is what survives a refresh.
     updateReceipt(batchId, receipt.id, {
       status: 'Processing',
       error_message: undefined,
-      verification_warnings: undefined
-    });
-    persistReceiptState(receipt.id, {
-      status: 'Processing',
-      error_message: null,
-      verification_warnings: [],
+      verification_warnings: undefined,
     });
 
     try {
-      const formData = new FormData();
-      formData.append('file', actualFile);
-
-      const response = await fetch('http://localhost:8000/api/extract-receipt', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const message = `Extraction server responded with status ${response.status}.`;
-        updateReceipt(batchId, receipt.id, { status: 'Failed', error_message: message });
-        persistReceiptState(receipt.id, { status: 'Failed', error_message: message });
-        return null;
-      }
-
-      const data = await response.json();
-
-      if (data.error || !data.transactions || !data.transactions.length) {
-        const message = getExtractionErrorMessage(data.error);
-        updateReceipt(batchId, receipt.id, { status: 'Failed', error_message: message });
-        persistReceiptState(receipt.id, { status: 'Failed', error_message: message });
-        return null;
-      }
-
-      // Single normalization point for the wire format. Downstream code only
-      // ever reads debit_amount / credit_amount — the legacy flat `amount`
-      // field is resolved onto the correct side here and never propagated,
-      // so row values and running totals can't disagree later.
-      const mappedTx: Transaction[] = data.transactions.map((t: any, i: number) => {
-        const debit = parseFloat(t.debit_amount) || 0;
-        const credit = parseFloat(t.credit_amount) || 0;
-        const legacy = parseFloat(t.amount) || 0;
-        const entryType: EntryType =
-          t.entry_type === 'Dr' || t.entry_type === 'Cr'
-            ? t.entry_type
-            : (debit || (legacy && !credit)) ? 'Dr' : 'Cr';
-
-        return {
-          // UUID because these rows are written straight to Postgres.
-          id: newId(),
-          voucher_date: t.voucher_date || '2083-03-15',
-          voucher_type: t.voucher_type || 'Journal',
-          entry_type: entryType,
-          ledger_name: t.ledger_name || t.debit_ledger || t.credit_ledger || 'General Account',
-          debit_amount: entryType === 'Dr' ? (debit || legacy) : 0,
-          credit_amount: entryType === 'Cr' ? (credit || legacy) : 0,
-          narration: t.narration || '',
-          needs_review: t.needs_review === true
-        };
-      });
-
-      // Reconciliation notices are advisory: the extraction still succeeded, so
-      // the receipt stays Extracted and editable — the warning just tells the
-      // reviewer which side of the voucher disagrees with its printed total.
-      const warnings: string[] = Array.isArray(data.verification?.warnings)
-        ? data.verification.warnings
-        : [];
-
-      setReceiptTransactionsMap(prev => ({ ...prev, [receipt.id]: mappedTx }));
-      updateReceipt(batchId, receipt.id, {
-        status: 'Extracted',
-        error_message: undefined,
-        verification_warnings: warnings.length > 0 ? warnings : undefined
-      });
-      persistReceiptState(receipt.id, {
-        status: 'Extracted',
-        error_message: null,
-        verification_warnings: warnings,
-      });
-
-      // Store the extracted lines immediately, so a crash between extraction
-      // and review does not throw away work the user already paid for.
-      if (currentUser.organization_id) {
-        try {
-          await saveTransactionsForReceipt(
-            receipt.id,
-            { batchId, organizationId: currentUser.organization_id, userId: currentUser.id },
-            mappedTx
-          );
-        } catch (err: any) {
-          setSaveError(`Extracted rows could not be saved: ${err?.message || 'unknown error'}`);
-        }
-      }
-      return mappedTx;
+      await startReceiptExtraction(receipt.id);
     } catch (err: any) {
-      const message = err?.message || 'Network error while contacting the extraction service.';
+      const message = err?.message || 'Could not start extraction on the server.';
       updateReceipt(batchId, receipt.id, { status: 'Failed', error_message: message });
       persistReceiptState(receipt.id, { status: 'Failed', error_message: message });
-      return null;
     }
   };
 
   const handleTriggerExtraction = async () => {
     if (!activeBatch) return;
-    setIsProcessing(true);
+    const batchId = activeBatch.id;
 
     // US-25: only process receipts that are new or previously failed —
     // successfully extracted receipts are left untouched.
     const targets = activeBatch.receipts.filter(r => r.status === 'Pending' || r.status === 'Failed');
-    let firstSuccess: { receipt: Receipt; transactions: Transaction[] } | null = null;
-    const updatedTxMap: Record<string, Transaction[]> = { ...receiptTransactionsMap };
+    if (!targets.length) return;
 
+    autoOpenRef.current = { batchId, receiptIds: targets.map(r => r.id) };
+    setStartingExtraction(true);
+    // Queued one at a time so a rejected receipt cannot stop the rest (US-26).
+    // The server decides how many it actually reads at once.
     for (const receipt of targets) {
-      // Sequential, not Promise.all: a failure on one receipt must not
-      // abort or interfere with the others (US-26).
-      const result = await extractSingleReceipt(activeBatch.id, receipt);
-      if (result) {
-        updatedTxMap[receipt.id] = result;
-        if (!firstSuccess) {
-          firstSuccess = { receipt, transactions: result };
-        }
-      }
+      await beginExtraction(batchId, receipt);
     }
-
-    setIsProcessing(false);
-
-    // Jump straight into the reviewer for the first successfully extracted
-    // receipt so the user doesn't have to click "Review & Edit" manually.
-    // If every receipt failed, stay on the workspace so the Failed/Retry
-    // rows are visible instead of navigating to an empty reviewer.
-    if (firstSuccess) {
-      const updatedReceipt: Receipt = { ...firstSuccess.receipt, status: 'Extracted', error_message: undefined };
-      const updatedBatch: ScanBatch = {
-        ...activeBatch,
-        receipts: activeBatch.receipts.map(r => r.id === updatedReceipt.id ? updatedReceipt : r)
-      };
-      onSelectBatch(updatedBatch, updatedReceipt, firstSuccess.transactions, updatedTxMap);
-    }
+    setStartingExtraction(false);
   };
 
   const handleRetryReceipt = (receipt: Receipt) => {
-    extractSingleReceipt(activeBatchId, receipt);
+    if (!activeBatch) return;
+    beginExtraction(activeBatch.id, receipt);
+  };
+
+  const handleOpenReviewer = (receipt: Receipt) => {
+    if (!activeBatch) return;
+    onSelectBatch(
+      activeBatch,
+      receipt,
+      receiptTransactionsMap[receipt.id] || [],
+      receiptTransactionsMap
+    );
   };
 
   const handleReviewSingleReceipt = (receipt: Receipt) => {
@@ -644,8 +689,8 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                         <Edit2 size={12} />
                       </button>
                       <button 
-                        className="btn btn-danger btn-sm batch-action" 
-                        disabled={isProcessing && b.id === activeBatchId}
+                        className="btn btn-danger btn-sm batch-action"
+                        disabled={batchIsProcessing(b) || (startingExtraction && b.id === activeBatchId)}
                         onClick={(e) => {
                           e.stopPropagation();
                           if (b.receipts.length === 0) {
@@ -654,7 +699,7 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                             setDeletingBatchId(b.id);
                           }
                         }}
-                        title={isProcessing && b.id === activeBatchId
+                        title={batchIsProcessing(b) || (startingExtraction && b.id === activeBatchId)
                           ? 'Cannot delete while extraction is in progress'
                           : 'Delete Batch'}
                       >
@@ -843,6 +888,19 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                             >
                               Preview Image
                             </button>
+
+                            {/* The way back into extracted rows on a later
+                                visit — without this the reviewer is reachable
+                                only in the session that ran the extraction. */}
+                            {rcpt.status === 'Extracted' && (
+                              <button
+                                className="btn btn-primary btn-sm"
+                                onClick={() => handleOpenReviewer(rcpt)}
+                                title="Review and edit the extracted rows"
+                              >
+                                Review &amp; Edit
+                              </button>
+                            )}
 
                             {rcpt.status === 'Failed' && (
                               <button

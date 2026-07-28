@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import { ScanBatch, Receipt, Transaction, User, UserRole, Organization } from '../types';
+import { ScanBatch, Receipt, ReceiptStatus, Transaction, User, UserRole, Organization } from '../types';
 
 /**
  * Every read and write goes through here.
@@ -344,6 +344,52 @@ export async function updateReceiptRow(
 export async function deleteReceipt(id: string): Promise<void> {
   const { error } = await supabase.from('receipts').delete().eq('id', id);
   if (error) throw new Error(error.message);
+}
+
+/**
+ * Asks the server to extract a receipt, and returns as soon as it has accepted.
+ *
+ * The extraction itself runs on the server, which reads the image from storage
+ * and writes the results back itself. That is the whole point: the browser is
+ * not holding the work, so closing the tab or losing the network partway
+ * through cannot abandon it. Progress is observed by watching the receipt row.
+ */
+export async function startReceiptExtraction(receiptId: string): Promise<void> {
+  const { data: sessionData } = await supabase.auth.getSession();
+  const token = sessionData.session?.access_token;
+  if (!token) throw new Error('Your session has expired. Please sign in again.');
+
+  const base = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:8000';
+  const res = await fetch(`${base}/api/receipts/${receiptId}/extract`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.detail || 'Could not start extraction on the server.');
+  }
+}
+
+/** Current server-side state of specific receipts, for watching extractions. */
+export async function fetchReceiptStates(ids: string[]): Promise<
+  { id: string; status: ReceiptStatus; error_message?: string; verification_warnings?: string[] }[]
+> {
+  if (!ids.length) return [];
+  const { data, error } = await supabase
+    .from('receipts')
+    .select('id, status, error_message, verification_warnings')
+    .in('id', ids);
+
+  if (error) throw new Error(error.message);
+  return (data || []).map((r: any) => ({
+    id: r.id,
+    status: r.status as ReceiptStatus,
+    error_message: r.error_message || undefined,
+    verification_warnings: Array.isArray(r.verification_warnings) && r.verification_warnings.length
+      ? r.verification_warnings
+      : undefined,
+  }));
 }
 
 // ---------------------------------------------------------------- images
