@@ -662,6 +662,22 @@ async def create_user(payload: CreateUserRequest, authorization: Optional[str] =
         raise HTTPException(status_code=403, detail="Only administrators can create accounts.")
 
     async with httpx.AsyncClient(timeout=30) as client:
+        if organization_id:
+            org = await client.get(
+                f"{SUPABASE_URL}/rest/v1/organizations",
+                headers=_svc_headers(),
+                params={"select": "status", "id": f"eq.{organization_id}"},
+            )
+            org_rows = org.json() if org.status_code == 200 else []
+            if not org_rows:
+                raise HTTPException(status_code=400, detail="That organisation does not exist.")
+            # A deactivated organisation is suspended; staff should not be
+            # addable to it until it is reactivated. The UI already hides
+            # inactive organisations from the picker - this is the backstop
+            # for a request made directly against the API.
+            if org_rows[0].get("status") != "Active":
+                raise HTTPException(status_code=400, detail="That organisation is deactivated. Reactivate it before adding staff.")
+
         existing = await client.get(
             f"{SUPABASE_URL}/rest/v1/users",
             headers=_svc_headers(),

@@ -22,6 +22,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
 
   const [users, setUsers] = useState<User[]>([]);
   const [orgs, setOrgs] = useState<{ id: string; name: string; status: string }[]>([]);
+  const activeOrgs = orgs.filter(o => o.status === 'Active');
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -234,8 +235,15 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
                   <select className="form-select" value={orgId} disabled={busy} required
                           onChange={e => setOrgId(e.target.value)}>
                     <option value="">Choose an organization...</option>
-                    {orgs.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+                    {/* A deactivated organization is suspended; staff should not
+                        be added to it until it's reactivated. */}
+                    {activeOrgs.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
                   </select>
+                  {activeOrgs.length === 0 && (
+                    <p style={{ color: 'var(--text-dim)', fontSize: '0.78rem', marginTop: '6px' }}>
+                      No active organizations. Reactivate one first.
+                    </p>
+                  )}
                 </div>
               )}
             </div>
