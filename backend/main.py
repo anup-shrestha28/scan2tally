@@ -10,10 +10,7 @@ from typing import List, Optional
 import httpx
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from PIL import Image
 import numpy as np
 import cv2
@@ -102,18 +99,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-class TransactionItem(BaseModel):
-    voucher_date: str
-    voucher_type: str = "Journal"
-    entry_type: Optional[str] = "Dr" # "Dr" or "Cr"
-    ledger_name: Optional[str] = ""
-    debit_ledger: Optional[str] = ""
-    credit_ledger: Optional[str] = ""
-    debit_amount: Optional[float] = 0.0
-    credit_amount: Optional[float] = 0.0
-    amount: Optional[float] = 0.0
-    narration: Optional[str] = ""
 
 INVALID_JOURNAL_IMAGE_ERROR = "The uploaded image is not a journal entry. Please check and try again."
 
@@ -720,77 +705,6 @@ async def create_user(payload: CreateUserRequest, authorization: Optional[str] =
     return {"id": new_id, "name": name, "email": email, "role": payload.role,
             "organization_id": organization_id, "status": "Active"}
 
-
-@app.post("/api/export-tally-excel")
-def export_tally_excel(transactions: List[TransactionItem]):
-    """
-    Generates a standard Tally Prime importable Excel (.xlsx) file.
-    """
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Tally_Import"
-
-    header_fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
-    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-    data_font = Font(name="Calibri", size=11)
-    border_side = Side(border_style="thin", color="CBD5E1")
-    cell_border = Border(left=border_side, right=border_side, top=border_side, bottom=border_side)
-
-    headers = [
-        "Voucher Date", "Voucher Type", "Voucher Number", "Dr/Cr",
-        "Ledger Name", "Debit Amount (Rs.)", "Credit Amount (Rs.)", "Narration"
-    ]
-    ws.append(headers)
-
-    for col_num, header in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col_num)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-
-    for idx, tx in enumerate(transactions, start=1):
-        ledger = tx.ledger_name or tx.debit_ledger or tx.credit_ledger or ""
-        # Resolve the legacy flat `amount` onto whichever side the row belongs
-        # to, so the Dr/Cr marker, the amount column and the totals all agree.
-        legacy = tx.amount or 0
-        dr_cr = tx.entry_type or ("Dr" if (tx.debit_amount or (legacy and not tx.credit_amount)) else "Cr")
-        debit = (tx.debit_amount or legacy or 0) if dr_cr == "Dr" else 0
-        credit = (tx.credit_amount or legacy or 0) if dr_cr == "Cr" else 0
-        row = [
-            tx.voucher_date,
-            tx.voucher_type,
-            f"VCH-{idx:04d}",
-            dr_cr,
-            ledger,
-            debit,
-            credit,
-            tx.narration
-        ]
-        ws.append(row)
-        
-        row_idx = ws.max_row
-        for col_idx in range(1, len(headers) + 1):
-            cell = ws.cell(row=row_idx, column=col_idx)
-            cell.font = data_font
-            cell.border = cell_border
-            if col_idx in (6, 7):
-                cell.number_format = "#,##0.00"
-                cell.alignment = Alignment(horizontal="right")
-
-    for col in ws.columns:
-        max_len = max(len(str(cell.value or '')) for cell in col)
-        col_letter = openpyxl.utils.get_column_letter(col[0].column)
-        ws.column_dimensions[col_letter].width = max(max_len + 4, 15)
-
-    stream = io.BytesIO()
-    wb.save(stream)
-    stream.seek(0)
-
-    return StreamingResponse(
-        stream,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=Scan2Tally_Import.xlsx"}
-    )
 
 if __name__ == "__main__":
     import uvicorn
