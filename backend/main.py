@@ -111,7 +111,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-INVALID_JOURNAL_IMAGE_ERROR = "The uploaded image is not a journal entry. Please check and try again."
+INVALID_JOURNAL_IMAGE_ERROR = "The uploaded image is not a journal entry. Please check."
 
 def extraction_error_message(engine: str, err: Exception) -> str:
     err_text = str(err)

@@ -164,6 +164,35 @@ body {
   font-size: 0.875rem;
 }
 
+.user-context {
+  gap: 8px;
+  max-width: 430px;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.context-org,
+.context-user {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.context-org {
+  max-width: 135px;
+  font-weight: 600;
+}
+
+.context-user {
+  max-width: 170px;
+}
+
+.context-divider {
+  width: 1px;
+  height: 18px;
+  flex: 0 0 auto;
+  background: var(--border-color);
+}
+
 .role-tag {
   font-size: 0.75rem;
   font-weight: 600;
@@ -351,10 +380,209 @@ body {
   margin-top: 2px;
 }
 
+.upload-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.section-eyebrow {
+  display: block;
+  color: var(--primary);
+  font-size: 0.68rem;
+  font-weight: 750;
+  letter-spacing: 0.1em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.sidebar-intro {
+  padding-bottom: 4px;
+}
+
+.workspace-sidebar-title {
+  color: var(--text-main);
+  font-size: 1.3rem;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.sidebar-intro p {
+  color: var(--text-dim);
+  font-size: 0.76rem;
+  line-height: 1.45;
+  margin-top: 5px;
+}
+
+.batch-title-block h1 {
+  font-size: clamp(1.3rem, 2vw, 1.65rem);
+  font-weight: 750;
+  letter-spacing: -0.025em;
+  line-height: 1.2;
+  margin-top: 6px;
+}
+
+.batch-title-block > p {
+  margin-top: 5px;
+}
+
+.batch-header-action {
+  min-height: 40px;
+  white-space: nowrap;
+}
+
+.upload-dropzone {
+  position: relative;
+  overflow: hidden;
+  border: 1px dashed color-mix(in srgb, var(--primary) 42%, var(--border-color));
+  background:
+    radial-gradient(circle at 50% 0%, rgba(99, 102, 241, 0.12), transparent 52%),
+    color-mix(in srgb, var(--bg-card) 94%, var(--bg-dark));
+  min-height: 260px;
+  padding: 42px 28px 30px;
+  text-align: center;
+  transition: border-color 180ms ease, background 180ms ease, transform 180ms ease;
+}
+
+.upload-dropzone::before {
+  content: '';
+  position: absolute;
+  inset: 12px;
+  border: 1px dashed color-mix(in srgb, var(--border-color) 75%, transparent);
+  border-radius: 12px;
+  pointer-events: none;
+}
+
+.upload-dropzone:hover,
+.upload-dropzone-active {
+  border-color: var(--primary);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(99, 102, 241, 0.2), transparent 56%),
+    color-mix(in srgb, var(--bg-card) 91%, var(--primary));
+  transform: translateY(-1px);
+}
+
+.upload-icon {
+  position: relative;
+  z-index: 1;
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #c7d2fe;
+  background: linear-gradient(145deg, rgba(99, 102, 241, 0.3), rgba(168, 85, 247, 0.2));
+  border: 1px solid rgba(129, 140, 248, 0.4);
+  border-radius: 18px;
+  box-shadow: 0 10px 28px rgba(99, 102, 241, 0.2);
+}
+
+.upload-copy {
+  position: relative;
+  z-index: 1;
+}
+
+.upload-copy h4 {
+  font-size: 1.12rem;
+  font-weight: 700;
+}
+
+.upload-copy p {
+  max-width: 520px;
+  margin: 6px auto 0;
+  color: var(--text-muted);
+  font-size: 0.86rem;
+}
+
+.upload-actions {
+  display: flex;
+  justify-content: center;
+  margin-top: 18px;
+}
+
+.upload-actions .btn {
+  min-height: 38px;
+  box-shadow: var(--shadow-sm);
+}
+
+.upload-hint {
+  display: block;
+  margin-top: 14px;
+  color: var(--text-dim);
+  font-size: 0.72rem;
+}
+
+.files-card {
+  padding: 22px;
+}
+
+.files-card-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.files-card-header h2 {
+  font-size: 1.05rem;
+  font-weight: 700;
+  margin-top: 5px;
+}
+
+.file-count {
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  color: var(--text-muted);
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+
+.files-empty-state {
+  display: flex;
+  min-height: 150px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 7px;
+  color: var(--text-dim);
+  border: 1px dashed var(--border-color);
+  border-radius: 12px;
+  text-align: center;
+}
+
+.files-empty-state svg { color: var(--primary); }
+.files-empty-state strong { color: var(--text-muted); font-size: 0.86rem; }
+.files-empty-state span { font-size: 0.78rem; }
+
 @media (max-width: 640px) {
   .batch-header {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .batch-header-action {
+    width: 100%;
+  }
+
+  .upload-dropzone {
+    min-height: 235px;
+    padding: 34px 18px 24px;
+  }
+
+  .files-card {
+    padding: 16px;
+  }
+
+  .files-card-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
   }
 }
 
@@ -476,9 +704,71 @@ body {
 .main-content {
   flex: 1;
   padding: 24px;
-  max-width: 1400px;
+  /* Let the workspace breathe on large monitors. The old 1400px cap left a
+     large unused area beside the batch panel on desktop screens. */
+  max-width: 1800px;
   width: 100%;
   margin: 0 auto;
+}
+
+.workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(270px, 320px) minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.workspace-sidebar,
+.workspace-main {
+  min-width: 0;
+}
+
+.workspace-sidebar {
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 0% 0%, rgba(99, 102, 241, 0.11), transparent 42%),
+    var(--bg-card);
+  border-color: var(--border-color);
+}
+
+.workspace-sidebar::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 20px;
+  right: 20px;
+  height: 2px;
+  background: rgba(99, 102, 241, 0.55);
+  border-radius: 0 0 4px 4px;
+}
+
+.workspace-sidebar .batch-sidebar-heading {
+  color: var(--text-muted);
+}
+
+@media (min-width: 1600px) {
+  .main-content {
+    padding-left: 32px;
+    padding-right: 32px;
+  }
+}
+
+@media (max-width: 900px) {
+  .workspace-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-sidebar {
+    min-height: auto !important;
+    position: static !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .main-content {
+    padding: 16px;
+  }
 }
 
 /* Login page */

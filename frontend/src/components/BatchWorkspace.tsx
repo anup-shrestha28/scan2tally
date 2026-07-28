@@ -9,12 +9,12 @@ import {
   deleteBatch,
   createReceipt,
   updateReceiptRow,
+  fetchTransactionsForBatch,
   deleteReceipt,
   uploadReceiptImage,
   getReceiptImageUrl,
   startReceiptExtraction,
   fetchReceiptStates,
-  fetchTransactionsForBatch,
 } from '../lib/db';
 
 /**
@@ -25,6 +25,8 @@ import {
  * last closed.
  */
 const EXTRACTION_POLL_MS = 3000;
+const NOT_JOURNAL_ENTRY_ERROR = 'The uploaded image is not a journal entry. Please check.';
+const ACTIVE_BATCH_STORAGE_KEY = 'scan2tally-active-batch';
 
 /**
  * Minimum short edge, in pixels, for a voucher photo we trust.
@@ -78,6 +80,7 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
   const [previewReceipt, setPreviewReceipt] = useState<Receipt | null>(null);
   const [previewRotation, setPreviewRotation] = useState(0);
   const [dragOver, setDragOver] = useState<boolean>(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   // True only while extraction requests are being handed to the server. Once
   // they are accepted the receipts' own Processing status takes over, so this
   // covers just the brief gap before that shows up.
@@ -109,6 +112,7 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
   const batchIsProcessing = (batch: ScanBatch) => batch.receipts.some(r => r.status === 'Processing');
   const isProcessing = startingExtraction || activeReceipts.some(r => r.status === 'Processing');
   const extractableCount = activeReceipts.filter(r => r.status === 'Pending' || r.status === 'Failed').length;
+  const allReceiptsExtracted = activeReceipts.length > 0 && activeReceipts.every(r => r.status === 'Extracted');
   const hasFailedExtraction = activeReceipts.some(r => r.status === 'Failed');
   // Only counts receipts still awaiting extraction — no point nagging about
   // photos that have already been processed.
@@ -141,7 +145,12 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
 
         if (cancelled) return;
         setBatches(loaded);
-        setActiveBatchId(prev => prev || loaded[0]?.id || '');
+        const rememberedBatchId = sessionStorage.getItem(ACTIVE_BATCH_STORAGE_KEY);
+        const nextBatchId = rememberedBatchId && loaded.some(b => b.id === rememberedBatchId)
+          ? rememberedBatchId
+          : loaded[0]?.id || '';
+        setActiveBatchId(nextBatchId);
+        if (nextBatchId) sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, nextBatchId);
       } catch (err: any) {
         if (!cancelled) setLoadError(err?.message || 'Could not load your scan batches.');
       } finally {
@@ -255,11 +264,20 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
     }
     if (batch.receipts.some(r => r.status === 'Processing')) return;
 
+    const runReceipts = batch.receipts.filter(r => pending.receiptIds.includes(r.id));
+    // Never move away from the upload page when any receipt in this run failed.
+    // This is especially important for the "not a journal entry" response:
+    // the failed row and its retry action must remain visible to the user.
+    if (
+      runReceipts.length !== pending.receiptIds.length ||
+      runReceipts.some(r => r.status !== 'Extracted')
+    ) {
+      if (runReceipts.some(r => r.status === 'Failed')) autoOpenRef.current = null;
+      return;
+    }
+
     autoOpenRef.current = null;
-    const firstExtracted = batch.receipts.find(
-      r => pending.receiptIds.includes(r.id) && r.status === 'Extracted'
-    );
-    // If every receipt failed, stay here so the Failed rows and Retry are visible.
+    const firstExtracted = runReceipts[0];
     if (firstExtracted) {
       onSelectBatch(
         batch,
@@ -327,6 +345,7 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
       });
       setBatches(prev => [newBatch, ...prev]);
       setActiveBatchId(newBatch.id);
+      sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, newBatch.id);
       setSaveError(null);
     } catch (err: any) {
       setSaveError(err?.message || 'Could not create the batch.');
@@ -363,7 +382,10 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
     const remaining = batches.filter(b => b.id !== id);
     setBatches(remaining);
     if (activeBatchId === id) {
-      setActiveBatchId(remaining[0]?.id || '');
+      const nextBatchId = remaining[0]?.id || '';
+      setActiveBatchId(nextBatchId);
+      if (nextBatchId) sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, nextBatchId);
+      else sessionStorage.removeItem(ACTIVE_BATCH_STORAGE_KEY);
     }
     setDeletingBatchId(null);
     try {
@@ -583,6 +605,25 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
     setPreviewReceipt(receipt);
   };
 
+  const handleContinueReview = async () => {
+    if (!activeBatch) return;
+    try {
+      const transactionMap = await fetchTransactionsForBatch(activeBatch.id);
+      setReceiptTransactionsMap(transactionMap);
+      const firstExtractedReceipt = activeBatch.receipts.find(r => r.status === 'Extracted');
+      if (firstExtractedReceipt) {
+        onSelectBatch(
+          activeBatch,
+          firstExtractedReceipt,
+          transactionMap[firstExtractedReceipt.id] || [],
+          transactionMap
+        );
+      }
+    } catch (err: any) {
+      setSaveError(err?.message || 'Could not load the extracted data for review.');
+    }
+  };
+
   const isPdfReceipt = (receipt: Receipt) => {
     const file = uploadedFilesMap[receipt.id];
     return file?.type === 'application/pdf' || receipt.filename.toLowerCase().endsWith('.pdf');
@@ -613,7 +654,7 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+    <div className="upload-workspace">
       {saveError && (
         <div style={{
           display: 'flex', alignItems: 'flex-start', gap: '8px',
@@ -631,9 +672,12 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
           </button>
         </div>
       )}
-      <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: '24px' }}>
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '12px', minHeight: 'calc(100vh - 120px)', position: 'sticky', top: '24px', alignSelf: 'start' }}>
-          <h3 className="batch-sidebar-heading">Your Batches</h3>
+      <div className="workspace-grid">
+        <div className="card workspace-sidebar" style={{ display: 'flex', flexDirection: 'column', gap: '12px', minHeight: 'calc(100vh - 120px)', position: 'sticky', top: '24px', alignSelf: 'start' }}>
+          <div className="sidebar-intro">
+            <h3 className="workspace-sidebar-title">Workspace</h3>
+            <p>Organize receipts by accounting period or project.</p>
+          </div>
           <button className="btn btn-primary" onClick={handleCreateBatch} style={{ width: '100%', padding: '12px 16px', fontSize: '0.9rem' }}>
             <FolderPlus size={18} />
             Create New Batch
@@ -643,7 +687,10 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
             {batches.map(b => (
               <div 
                 key={b.id} 
-                onClick={() => setActiveBatchId(b.id)}
+                onClick={() => {
+                  setActiveBatchId(b.id);
+                  sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, b.id);
+                }}
                 ref={editingBatchId === b.id ? editingBatchRef : undefined}
                 className={`batch-item${b.id === activeBatchId ? ' batch-item-active' : ''}`}
               >
@@ -679,12 +726,15 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                     <div className="batch-actions">
                       <button 
                         className="btn btn-secondary btn-sm batch-action" 
+                        disabled={isProcessing && b.id === activeBatchId}
                         onClick={(e) => {
                           e.stopPropagation();
                           setEditingBatchId(b.id);
                           setEditedBatchName(b.name);
                         }}
-                        title="Rename Batch"
+                        title={isProcessing && b.id === activeBatchId
+                          ? 'Cannot edit while extraction is in progress'
+                          : 'Rename Batch'}
                       >
                         <Edit2 size={12} />
                       </button>
@@ -728,11 +778,12 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
             </p>
           </div>
         ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+        <div className="workspace-main" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
           <div className="batch-header">
-            <div>
-              <h3 style={{ fontSize: '1.2rem', fontWeight: 700 }}>{activeBatch.name}</h3>
-              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+            <div className="batch-title-block">
+              <span className="section-eyebrow">Receipt intake</span>
+              <h1>{activeBatch.name}</h1>
+              <p>
                 {activeBatch.receipts.length} receipt images · Upload and review files below
               </p>
               {lowResPendingCount > 0 && (
@@ -746,9 +797,9 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
             </div>
 
             <button
-              className="btn btn-primary"
-              onClick={handleTriggerExtraction}
-              disabled={!extractableCount || isProcessing || hasFailedExtraction}
+              className="btn btn-primary batch-header-action"
+              onClick={allReceiptsExtracted ? handleContinueReview : handleTriggerExtraction}
+              disabled={isProcessing || (!extractableCount && !allReceiptsExtracted) || hasFailedExtraction}
             >
               {isProcessing ? (
                 <>
@@ -757,26 +808,26 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                 </>
               ) : (
                 <>
-                  <Play size={16} />
-                  {extractableCount
-                    ? `Extract ${extractableCount} ${extractableCount === 1 ? 'Receipt' : 'Receipts'}`
-                    : 'Extract Receipts'}
+                  {allReceiptsExtracted
+                    ? <><FileText size={16} /> Continue Review</>
+                    : extractableCount
+                    ? <><Play size={16} /> Extract {extractableCount} {extractableCount === 1 ? 'Receipt' : 'Receipts'}</>
+                    : <><Play size={16} /> Extract Receipts</>}
                 </>
               )}
             </button>
           </div>
 
-          <div 
-            className="card"
+          <div
+            className={`card upload-dropzone${dragOver ? ' upload-dropzone-active' : ''}`}
             style={{
-              border: `2px dashed ${dragOver ? 'var(--primary)' : 'var(--border-color)'}`,
-              background: dragOver ? 'rgba(99, 102, 241, 0.05)' : 'var(--bg-card)',
-              textAlign: 'center',
-              padding: '36px',
               cursor: isProcessing ? 'not-allowed' : 'pointer',
               position: 'relative',
               opacity: isProcessing ? 0.5 : 1,
               pointerEvents: isProcessing ? 'none' : 'auto'
+            }}
+            onClick={() => {
+              if (!isProcessing) fileInputRef.current?.click();
             }}
             onDragOver={(e) => { e.preventDefault(); if (!isProcessing) setDragOver(true); }}
             onDragLeave={() => setDragOver(false)}
@@ -788,49 +839,56 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
             }}
           >
             <input
+              ref={fileInputRef}
               type="file"
               multiple
               accept="image/*,.pdf"
-              onChange={handleFileUpload}
+              onChange={e => {
+                handleFileUpload(e);
+                // Allow selecting the same file again after removing it.
+                e.currentTarget.value = '';
+              }}
               disabled={isProcessing}
               style={{
                 position: 'absolute',
-                top: 0, left: 0, width: '100%', height: '100%',
-                opacity: 0, cursor: isProcessing ? 'not-allowed' : 'pointer'
+                width: '1px', height: '1px', opacity: 0,
+                pointerEvents: 'none'
               }}
             />
-            <div style={{
-              width: '56px', height: '56px',
-              borderRadius: '50%',
-              background: 'rgba(99, 102, 241, 0.1)',
-              color: 'var(--primary)',
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              marginBottom: '12px'
-            }}>
+            <div className="upload-icon">
               <UploadCloud size={28} />
             </div>
 
-            <h4 style={{ fontSize: '1.1rem', fontWeight: 600 }}>
+            <div className="upload-copy">
+            <h4>
               {isProcessing ? 'Extraction in Progress — Uploads Locked' : `Upload to ${activeBatch.name}`}
             </h4>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem', marginTop: '4px' }}>
+            <p>
               {isProcessing ? 'Please wait for the current batch to finish processing before adding more receipts.' : 'Drag and drop handwritten vouchers here, or browse your files'}
             </p>
-            <div style={{ marginTop: '12px', display: 'flex', gap: '8px', justifyContent: 'center' }}>
-              <span className="btn btn-secondary btn-sm">
+            <div className="upload-actions">
+              <span className="btn btn-secondary">
                 <Camera size={14} /> Upload Photo / Browse Files
               </span>
             </div>
+            <span className="upload-hint">Supports JPG, PNG, WEBP, and PDF · Multiple files allowed</span>
+            </div>
           </div>
 
-          <div className="card">
-            <h4 style={{ fontSize: '1rem', fontWeight: 600, marginBottom: '16px' }}>
-              Files in {activeBatch.name} ({activeBatch.receipts.length})
-            </h4>
+          <div className="card files-card">
+            <div className="files-card-header">
+              <div>
+                <span className="section-eyebrow">Batch contents</span>
+                <h2>Uploaded files</h2>
+              </div>
+              <span className="file-count">{activeBatch.receipts.length} {activeBatch.receipts.length === 1 ? 'file' : 'files'}</span>
+            </div>
 
             {!activeBatch.receipts.length ? (
-              <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-muted)', fontSize: '0.875rem' }}>
-                No receipts uploaded in this batch yet. Use the upload box above to add paper receipt photos.
+              <div className="files-empty-state">
+                <FileText size={26} />
+                <strong>No files uploaded yet</strong>
+                <span>Your receipt images will appear here after you add them above.</span>
               </div>
             ) : (
               <div className="table-container">
@@ -888,19 +946,6 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                             >
                               Preview Image
                             </button>
-
-                            {/* The way back into extracted rows on a later
-                                visit — without this the reviewer is reachable
-                                only in the session that ran the extraction. */}
-                            {rcpt.status === 'Extracted' && (
-                              <button
-                                className="btn btn-primary btn-sm"
-                                onClick={() => handleOpenReviewer(rcpt)}
-                                title="Review and edit the extracted rows"
-                              >
-                                Review &amp; Edit
-                              </button>
-                            )}
 
                             {rcpt.status === 'Failed' && (
                               <button
