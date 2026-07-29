@@ -766,6 +766,13 @@ export default function SideBySideReviewer({
                 </span>
               )}
             </div>
+            <div
+              className={`balance-pill ${isBalanced ? 'balance-ok' : 'balance-warn'}`}
+              title={isBalanced ? 'Debit and credit totals match' : `Out of balance by ${formattedDifference}`}
+            >
+              {isBalanced ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}
+              <span>{isBalanced ? 'Voucher balanced' : 'Out of balance'}</span>
+            </div>
           </div>
 
           <div className="reviewer-body">
@@ -782,7 +789,7 @@ export default function SideBySideReviewer({
                 </div>
               </div>
             )}
-            <div className="table-container">
+            <div className="table-container transaction-table-scroll">
               <table className="custom-table tx-table" ref={reviewerTableRef} onKeyDown={handleGridKeyDown}>
                 <thead>
                   <tr>
@@ -902,23 +909,8 @@ export default function SideBySideReviewer({
                     </tr>
                   ))}
                 </tbody>
-                <tfoot>
-                  <tr className="tx-totals-row">
-                    <td></td>
-                    <td colSpan={2}>Totals</td>
-                    <td className="tx-total-amount">{totalDebit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                    <td className={`tx-total-amount${isBalanced ? '' : ' tx-total-offending'}`}>{totalCredit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
-                    <td></td>
-                  </tr>
-                </tfoot>
               </table>
             </div>
-
-            {isBalanced && (
-              <div className="balance-strip">
-                <CheckCircle2 size={15} /> Balanced · difference Rs. 0.00
-              </div>
-            )}
 
             <div className="reviewer-table-actions">
               <div className="row-sm">
@@ -929,7 +921,20 @@ export default function SideBySideReviewer({
                   <Plus size={14} /> Add credit line <span className="kbd-hint">⌘K</span>
                 </button>
               </div>
-              {!isBalanced && <strong className="balance-difference">Difference {formattedDifference}</strong>}
+              <div className={`totals-panel ${isBalanced ? 'totals-ok' : 'totals-warn'}`}>
+                <div>
+                  <span className="total-label">Total debit</span>
+                  <strong className="total-value total-debit">
+                    Rs. {totalDebit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                  </strong>
+                </div>
+                <div className="total-divider">
+                  <span className="total-label">Total credit</span>
+                  <strong className="total-value total-credit">
+                    Rs. {totalCredit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                  </strong>
+                </div>
+              </div>
             </div>
 
             {/* Narration */}
