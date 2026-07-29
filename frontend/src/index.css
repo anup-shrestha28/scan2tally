@@ -1525,7 +1525,6 @@ input[type='number']::-webkit-inner-spin-button {
 .status-processing .status-dot { animation: status-pulse 1.4s ease-in-out infinite; }
 .status-extracted { color: var(--ok-text); }
 .status-failed { color: var(--danger-text); }
-.status-review { color: var(--warn-text); }
 @keyframes status-pulse { 50% { opacity: 0.35; } }
 
 .dr-badge, .cr-badge {
@@ -2209,7 +2208,6 @@ input[type='number']::-webkit-inner-spin-button {
   color: var(--text-2);
 }
 .files-table .status-extracted svg { color: var(--ok-text); }
-.files-table .status-review svg { color: var(--warn-text); }
 .files-table .status-failed svg { color: var(--danger-text); }
 .files-table .status-processing .status-dot { color: var(--primary-text); }
 .files-table .status-pending > :first-child { color: var(--text-3); }

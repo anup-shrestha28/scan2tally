@@ -52,7 +52,7 @@ const BATCHES_PER_PAGE = 7;
 const DEFAULT_RECEIPTS_PER_PAGE = 10;
 
 type PaginationItem = number | 'start-ellipsis' | 'end-ellipsis';
-type ReceiptStatusFilter = 'All' | ReceiptStatus | 'Needs Review';
+type ReceiptStatusFilter = 'All' | ReceiptStatus;
 
 /** Keeps long pagination compact while always exposing the first and last page. */
 function getPaginationItems(currentPage: number, pageCount: number): PaginationItem[] {
@@ -156,15 +156,8 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const activeBatch: ScanBatch | undefined =
     visibleBatches.find(b => b.id === activeBatchId) || visibleBatches[0];
   const activeReceipts = activeBatch?.receipts ?? [];
-  const receiptNeedsReview = (receipt: Receipt) =>
-    receipt.status === 'Extracted' &&
-    (receiptTransactionsMap[receipt.id] || []).some(row => row.needs_review);
   const filteredReceipts = activeReceipts.filter(receipt => {
     if (receiptStatusFilter === 'All') return true;
-    if (receiptStatusFilter === 'Needs Review') return receiptNeedsReview(receipt);
-    if (receiptStatusFilter === 'Extracted') {
-      return receipt.status === 'Extracted' && !receiptNeedsReview(receipt);
-    }
     return receipt.status === receiptStatusFilter;
   });
   const receiptPageCount = Math.max(1, Math.ceil(filteredReceipts.length / receiptsPerPage));
@@ -1127,8 +1120,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                   ariaLabel="Filter receipt files by status"
                   options={[
                     { value: 'All', label: `All statuses (${activeReceipts.length})` },
-                    { value: 'Needs Review', label: `Needs review (${activeReceipts.filter(receiptNeedsReview).length})` },
-                    { value: 'Extracted', label: `Extracted (${activeReceipts.filter(receipt => receipt.status === 'Extracted' && !receiptNeedsReview(receipt)).length})` },
+                    { value: 'Extracted', label: `Extracted (${activeReceipts.filter(receipt => receipt.status === 'Extracted').length})` },
                     { value: 'Processing', label: `Processing (${activeReceipts.filter(receipt => receipt.status === 'Processing').length})` },
                     { value: 'Pending', label: `Pending (${activeReceipts.filter(receipt => receipt.status === 'Pending').length})` },
                     { value: 'Failed', label: `Failed (${activeReceipts.filter(receipt => receipt.status === 'Failed').length})` },
@@ -1174,9 +1166,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                   <tbody>
                     {paginatedReceipts.map(rcpt => {
                       const receiptRows = receiptTransactionsMap[rcpt.id] || [];
-                      const needsReview = rcpt.status === 'Extracted' && receiptRows.some(row => row.needs_review);
-                      const statusClass = needsReview ? 'status-review' :
-                        rcpt.status === 'Extracted' ? 'status-extracted' :
+                      const statusClass = rcpt.status === 'Extracted' ? 'status-extracted' :
                         rcpt.status === 'Processing' ? 'status-processing' :
                         rcpt.status === 'Failed' ? 'status-failed' : 'status-pending';
                       return (
@@ -1201,11 +1191,10 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                         <td>
                           <div className="stack-xs receipt-status">
                             <span className={`status-pill ${statusClass}`}>
-                              {needsReview ? <AlertTriangle size={11} /> :
-                               rcpt.status === 'Extracted' ? <CheckCircle2 size={11} /> :
+                              {rcpt.status === 'Extracted' ? <CheckCircle2 size={11} /> :
                                rcpt.status === 'Failed' ? <AlertCircle size={11} /> :
                                rcpt.status === 'Processing' ? <span className="status-dot">●</span> : <span>○</span>}
-                              {needsReview ? 'Needs review' : rcpt.status}
+                              {rcpt.status}
                             </span>
                             {rcpt.status === 'Failed' && rcpt.error_message && (
                               <span className="receipt-error">{rcpt.error_message}</span>
