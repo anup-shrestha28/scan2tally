@@ -2225,7 +2225,7 @@ input[type='number']::-webkit-inner-spin-button {
 .files-table th:last-child,
 .files-table td:last-child { padding-right: var(--sp-4); }
 .files-table .file-status-column { width: 210px; }
-.files-table .file-actions-column { width: 236px; }
+.files-table .file-actions-column { width: 164px; }
 .receipt-status { align-items: flex-start; }
 
 /* Receipt states share one visual treatment so the table stays calm. Meaning
@@ -2241,22 +2241,6 @@ input[type='number']::-webkit-inner-spin-button {
 .files-table .status-processing .status-dot { color: var(--primary-text); }
 .files-table .status-pending > :first-child { color: var(--text-3); }
 
-.receipt-review-btn {
-  height: 28px;
-  padding: 0 var(--sp-1);
-  border-color: transparent;
-  border-radius: 0;
-  background: transparent;
-  color: var(--primary-text);
-  font-weight: var(--fw-head);
-}
-.receipt-review-btn:hover {
-  border-color: transparent;
-  background: transparent;
-  color: var(--primary-text);
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
 .receipt-preview-btn {
   border-color: transparent;
   background: transparent;
@@ -2336,7 +2320,7 @@ input[type='number']::-webkit-inner-spin-button {
 
 @media (max-width: 1050px) {
   .files-table .file-status-column { width: 170px; }
-  .files-table .file-actions-column { width: 220px; }
+  .files-table .file-actions-column { width: 154px; }
 }
 .export-history-summary { margin-bottom: 0; cursor: pointer; list-style-position: outside; }
 .export-history[open] .export-history-summary { margin-bottom: var(--sp-4); }

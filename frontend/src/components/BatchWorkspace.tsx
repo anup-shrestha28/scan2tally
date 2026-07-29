@@ -733,27 +733,6 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     beginExtraction(activeBatch.id, receipt);
   };
 
-  const handleOpenReviewer = async (receipt: Receipt) => {
-    if (!activeBatch) return;
-    try {
-      // The Lines column can render before the initial transaction request has
-      // finished. Fetch on demand so Review can never open an extracted receipt
-      // with a synthetic blank row just because it was clicked quickly.
-      const transactionMap = Object.prototype.hasOwnProperty.call(receiptTransactionsMap, receipt.id)
-        ? receiptTransactionsMap
-        : await fetchTransactionsForBatch(activeBatch.id);
-      setReceiptTransactionsMap(prev => ({ ...prev, ...transactionMap }));
-      onSelectBatch(
-        activeBatch,
-        receipt,
-        transactionMap[receipt.id] || [],
-        transactionMap
-      );
-    } catch (err: any) {
-      setSaveError(err?.message || 'Could not load this receipt for review.');
-    }
-  };
-
   const handleReviewSingleReceipt = (receipt: Receipt) => {
     setPreviewRotation(0);
     setPreviewReceipt(receipt);
@@ -1206,15 +1185,6 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                         </td>
                         <td>
                           <div className="row-actions">
-                            {rcpt.status === 'Extracted' && (
-                              <button
-                                className="btn btn-sm receipt-review-btn"
-                                onClick={() => { void handleOpenReviewer(rcpt); }}
-                              >
-                                Review
-                              </button>
-                            )}
-
                             {rcpt.status === 'Failed' && (
                               <button
                                 className="btn btn-secondary btn-sm"
