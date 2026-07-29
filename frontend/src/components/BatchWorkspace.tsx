@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet } from 'lucide-react';
+import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, MoreHorizontal } from 'lucide-react';
 import { ScanBatch, Receipt, User, Transaction } from '../types';
 import {
   newId,
@@ -83,6 +83,8 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const [activeBatchId, setActiveBatchId] = useState<string>('');
   const [editingBatchId, setEditingBatchId] = useState<string | null>(null);
   const editingBatchRef = useRef<HTMLDivElement | null>(null);
+  const [openBatchMenuId, setOpenBatchMenuId] = useState<string | null>(null);
+  const batchMenuRef = useRef<HTMLDivElement | null>(null);
   const [editedBatchName, setEditedBatchName] = useState<string>('');
   const [deletingBatchId, setDeletingBatchId] = useState<string | null>(null);
   const [previewReceipt, setPreviewReceipt] = useState<Receipt | null>(null);
@@ -348,6 +350,26 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     document.addEventListener('pointerdown', closeEditOnOutsideClick);
     return () => document.removeEventListener('pointerdown', closeEditOnOutsideClick);
   }, [editingBatchId]);
+
+  useEffect(() => {
+    if (!openBatchMenuId) return;
+
+    const closeMenuOnOutsideClick = (event: PointerEvent) => {
+      if (!batchMenuRef.current?.contains(event.target as Node)) {
+        setOpenBatchMenuId(null);
+      }
+    };
+    const closeMenuOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpenBatchMenuId(null);
+    };
+
+    document.addEventListener('pointerdown', closeMenuOnOutsideClick);
+    document.addEventListener('keydown', closeMenuOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeMenuOnOutsideClick);
+      document.removeEventListener('keydown', closeMenuOnEscape);
+    };
+  }, [openBatchMenuId]);
 
   const handleCreateBatch = async () => {
     if (!currentUser.organization_id) {
@@ -733,21 +755,27 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
         </div>
       )}
       <div className="workspace-grid">
-        <div className="card batch-sidebar">
-          <h3 className="batch-sidebar-heading">
-            {showArchived ? 'Archived Batches' : 'Your Batches'}
-          </h3>
-          {!showArchived && (
-            <button className="btn btn-primary btn-block-lg" onClick={handleCreateBatch}>
-              <FolderPlus size={18} />
-              Create New Batch
-            </button>
-          )}
+        <aside className="batch-sidebar">
+          <div className="batch-sidebar-header">
+            <h3 className="batch-sidebar-heading">
+              {showArchived ? 'Archived Batches' : 'Batches'}
+            </h3>
+            {!showArchived && (
+              <button className="btn btn-primary btn-sm sidebar-new-batch" onClick={handleCreateBatch}>
+                <FolderPlus size={15} />
+                New
+              </button>
+            )}
+          </div>
 
           {(archivedCount > 0 || showArchived) && (
             <button
               className="btn btn-secondary btn-sm btn-block"
-              onClick={() => { setShowArchived(v => !v); setActiveBatchId(''); }}
+              onClick={() => {
+                setShowArchived(v => !v);
+                setActiveBatchId('');
+                setOpenBatchMenuId(null);
+              }}
             >
               {showArchived
                 ? <><ArchiveRestore size={14} /> Back to active batches</>
@@ -762,25 +790,13 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
               </div>
             )}
             {visibleBatches.map(b => (
-              <div 
-                key={b.id} 
-                role="button"
-                tabIndex={0}
-                onClick={() => {
-                  setActiveBatchId(b.id);
-                  sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, b.id);
-                }}
-                onKeyDown={(event) => {
-                  if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return;
-                  event.preventDefault();
-                  setActiveBatchId(b.id);
-                  sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, b.id);
-                }}
+              <div
+                key={b.id}
                 ref={editingBatchId === b.id ? editingBatchRef : undefined}
                 className={`batch-item${b.id === activeBatchId ? ' batch-item-active' : ''}`}
               >
                 {editingBatchId === b.id ? (
-                  <div className="row-xs" onClick={e => e.stopPropagation()}>
+                  <div className="batch-rename-row">
                     <input
                       type="text"
                       className="form-input batch-rename-input"
@@ -794,68 +810,89 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                     />
                   </div>
                 ) : (
-                  <div className="batch-item-content">
-                    <div className="batch-item-details">
-                      <div className="batch-item-name">
-                        <span>{b.name}</span>
-                        {b.id === activeBatchId && <span className="batch-current-badge">Current</span>}
-                      </div>
-                      <div className="batch-item-meta">
+                  <>
+                    <button
+                      type="button"
+                      className="batch-item-select"
+                      title={b.name}
+                      aria-current={b.id === activeBatchId ? 'true' : undefined}
+                      onClick={() => {
+                        setActiveBatchId(b.id);
+                        setOpenBatchMenuId(null);
+                        sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, b.id);
+                      }}
+                    >
+                      <span className="batch-item-name">{b.name}</span>
+                      <span className="batch-item-meta">
                         <span>{b.receipts.length} {b.receipts.length === 1 ? 'receipt' : 'receipts'}</span>
-                        <span>•</span>
+                        <span aria-hidden="true">·</span>
                         <span>{formatBatchDate(b.created_at)}</span>
-                      </div>
-                    </div>
+                        {b.id === activeBatchId && <span className="batch-current-badge">Current</span>}
+                      </span>
+                    </button>
 
-                    <div className="batch-actions">
+                    <div
+                      className="batch-menu"
+                      ref={openBatchMenuId === b.id ? batchMenuRef : undefined}
+                    >
                       <button
-                        className="btn btn-secondary btn-sm batch-action"
-                        disabled={isProcessing && b.id === activeBatchId}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setEditingBatchId(b.id);
-                          setEditedBatchName(b.name);
-                        }}
-                        title={isProcessing && b.id === activeBatchId
-                          ? 'Cannot edit while extraction is in progress'
-                          : 'Rename Batch'}
+                        type="button"
+                        className="batch-menu-trigger"
+                        aria-label={`Actions for ${b.name}`}
+                        aria-haspopup="menu"
+                        aria-expanded={openBatchMenuId === b.id}
+                        onClick={() => setOpenBatchMenuId(current => current === b.id ? null : b.id)}
                       >
-                        <Edit2 size={12} />
+                        <MoreHorizontal size={17} />
                       </button>
-                      <button
-                        className="btn btn-secondary btn-sm batch-action"
-                        disabled={batchIsProcessing(b)}
-                        onClick={(e) => { e.stopPropagation(); handleToggleArchive(b); }}
-                        title={b.status === 'Archived'
-                          ? 'Restore this batch to the active list'
-                          : 'Archive — keeps everything, just moves it out of the way'}
-                      >
-                        {b.status === 'Archived' ? <ArchiveRestore size={12} /> : <Archive size={12} />}
-                      </button>
-                      <button
-                        className="btn btn-danger btn-sm batch-action"
-                        disabled={batchIsProcessing(b) || (startingExtraction && b.id === activeBatchId)}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (b.receipts.length === 0) {
-                            handleDeleteBatch(b.id);
-                          } else {
-                            setDeletingBatchId(b.id);
-                          }
-                        }}
-                        title={batchIsProcessing(b) || (startingExtraction && b.id === activeBatchId)
-                          ? 'Cannot delete while extraction is in progress'
-                          : 'Delete Batch'}
-                      >
-                        <Trash2 size={12} />
-                      </button>
+                      {openBatchMenuId === b.id && (
+                        <div className="batch-menu-popover" role="menu">
+                          <button
+                            role="menuitem"
+                            disabled={isProcessing && b.id === activeBatchId}
+                            onClick={() => {
+                              setOpenBatchMenuId(null);
+                              setEditingBatchId(b.id);
+                              setEditedBatchName(b.name);
+                            }}
+                          >
+                            <Edit2 size={14} /> Rename
+                          </button>
+                          <button
+                            role="menuitem"
+                            disabled={batchIsProcessing(b)}
+                            onClick={() => {
+                              setOpenBatchMenuId(null);
+                              void handleToggleArchive(b);
+                            }}
+                          >
+                            {b.status === 'Archived' ? <ArchiveRestore size={14} /> : <Archive size={14} />}
+                            {b.status === 'Archived' ? 'Restore' : 'Archive'}
+                          </button>
+                          <button
+                            role="menuitem"
+                            className="batch-menu-danger"
+                            disabled={batchIsProcessing(b) || (startingExtraction && b.id === activeBatchId)}
+                            onClick={() => {
+                              setOpenBatchMenuId(null);
+                              if (b.receipts.length === 0) {
+                                void handleDeleteBatch(b.id);
+                              } else {
+                                setDeletingBatchId(b.id);
+                              }
+                            }}
+                          >
+                            <Trash2 size={14} /> Delete
+                          </button>
+                        </div>
+                      )}
                     </div>
-                  </div>
+                  </>
                 )}
               </div>
             ))}
           </div>
-        </div>
+        </aside>
 
         {!activeBatch ? (
           <div className="card empty-batches">
@@ -971,24 +1008,30 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
             <span className="upload-hint">Supports JPG, PNG, WEBP, and PDF · Multiple files allowed</span>
           </div>
 
-          <div className="card files-card-compact">
-            <h4 className="section-title">
-              Files in {activeBatch.name} ({activeBatch.receipts.length})
-            </h4>
+          <section className="files-panel">
+            <div className="files-panel-header">
+              <div>
+                <h4 className="section-title">Receipt files</h4>
+                <p>Review extracted entries or preview the original upload.</p>
+              </div>
+              <span className="files-count">
+                {activeBatch.receipts.length} {activeBatch.receipts.length === 1 ? 'file' : 'files'}
+              </span>
+            </div>
 
             {!activeBatch.receipts.length ? (
               <div className="table-empty text-sm" style={{ padding: '24px' }}>
                 No receipts uploaded in this batch yet. Use the upload box above to add paper receipt photos.
               </div>
             ) : (
-              <div className="table-container">
-                <table className="custom-table">
+              <div className="table-container files-table-container">
+                <table className="custom-table files-table">
                   <thead>
                     <tr>
                       <th>File</th>
-                      <th>Status</th>
+                      <th className="file-status-column">Status</th>
                       <th className="text-right">Lines</th>
-                      <th>Actions</th>
+                      <th className="file-actions-column">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1019,7 +1062,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                           )}
                         </td>
                         <td>
-                          <div className="stack-xs">
+                          <div className="stack-xs receipt-status">
                             <span className={`status-pill ${statusClass}`}>
                               {needsReview ? <AlertTriangle size={11} /> :
                                rcpt.status === 'Extracted' ? <CheckCircle2 size={11} /> :
@@ -1037,16 +1080,9 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                         </td>
                         <td>
                           <div className="row-actions">
-                            <button
-                              className="btn btn-secondary btn-sm"
-                              onClick={() => handleReviewSingleReceipt(rcpt)}
-                            >
-                              Preview
-                            </button>
-
                             {rcpt.status === 'Extracted' && (
                               <button
-                                className="btn btn-secondary btn-sm"
+                                className="btn btn-sm receipt-review-btn"
                                 onClick={() => { void handleOpenReviewer(rcpt); }}
                               >
                                 Review
@@ -1063,6 +1099,13 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                                 <RotateCw size={13} /> Retry
                               </button>
                             )}
+
+                            <button
+                              className="btn btn-sm receipt-preview-btn"
+                              onClick={() => handleReviewSingleReceipt(rcpt)}
+                            >
+                              Preview
+                            </button>
 
                             {rcpt.status !== 'Processing' && !isArchived && (
                               <button
@@ -1082,7 +1125,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                 </table>
               </div>
             )}
-          </div>
+          </section>
 
           {/* The spreadsheet is imported into Tally by hand, so this is the only
               record that it happened — and the only way to answer "has this
