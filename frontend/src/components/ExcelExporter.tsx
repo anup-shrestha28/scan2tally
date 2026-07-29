@@ -224,7 +224,7 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
   return (
     <div className="export-page">
       <div className="row row-between row-wrap">
-        <button className="back-link" onClick={onBack}>
+        <button className="back-link excel-back-review-btn" onClick={onBack}>
           <ArrowLeft size={16} />
           Review & Edit
         </button>
@@ -271,7 +271,7 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
         <div className="row row-between" style={{ marginBottom: '16px' }}>
           <div>
             <h3 className="section-title section-title-lg" style={{ marginBottom: 0 }}>Excel File Preview</h3>
-            <span className="text-muted text-2xs">
+            <span className="text-muted export-voucher-count">
               {groups.length} {groups.length === 1 ? 'voucher' : 'vouchers'}
             </span>
           </div>

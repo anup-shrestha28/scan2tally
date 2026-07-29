@@ -521,6 +521,10 @@ button:not(:disabled):active {
   transition: color var(--transition);
 }
 .back-link:hover { color: var(--primary-text); }
+.excel-back-review-btn {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-heading);
+}
 .back-link:focus-visible {
   outline: var(--bw-focus) solid var(--focus-ring);
   outline-offset: 2px;
@@ -2732,9 +2736,18 @@ input[type='number']::-webkit-inner-spin-button {
   flex-direction: column;
   align-items: flex-end;
   gap: 4px;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
 }
 .export-totals-row { display: flex; gap: 16px; flex-wrap: wrap; justify-content: flex-end; }
+.export-totals-row strong {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-bold);
+}
+.export-voucher-count {
+  display: inline-block;
+  margin-top: 3px;
+  font-size: var(--fs-sm);
+}
 .export-unbalanced { color: var(--danger-text); font-weight: var(--fw-head); }
 .export-preview {
   display: flex;
