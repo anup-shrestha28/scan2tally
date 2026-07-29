@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Building2, Plus, CheckCircle2, XCircle, Loader2, AlertCircle } from 'lucide-react';
 import { Organization, OrgStatus } from '../types';
 import StatusFilter from './StatusFilter';
+import { usePolling } from '../lib/usePolling';
 import {
   fetchOrganizationsWithStats,
   createOrganization,
@@ -42,6 +43,17 @@ export default function SuperAdminDashboard() {
   };
 
   useEffect(() => { load(); }, []);
+
+  // These totals change as every client organisation works. Refreshing only
+  // the read-only counters avoids racing the organisation controls below.
+  usePolling(async ({ signal }) => {
+    const platform = await fetchPlatformStats();
+    if (!signal.aborted) setStats(platform);
+  }, {
+    enabled: !loading,
+    intervalMs: 30000,
+    maxIntervalMs: 120000,
+  });
 
   const handleCreateOrg = async (e: React.FormEvent) => {
     e.preventDefault();

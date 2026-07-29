@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, MoreHorizontal, ChevronLeft, ChevronRight } from 'lucide-react';
 import { ScanBatch, Receipt, ReceiptStatus, User, Transaction } from '../types';
 import StatusFilter from './StatusFilter';
+import { usePolling } from '../lib/usePolling';
 import {
   newId,
   fetchBatches,
@@ -263,67 +264,95 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     .flatMap(b => b.receipts.filter(r => r.status === 'Processing').map(r => r.id))
     .sort();
   const processingKey = processingIds.join(',');
+  // The active batch is also checked at a lower idle rate. That lets this tab
+  // discover an extraction an operator started in another tab, without polling
+  // every historical receipt in the organisation forever.
+  const watchedReceiptIds = [...new Set([
+    ...processingIds,
+    ...activeReceipts.map(receipt => receipt.id),
+  ])].sort();
+  const receiptStateKey = watchedReceiptIds.join(',');
 
-  useEffect(() => {
-    if (!processingKey) return;
-    const watching = processingKey.split(',');
-    let cancelled = false;
-    let timer: number | undefined;
+  usePolling(async ({ signal }) => {
+    const watching = receiptStateKey.split(',').filter(Boolean);
+    const states = await fetchReceiptStates(watching);
+    if (signal.aborted) return;
 
-    const check = async () => {
+    const currentById = new Map(
+      batchesRef.current.flatMap(batch => batch.receipts.map(receipt => [receipt.id, receipt] as const))
+    );
+    const changed = states.filter(state => {
+      const current = currentById.get(state.id);
+      if (!current) return false;
+
+      // A receipt can remain Pending in the database while its image is still
+      // uploading. Never let that temporary lag move the optimistic Processing
+      // state backwards and stop the fast polling loop.
+      if (current.status === 'Processing' && state.status === 'Pending') return false;
+      return current.status !== state.status ||
+        current.error_message !== state.error_message ||
+        JSON.stringify(current.verification_warnings || []) !== JSON.stringify(state.verification_warnings || []);
+    });
+    if (!changed.length) return;
+
+    const newlyExtractedIds = new Set(
+      changed.filter(state => state.status === 'Extracted').map(state => state.id)
+    );
+
+    // Load the rows the server saved before flipping the status on screen, so
+    // a receipt never appears Extracted with nothing behind it.
+    const affectedBatchIds = new Set(
+      batchesRef.current
+        .filter(b => b.receipts.some(r => newlyExtractedIds.has(r.id)))
+        .map(b => b.id)
+    );
+    const batchesWithMissingRows = new Set<string>();
+    for (const batchId of affectedBatchIds) {
       try {
-        const states = await fetchReceiptStates(watching);
-        if (cancelled) return;
-
-        const finished = states.filter(s => s.status !== 'Processing');
-        if (finished.length) {
-          const finishedIds = new Set(finished.map(f => f.id));
-
-          // Load the rows the server saved before flipping the status on
-          // screen, so a receipt never appears Extracted with nothing behind it.
-          const affectedBatchIds = new Set(
-            batchesRef.current
-              .filter(b => b.receipts.some(r => finishedIds.has(r.id)))
-              .map(b => b.id)
-          );
-          for (const batchId of affectedBatchIds) {
-            try {
-              const stored = await fetchTransactionsForBatch(batchId);
-              if (cancelled) return;
-              setReceiptTransactionsMap(prev => ({ ...prev, ...stored }));
-            } catch {
-              // The status update below still stands; the rows load on reopen.
-            }
-          }
-
-          setBatches(prev => prev.map(b => ({
-            ...b,
-            receipts: b.receipts.map(r => {
-              const update = finished.find(f => f.id === r.id);
-              return update
-                ? {
-                    ...r,
-                    status: update.status,
-                    error_message: update.error_message,
-                    verification_warnings: update.verification_warnings,
-                  }
-                : r;
-            }),
-          })));
-        }
+        const stored = await fetchTransactionsForBatch(batchId);
+        if (signal.aborted) return;
+        setReceiptTransactionsMap(prev => ({ ...prev, ...stored }));
       } catch {
-        // Transient — the next tick tries again rather than surfacing a scary
-        // error for what is usually a momentary network blip.
+        // Leave the receipt non-terminal so the next poll retries, rather than
+        // treating a failed row fetch as though its transactions had arrived.
+        loadedTxBatchesRef.current.delete(batchId);
+        batchesWithMissingRows.add(batchId);
       }
-      if (!cancelled) timer = window.setTimeout(check, EXTRACTION_POLL_MS);
-    };
+    }
 
-    timer = window.setTimeout(check, EXTRACTION_POLL_MS);
-    return () => {
-      cancelled = true;
-      if (timer) window.clearTimeout(timer);
-    };
-  }, [processingKey]);
+    if (signal.aborted) return;
+    const deferredReceiptIds = new Set(
+      batchesRef.current
+        .filter(batch => batchesWithMissingRows.has(batch.id))
+        .flatMap(batch => batch.receipts.map(receipt => receipt.id))
+    );
+    const changedById = new Map(
+      changed
+        // Keep polling an extracted receipt until its rows have also arrived;
+        // the reviewer must never open on a finished-looking empty voucher.
+        .filter(state => state.status !== 'Extracted' || !deferredReceiptIds.has(state.id))
+        .map(state => [state.id, state])
+    );
+    setBatches(prev => prev.map(b => ({
+      ...b,
+      receipts: b.receipts.map(r => {
+        const update = changedById.get(r.id);
+        return update
+          ? {
+              ...r,
+              status: update.status,
+              error_message: update.error_message,
+              verification_warnings: update.verification_warnings,
+            }
+          : r;
+      }),
+    })));
+  }, {
+    enabled: Boolean(receiptStateKey),
+    intervalMs: processingKey ? EXTRACTION_POLL_MS : 30000,
+    maxIntervalMs: processingKey ? 24000 : 120000,
+    resetKey: `${activeBatch?.id || ''}:${receiptStateKey}`,
+  });
 
   // Open the reviewer once a run this tab started has finished, preserving the
   // old behaviour of not making the user click through manually.

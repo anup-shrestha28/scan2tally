@@ -5,6 +5,7 @@ import {
 import { User } from '../types';
 import { fetchOrgOverview, OrgOverview } from '../lib/db';
 import { LEDGER_MATCHING } from '../lib/features';
+import { usePolling } from '../lib/usePolling';
 
 /**
  * What an Admin sees about their own organisation.
@@ -51,6 +52,18 @@ export default function AdminDashboard({
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, []);
+
+  // Extraction, exports and uploads are performed from the workspace (often by
+  // another operator), so this read-only overview should stay current without
+  // requiring an Admin to reload it. Poll faster only while work is in flight.
+  usePolling(async ({ signal }) => {
+    const data = await fetchOrgOverview();
+    if (!signal.aborted) setOverview(data);
+  }, {
+    enabled: !loading && Boolean(overview),
+    intervalMs: overview?.receipts.Processing ? 5000 : 30000,
+    maxIntervalMs: 120000,
+  });
 
   if (loading) {
     return (
