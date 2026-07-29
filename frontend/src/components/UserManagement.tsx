@@ -146,7 +146,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
       <div className="page-header page-header-center">
         <div className="row">
           {onBack && (
-            <button className="btn btn-secondary" onClick={onBack}>
+            <button className="back-link" onClick={onBack}>
               <ArrowLeft size={16} /> Back
             </button>
           )}

@@ -601,7 +601,7 @@ export default function SideBySideReviewer({
       <div className="reviewer-header">
         <div className="reviewer-toolbar">
           <div className="reviewer-identity">
-            <button className="btn btn-secondary" onClick={handleBack}>
+            <button className="back-link" onClick={handleBack}>
               <ArrowLeft size={16} /> Batches
             </button>
             <div>

@@ -506,6 +506,33 @@ button:not(:disabled):active {
 .btn-secondary:hover { background-color: color-mix(in srgb, var(--bg-surface-2) 80%, var(--text-1) 6%); }
 .btn-secondary:active { background-color: color-mix(in srgb, var(--bg-surface-2) 65%, var(--text-1) 10%); }
 
+/* Back is navigation, not a form action. Keep it quiet so the page title and
+   primary action retain the visual hierarchy. */
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 var(--sp-1);
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-label);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--transition);
+}
+.back-link:hover { color: var(--primary-text); }
+.back-link:focus-visible {
+  outline: var(--bw-focus) solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.back-link svg { transition: transform var(--transition); }
+.back-link:hover svg { transform: translateX(-2px); }
+
 /* Outline-only: a solid red block on every row of a table makes every row
    read as an error. The filled variant is reserved for modal confirms. */
 .btn-danger {

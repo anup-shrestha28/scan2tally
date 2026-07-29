@@ -224,9 +224,9 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
   return (
     <div className="export-page">
       <div className="row row-between row-wrap">
-        <button className="btn btn-secondary" onClick={onBack}>
+        <button className="back-link" onClick={onBack}>
           <ArrowLeft size={16} />
-          Back to Review & Edit
+          Review & Edit
         </button>
         <button
           className="btn btn-primary export-download-btn"

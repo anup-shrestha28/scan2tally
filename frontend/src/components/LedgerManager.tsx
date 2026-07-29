@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
-  BookOpen, Plus, Loader2, AlertCircle, Trash2, Edit2, Check, X, Upload, RotateCcw, Search,
+  BookOpen, Plus, Loader2, AlertCircle, Trash2, Edit2, Check, X, Upload, RotateCcw, Search, ArrowLeft,
 } from 'lucide-react';
 import { Ledger, User } from '../types';
 import { fetchLedgers, createLedger, updateLedger, importLedgers } from '../lib/db';
@@ -191,7 +191,9 @@ export default function LedgerManager({ currentUser, onBack }: LedgerManagerProp
           <button className="btn btn-secondary" onClick={() => setShowImport(v => !v)}>
             <Upload size={16} /> Paste from Tally
           </button>
-          <button className="btn btn-secondary" onClick={onBack}>Back to Workspace</button>
+          <button className="back-link" onClick={onBack}>
+            <ArrowLeft size={16} /> Workspace
+          </button>
         </div>
       </div>
 
