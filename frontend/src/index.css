@@ -2213,11 +2213,21 @@ input[type='number']::-webkit-inner-spin-button {
 .files-table .status-pending > :first-child { color: var(--text-3); }
 
 .receipt-review-btn {
-  border-color: color-mix(in srgb, var(--primary) 65%, var(--border));
-  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  height: 28px;
+  padding: 0 var(--sp-1);
+  border-color: transparent;
+  border-radius: 0;
+  background: transparent;
   color: var(--primary-text);
+  font-weight: var(--fw-head);
 }
-.receipt-review-btn:hover { background: color-mix(in srgb, var(--primary) 18%, transparent); }
+.receipt-review-btn:hover {
+  border-color: transparent;
+  background: transparent;
+  color: var(--primary-text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
 .receipt-preview-btn {
   border-color: transparent;
   background: transparent;
