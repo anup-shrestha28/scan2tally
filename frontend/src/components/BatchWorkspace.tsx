@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, MoreHorizontal } from 'lucide-react';
+import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, MoreHorizontal, ChevronLeft, ChevronRight } from 'lucide-react';
 import { ScanBatch, Receipt, User, Transaction } from '../types';
 import {
   newId,
@@ -47,6 +47,25 @@ const ACTIVE_BATCH_STORAGE_KEY = 'scan2tally-active-batch';
  * consistently and had to flag.
  */
 const MIN_IMAGE_SHORT_EDGE = 1000;
+const BATCHES_PER_PAGE = 7;
+const DEFAULT_RECEIPTS_PER_PAGE = 10;
+
+type PaginationItem = number | 'start-ellipsis' | 'end-ellipsis';
+
+/** Keeps long pagination compact while always exposing the first and last page. */
+function getPaginationItems(currentPage: number, pageCount: number): PaginationItem[] {
+  if (pageCount <= 5) return Array.from({ length: pageCount }, (_, index) => index + 1);
+
+  const items: PaginationItem[] = [1];
+  const rangeStart = Math.max(2, currentPage - 1);
+  const rangeEnd = Math.min(pageCount - 1, currentPage + 1);
+
+  if (rangeStart > 2) items.push('start-ellipsis');
+  for (let page = rangeStart; page <= rangeEnd; page += 1) items.push(page);
+  if (rangeEnd < pageCount - 1) items.push('end-ellipsis');
+  items.push(pageCount);
+  return items;
+}
 
 function isLowResolution(receipt: Receipt): boolean {
   if (!receipt.image_width || !receipt.image_height) return false;
@@ -85,6 +104,10 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const editingBatchRef = useRef<HTMLDivElement | null>(null);
   const [openBatchMenuId, setOpenBatchMenuId] = useState<string | null>(null);
   const batchMenuRef = useRef<HTMLDivElement | null>(null);
+  const [batchPage, setBatchPage] = useState(1);
+  const [receiptPage, setReceiptPage] = useState(1);
+  const [receiptsPerPage, setReceiptsPerPage] = useState(DEFAULT_RECEIPTS_PER_PAGE);
+  const filesPanelRef = useRef<HTMLElement | null>(null);
   const [editedBatchName, setEditedBatchName] = useState<string>('');
   const [deletingBatchId, setDeletingBatchId] = useState<string | null>(null);
   const [previewReceipt, setPreviewReceipt] = useState<Receipt | null>(null);
@@ -121,12 +144,18 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const wantedStatus = showArchived ? 'Archived' : 'Active';
   const visibleBatches = batches.filter(b => b.status === wantedStatus);
   const archivedCount = batches.filter(b => b.status === 'Archived').length;
+  const batchPageCount = Math.max(1, Math.ceil(visibleBatches.length / BATCHES_PER_PAGE));
+  const batchPageStart = (batchPage - 1) * BATCHES_PER_PAGE;
+  const paginatedBatches = visibleBatches.slice(batchPageStart, batchPageStart + BATCHES_PER_PAGE);
 
   // May be undefined before the first load finishes, or when the user has no
   // batches yet — every read below has to tolerate that.
   const activeBatch: ScanBatch | undefined =
     visibleBatches.find(b => b.id === activeBatchId) || visibleBatches[0];
   const activeReceipts = activeBatch?.receipts ?? [];
+  const receiptPageCount = Math.max(1, Math.ceil(activeReceipts.length / receiptsPerPage));
+  const receiptPageStart = (receiptPage - 1) * receiptsPerPage;
+  const paginatedReceipts = activeReceipts.slice(receiptPageStart, receiptPageStart + receiptsPerPage);
   // An archived batch is a record, not a workspace. It stays fully readable and
   // exportable; what stops is adding to it.
   const isArchived = activeBatch?.status === 'Archived';
@@ -371,6 +400,25 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     };
   }, [openBatchMenuId]);
 
+  // Keep pagination valid when items disappear, and reveal a remembered active
+  // batch even when it lives beyond the first sidebar page.
+  useEffect(() => {
+    setBatchPage(page => Math.min(page, batchPageCount));
+  }, [batchPageCount]);
+
+  useEffect(() => {
+    const activeIndex = visibleBatches.findIndex(batch => batch.id === activeBatchId);
+    if (activeIndex >= 0) setBatchPage(Math.floor(activeIndex / BATCHES_PER_PAGE) + 1);
+  }, [activeBatchId, showArchived, batches]);
+
+  useEffect(() => {
+    setReceiptPage(1);
+  }, [activeBatchId]);
+
+  useEffect(() => {
+    setReceiptPage(page => Math.min(page, receiptPageCount));
+  }, [receiptPageCount]);
+
   const handleCreateBatch = async () => {
     if (!currentUser.organization_id) {
       setSaveError('Your account is not linked to an organisation, so batches cannot be created.');
@@ -403,6 +451,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
       });
       setBatches(prev => [newBatch, ...prev]);
       setActiveBatchId(newBatch.id);
+      setBatchPage(1);
       sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, newBatch.id);
       setSaveError(null);
     } catch (err: any) {
@@ -508,6 +557,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
       }
       return b;
     }));
+    setReceiptPage(Math.ceil((activeReceipts.length + newReceipts.length) / receiptsPerPage));
 
     // Persist the row first so the receipt survives a refresh even if the
     // image upload is still running, then attach the stored image. The promise
@@ -724,6 +774,13 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     return file?.type === 'application/pdf' || receipt.filename.toLowerCase().endsWith('.pdf');
   };
 
+  const goToReceiptPage = (page: number) => {
+    setReceiptPage(Math.min(Math.max(page, 1), receiptPageCount));
+    window.requestAnimationFrame(() => {
+      filesPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  };
+
   if (loading) {
     return (
       <div className="loading-state loading-state-tall">
@@ -774,6 +831,8 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
               onClick={() => {
                 setShowArchived(v => !v);
                 setActiveBatchId('');
+                setBatchPage(1);
+                setReceiptPage(1);
                 setOpenBatchMenuId(null);
               }}
             >
@@ -789,7 +848,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                 {showArchived ? 'Nothing archived yet.' : 'No active batches.'}
               </div>
             )}
-            {visibleBatches.map(b => (
+            {paginatedBatches.map(b => (
               <div
                 key={b.id}
                 ref={editingBatchId === b.id ? editingBatchRef : undefined}
@@ -892,6 +951,34 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
               </div>
             ))}
           </div>
+          {visibleBatches.length > BATCHES_PER_PAGE && (
+            <nav className="batch-pagination" aria-label="Batch pages">
+              <span className="batch-pagination-range" aria-live="polite">
+                {batchPageStart + 1}–{Math.min(batchPageStart + BATCHES_PER_PAGE, visibleBatches.length)} of {visibleBatches.length}
+              </span>
+              <div className="batch-pagination-controls">
+                <button
+                  type="button"
+                  onClick={() => setBatchPage(page => Math.max(1, page - 1))}
+                  disabled={batchPage === 1}
+                  aria-label="Previous batch page"
+                  title="Previous page"
+                >
+                  <ChevronLeft size={15} />
+                </button>
+                <span>Page {batchPage} of {batchPageCount}</span>
+                <button
+                  type="button"
+                  onClick={() => setBatchPage(page => Math.min(batchPageCount, page + 1))}
+                  disabled={batchPage === batchPageCount}
+                  aria-label="Next batch page"
+                  title="Next page"
+                >
+                  <ChevronRight size={15} />
+                </button>
+              </div>
+            </nav>
+          )}
         </aside>
 
         {!activeBatch ? (
@@ -1008,7 +1095,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
             <span className="upload-hint">Supports JPG, PNG, WEBP, and PDF · Multiple files allowed</span>
           </div>
 
-          <section className="files-panel">
+          <section className="files-panel" ref={filesPanelRef}>
             <div className="files-panel-header">
               <div>
                 <h4 className="section-title">Receipt files</h4>
@@ -1024,8 +1111,9 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                 No receipts uploaded in this batch yet. Use the upload box above to add paper receipt photos.
               </div>
             ) : (
-              <div className="table-container files-table-container">
-                <table className="custom-table files-table">
+              <>
+                <div className="table-container files-table-container">
+                  <table className="custom-table files-table">
                   <thead>
                     <tr>
                       <th>File</th>
@@ -1035,7 +1123,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                     </tr>
                   </thead>
                   <tbody>
-                    {activeBatch.receipts.map(rcpt => {
+                    {paginatedReceipts.map(rcpt => {
                       const receiptRows = receiptTransactionsMap[rcpt.id] || [];
                       const needsReview = rcpt.status === 'Extracted' && receiptRows.some(row => row.needs_review);
                       const statusClass = needsReview ? 'status-review' :
@@ -1122,8 +1210,77 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                       </tr>
                     );})}
                   </tbody>
-                </table>
-              </div>
+                  </table>
+                </div>
+
+                {activeReceipts.length > DEFAULT_RECEIPTS_PER_PAGE && (
+                  <div className="files-pagination">
+                    <span className="pagination-summary" aria-live="polite">
+                      Showing {receiptPageStart + 1}–{Math.min(receiptPageStart + receiptsPerPage, activeReceipts.length)} of {activeReceipts.length}
+                    </span>
+
+                    <label className="page-size-control">
+                      <span>Rows per page</span>
+                      <select
+                        value={receiptsPerPage}
+                        onChange={(event) => {
+                          setReceiptsPerPage(Number(event.target.value));
+                          setReceiptPage(1);
+                          window.requestAnimationFrame(() => {
+                            filesPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                          });
+                        }}
+                        aria-label="Receipt rows per page"
+                      >
+                        <option value={10}>10</option>
+                        <option value={25}>25</option>
+                        <option value={50}>50</option>
+                      </select>
+                    </label>
+
+                    <nav className="pagination-controls" aria-label="Receipt file pages">
+                      <button
+                        type="button"
+                        className="pagination-arrow"
+                        onClick={() => goToReceiptPage(receiptPage - 1)}
+                        disabled={receiptPage === 1}
+                        aria-label="Previous receipt page"
+                        title="Previous page"
+                      >
+                        <ChevronLeft size={15} />
+                      </button>
+
+                      {getPaginationItems(receiptPage, receiptPageCount).map(item => (
+                        typeof item === 'number' ? (
+                          <button
+                            type="button"
+                            key={item}
+                            className={`pagination-page${receiptPage === item ? ' pagination-page-active' : ''}`}
+                            onClick={() => goToReceiptPage(item)}
+                            aria-label={`Go to receipt page ${item}`}
+                            aria-current={receiptPage === item ? 'page' : undefined}
+                          >
+                            {item}
+                          </button>
+                        ) : (
+                          <span className="pagination-ellipsis" key={item} aria-hidden="true">…</span>
+                        )
+                      ))}
+
+                      <button
+                        type="button"
+                        className="pagination-arrow"
+                        onClick={() => goToReceiptPage(receiptPage + 1)}
+                        disabled={receiptPage === receiptPageCount}
+                        aria-label="Next receipt page"
+                        title="Next page"
+                      >
+                        <ChevronRight size={15} />
+                      </button>
+                    </nav>
+                  </div>
+                )}
+              </>
             )}
           </section>
 

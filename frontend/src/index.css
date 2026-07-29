@@ -1996,6 +1996,36 @@ input[type='number']::-webkit-inner-spin-button {
 
 .sidebar-new-batch { min-width: 66px; }
 
+.batch-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  margin-top: auto;
+  padding: var(--sp-3) var(--sp-1) 0;
+  border-top: var(--bw-hair) solid var(--border);
+  color: var(--text-2);
+  font-size: var(--fs-2xs);
+}
+.batch-pagination-range { white-space: nowrap; }
+.batch-pagination-controls { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.batch-pagination-controls button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: var(--bw-hair) solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-1);
+  cursor: pointer;
+}
+.batch-pagination-controls button:hover:not(:disabled) { background: var(--bg-surface-2); border-color: var(--border-strong); }
+.batch-pagination-controls button:focus-visible { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 1px; }
+.batch-pagination-controls button:disabled { color: var(--text-3); cursor: not-allowed; opacity: 0.55; }
+
 .batch-panel { display: flex; flex-direction: column; gap: var(--sp-4); }
 
 .batch-rename-input {
@@ -2032,6 +2062,7 @@ input[type='number']::-webkit-inner-spin-button {
     border-right: 0;
     border-bottom: var(--bw-hair) solid var(--border);
   }
+  .batch-pagination { margin-top: var(--sp-2); }
 }
 
 /* ============================================================
@@ -2063,6 +2094,7 @@ input[type='number']::-webkit-inner-spin-button {
   border: var(--bw-hair) solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-surface);
+  scroll-margin-top: 84px;
 }
 .files-panel-header {
   display: flex;
@@ -2103,6 +2135,69 @@ input[type='number']::-webkit-inner-spin-button {
   color: var(--text-2);
 }
 .receipt-preview-btn:hover { border-color: var(--border); background: var(--bg-surface-2); color: var(--text-1); }
+
+.files-pagination {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-height: 52px;
+  padding: var(--sp-2) var(--sp-4);
+  border-top: var(--bw-hair) solid var(--border);
+  background: color-mix(in srgb, var(--bg-surface-2) 45%, var(--bg-surface));
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+}
+.pagination-summary { margin-right: auto; white-space: nowrap; }
+.page-size-control { display: inline-flex; align-items: center; gap: var(--sp-2); white-space: nowrap; }
+.page-size-control select {
+  height: 30px;
+  padding: 0 26px 0 var(--sp-2);
+  border: var(--bw-hair) solid var(--border);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-field);
+  color: var(--text-1);
+  font: inherit;
+  cursor: pointer;
+}
+.page-size-control select:hover { border-color: var(--border-strong); }
+.page-size-control select:focus-visible { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 1px; }
+.pagination-controls { display: flex; align-items: center; gap: 4px; }
+.pagination-controls button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 var(--sp-2);
+  border: var(--bw-hair) solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-weight: var(--fw-bold);
+  cursor: pointer;
+}
+.pagination-controls button:hover:not(:disabled) { border-color: var(--border); background: var(--bg-surface-2); color: var(--text-1); }
+.pagination-controls button:focus-visible { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 1px; }
+.pagination-controls button:disabled { color: var(--text-3); cursor: not-allowed; opacity: 0.55; }
+.pagination-controls .pagination-page-active {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  color: var(--primary-text);
+}
+.pagination-ellipsis {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  color: var(--text-3);
+}
+
+@media (max-width: 720px) {
+  .files-pagination { flex-wrap: wrap; gap: var(--sp-2) var(--sp-3); }
+  .pagination-summary { flex-basis: 100%; }
+  .pagination-controls { margin-left: auto; }
+}
 
 @media (max-width: 1050px) {
   .files-table .file-status-column { width: 170px; }
