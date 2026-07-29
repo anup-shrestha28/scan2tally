@@ -643,15 +643,15 @@ export default function SideBySideReviewer({
         </div>
 
         <div className="reviewer-nav">
-          <button
-            className={stepClass(hasPrev)}
-            disabled={!hasPrev}
-            onClick={() => { if (hasPrev) void saveCurrentTx(currentIndex - 1); }}
-          >
-            <ChevronLeft size={16} /> Prev
-          </button>
+          <div className="reviewer-nav-controls">
+            <button
+              className={stepClass(hasPrev)}
+              disabled={!hasPrev}
+              onClick={() => { if (hasPrev) void saveCurrentTx(currentIndex - 1); }}
+            >
+              <ChevronLeft size={16} /> Prev
+            </button>
 
-          <div className="reviewer-nav-center">
             <nav className="receipt-pagination" aria-label="Choose a receipt">
               {getReviewerNavigationItems(currentIndex, visibleReceipts.length).map(item => {
                 if (typeof item !== 'number') {
@@ -674,25 +674,24 @@ export default function SideBySideReviewer({
                     className={`receipt-dot${item === currentIndex ? ' receipt-dot-active' : ''}${unbalanced ? ' receipt-dot-warning' : ''}`}
                     onClick={() => { if (item !== currentIndex) void saveCurrentTx(item); }}
                   >
-                    {item + 1}{unbalanced ? ' !' : ''}
+                    {item + 1}
                   </button>
                 );
               })}
             </nav>
 
-            <div className="reviewer-count" aria-live="polite">
-              Receipt {currentIndex + 1} of {visibleReceipts.length}
-              <span className="kbd-hint">Alt+← / Alt+→</span>
-            </div>
+            <button
+              className={stepClass(hasNext)}
+              disabled={!hasNext}
+              onClick={() => { if (hasNext) void saveCurrentTx(currentIndex + 1); }}
+            >
+              Next <ChevronRight size={16} />
+            </button>
           </div>
 
-          <button
-            className={stepClass(hasNext)}
-            disabled={!hasNext}
-            onClick={() => { if (hasNext) void saveCurrentTx(currentIndex + 1); }}
-          >
-            Next <ChevronRight size={16} />
-          </button>
+          <div className="reviewer-count" aria-live="polite">
+            Receipt {currentIndex + 1} of {visibleReceipts.length}
+          </div>
         </div>
       </div>
 

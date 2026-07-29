@@ -2397,18 +2397,18 @@ input[type='number']::-webkit-inner-spin-button {
 .reviewer-actions .btn { white-space: nowrap; }
 
 .reviewer-nav {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--sp-3);
-  padding-top: var(--sp-3);
-  border-top: var(--bw-hair) solid var(--border);
-}
-.reviewer-nav-center {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: var(--sp-4);
+  padding-top: var(--sp-3);
+  border-top: var(--bw-hair) solid var(--border);
+}
+.reviewer-nav-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   min-width: 0;
 }
 .receipt-pagination {
@@ -2432,13 +2432,14 @@ input[type='number']::-webkit-inner-spin-button {
   text-align: center;
   white-space: nowrap;
 }
-.reviewer-count .kbd-hint { margin-left: var(--sp-2); }
 
 .receipt-dot {
-  min-width: 28px;
-  height: 28px;
-  padding: 0 var(--sp-2);
-  border-radius: var(--radius-sm);
+  position: relative;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 50%;
   border: var(--bw-hair) solid var(--border-strong);
   background: var(--bg-field);
   color: var(--text-2);
@@ -2453,7 +2454,18 @@ input[type='number']::-webkit-inner-spin-button {
   border-width: 2px;
   color: var(--primary-text);
 }
-.receipt-dot-warning { border-color: var(--warn-text); color: var(--warn-text); }
+.receipt-dot-warning { border-color: var(--warn-text); }
+.receipt-dot-warning::after {
+  content: '';
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 7px;
+  height: 7px;
+  border: 2px solid var(--bg-surface);
+  border-radius: 50%;
+  background: var(--warn-text);
+}
 .receipt-dot:focus { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 2px; }
 
 .nav-step {
@@ -2480,18 +2492,15 @@ input[type='number']::-webkit-inner-spin-button {
 .nav-step:focus { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 2px; }
 
 @media (max-width: 980px) {
-  .reviewer-nav-center { gap: var(--sp-2); }
-  .reviewer-count .kbd-hint { display: none; }
+  .reviewer-nav { flex-wrap: wrap; gap: var(--sp-2); }
 }
 
 @media (max-width: 720px) {
-  .reviewer-nav { grid-template-columns: 1fr 1fr; }
-  .reviewer-nav > .nav-step:last-child { justify-self: end; }
-  .reviewer-nav-center {
-    grid-column: 1 / -1;
-    grid-row: 2;
+  .reviewer-nav-controls {
+    max-width: 100%;
     flex-wrap: wrap;
   }
+  .reviewer-count { flex-basis: 100%; }
 }
 
 .save-state {
