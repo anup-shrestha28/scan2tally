@@ -11,6 +11,23 @@ import { LEDGER_MATCHING } from '../lib/features';
 /** Ties the ledger inputs to the single datalist rendered at the bottom. */
 const LEDGER_OPTIONS_ID = 'chart-of-accounts';
 
+type ReviewerNavigationItem = number | 'start-ellipsis' | 'end-ellipsis';
+
+/** Shows nearby receipts without allowing a large batch to stretch the toolbar. */
+function getReviewerNavigationItems(currentIndex: number, receiptCount: number): ReviewerNavigationItem[] {
+  if (receiptCount <= 9) return Array.from({ length: receiptCount }, (_, index) => index);
+
+  const rangeStart = Math.max(1, currentIndex - 2);
+  const rangeEnd = Math.min(receiptCount - 2, currentIndex + 2);
+  const items: ReviewerNavigationItem[] = [0];
+
+  if (rangeStart > 1) items.push('start-ellipsis');
+  for (let index = rangeStart; index <= rangeEnd; index += 1) items.push(index);
+  if (rangeEnd < receiptCount - 2) items.push('end-ellipsis');
+  items.push(receiptCount - 1);
+  return items;
+}
+
 interface SideBySideReviewerProps {
   batch: ScanBatch | null;
   currentUser: User;
@@ -634,30 +651,39 @@ export default function SideBySideReviewer({
             <ChevronLeft size={16} /> Prev
           </button>
 
-          <div className="row-sm">
-            {visibleReceipts.map((receipt, index) => {
-              const rows = index === currentIndex
-                ? transactions
-                : (txMap[receipt.id] || []);
-              const debit = rows.reduce((sum, row) => sum + (Number(row.debit_amount) || 0), 0);
-              const credit = rows.reduce((sum, row) => sum + (Number(row.credit_amount) || 0), 0);
-              const unbalanced = rows.length > 0 && Math.abs(debit - credit) >= 0.05;
-              return (
-                <button
-                  key={receipt.id}
-                  title={`${receipt.filename}${unbalanced ? ' — out of balance' : ''}`}
-                  className={`receipt-dot${index === currentIndex ? ' receipt-dot-active' : ''}${unbalanced ? ' receipt-dot-warning' : ''}`}
-                  onClick={() => { if (index !== currentIndex) void saveCurrentTx(index); }}
-                >
-                  {index + 1}{unbalanced ? ' !' : ''}
-                </button>
-              );
-            })}
-          </div>
+          <div className="reviewer-nav-center">
+            <nav className="receipt-pagination" aria-label="Choose a receipt">
+              {getReviewerNavigationItems(currentIndex, visibleReceipts.length).map(item => {
+                if (typeof item !== 'number') {
+                  return <span className="receipt-pagination-ellipsis" key={item} aria-hidden="true">…</span>;
+                }
 
-          <div className="reviewer-count">
-            Receipt {currentIndex + 1} of {visibleReceipts.length}
-            <span className="kbd-hint">Alt+← / Alt+→</span>
+                const receipt = visibleReceipts[item];
+                const rows = item === currentIndex
+                  ? transactions
+                  : (txMap[receipt.id] || []);
+                const debit = rows.reduce((sum, row) => sum + (Number(row.debit_amount) || 0), 0);
+                const credit = rows.reduce((sum, row) => sum + (Number(row.credit_amount) || 0), 0);
+                const unbalanced = rows.length > 0 && Math.abs(debit - credit) >= 0.05;
+                return (
+                  <button
+                    key={receipt.id}
+                    title={`${receipt.filename}${unbalanced ? ' — out of balance' : ''}`}
+                    aria-label={`Receipt ${item + 1}: ${receipt.filename}${unbalanced ? ', out of balance' : ''}`}
+                    aria-current={item === currentIndex ? 'page' : undefined}
+                    className={`receipt-dot${item === currentIndex ? ' receipt-dot-active' : ''}${unbalanced ? ' receipt-dot-warning' : ''}`}
+                    onClick={() => { if (item !== currentIndex) void saveCurrentTx(item); }}
+                  >
+                    {item + 1}{unbalanced ? ' !' : ''}
+                  </button>
+                );
+              })}
+            </nav>
+
+            <div className="reviewer-count" aria-live="polite">
+              Receipt {currentIndex + 1} of {visibleReceipts.length}
+              <span className="kbd-hint">Alt+← / Alt+→</span>
+            </div>
           </div>
 
           <button
