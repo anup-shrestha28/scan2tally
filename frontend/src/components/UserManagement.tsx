@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
-  UserPlus, Users, ShieldCheck, Building, UserCheck, Loader2,
+  UserPlus, Users, Loader2,
   AlertCircle, CheckCircle2, XCircle, ArrowLeft, Eye, EyeOff
 } from 'lucide-react';
 import { User, UserRole } from '../types';
@@ -11,10 +11,10 @@ interface UserManagementProps {
   onBack?: () => void;
 }
 
-const ROLE_STYLES: Record<UserRole, { cls: string; icon: React.ReactNode }> = {
-  'Super Admin': { cls: 'role-super', icon: <ShieldCheck size={12} /> },
-  'Admin': { cls: 'role-admin', icon: <Building size={12} /> },
-  'Operator': { cls: 'role-operator', icon: <UserCheck size={12} /> },
+const ROLE_STYLES: Record<UserRole, string> = {
+  'Super Admin': 'role-super',
+  'Admin': 'role-admin',
+  'Operator': 'role-operator',
 };
 
 const toTitleCase = (value: string) =>
@@ -299,7 +299,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
                 </tr>
               ) : displayedUsers.map(u => {
                 const isSelf = u.id === currentUser.id;
-                const style = ROLE_STYLES[u.role];
+                const roleClass = ROLE_STYLES[u.role];
                 return (
                   <tr key={u.id}>
                     <td className="text-strong">
@@ -322,8 +322,8 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
                         : (currentUser.orgName || 'Your organization')}
                     </td>
                     <td>
-                      <span className={`role-tag role-tag-icon ${style.cls}`}>
-                        {style.icon} {u.role}
+                      <span className={`role-tag ${roleClass}`}>
+                        {u.role}
                       </span>
                     </td>
                     <td>

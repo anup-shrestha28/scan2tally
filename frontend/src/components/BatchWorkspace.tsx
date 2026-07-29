@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet } from 'lucide-react';
+import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet } from 'lucide-react';
 import { ScanBatch, Receipt, User, Transaction } from '../types';
 import {
   newId,
@@ -652,14 +652,25 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     beginExtraction(activeBatch.id, receipt);
   };
 
-  const handleOpenReviewer = (receipt: Receipt) => {
+  const handleOpenReviewer = async (receipt: Receipt) => {
     if (!activeBatch) return;
-    onSelectBatch(
-      activeBatch,
-      receipt,
-      receiptTransactionsMap[receipt.id] || [],
-      receiptTransactionsMap
-    );
+    try {
+      // The Lines column can render before the initial transaction request has
+      // finished. Fetch on demand so Review can never open an extracted receipt
+      // with a synthetic blank row just because it was clicked quickly.
+      const transactionMap = Object.prototype.hasOwnProperty.call(receiptTransactionsMap, receipt.id)
+        ? receiptTransactionsMap
+        : await fetchTransactionsForBatch(activeBatch.id);
+      setReceiptTransactionsMap(prev => ({ ...prev, ...transactionMap }));
+      onSelectBatch(
+        activeBatch,
+        receipt,
+        transactionMap[receipt.id] || [],
+        transactionMap
+      );
+    } catch (err: any) {
+      setSaveError(err?.message || 'Could not load this receipt for review.');
+    }
   };
 
   const handleReviewSingleReceipt = (receipt: Receipt) => {
@@ -753,7 +764,15 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
             {visibleBatches.map(b => (
               <div 
                 key={b.id} 
+                role="button"
+                tabIndex={0}
                 onClick={() => {
+                  setActiveBatchId(b.id);
+                  sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, b.id);
+                }}
+                onKeyDown={(event) => {
+                  if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return;
+                  event.preventDefault();
                   setActiveBatchId(b.id);
                   sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, b.id);
                 }}
@@ -952,7 +971,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
             <span className="upload-hint">Supports JPG, PNG, WEBP, and PDF · Multiple files allowed</span>
           </div>
 
-          <div className="card">
+          <div className="card files-card-compact">
             <h4 className="section-title">
               Files in {activeBatch.name} ({activeBatch.receipts.length})
             </h4>
@@ -966,17 +985,25 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                 <table className="custom-table">
                   <thead>
                     <tr>
-                      <th>File Name</th>
-                      <th>Extraction Status</th>
+                      <th>File</th>
+                      <th>Status</th>
+                      <th className="text-right">Lines</th>
                       <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {activeBatch.receipts.map(rcpt => (
+                    {activeBatch.receipts.map(rcpt => {
+                      const receiptRows = receiptTransactionsMap[rcpt.id] || [];
+                      const needsReview = rcpt.status === 'Extracted' && receiptRows.some(row => row.needs_review);
+                      const statusClass = needsReview ? 'status-review' :
+                        rcpt.status === 'Extracted' ? 'status-extracted' :
+                        rcpt.status === 'Processing' ? 'status-processing' :
+                        rcpt.status === 'Failed' ? 'status-failed' : 'status-pending';
+                      return (
                       <tr key={rcpt.id}>
-                        <td style={{ fontWeight: 500 }}>
+                        <td className="file-name-cell">
                           <div className="file-cell">
-                            <FileText size={16} color="var(--primary)" />
+                            <FileText size={15} />
                             {rcpt.filename}
                           </div>
                           {isLowResolution(rcpt) && (
@@ -993,19 +1020,20 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                         </td>
                         <td>
                           <div className="stack-xs">
-                            <span className={`status-pill ${
-                              rcpt.status === 'Extracted' ? 'status-extracted' :
-                              rcpt.status === 'Processing' ? 'status-processing' :
-                              rcpt.status === 'Failed' ? 'status-failed' : 'status-pending'
-                            }`}>
-                              {rcpt.status === 'Extracted' ? <CheckCircle2 size={12} /> :
-                               rcpt.status === 'Failed' ? <AlertCircle size={12} /> : <Clock size={12} />}
-                              {rcpt.status}
+                            <span className={`status-pill ${statusClass}`}>
+                              {needsReview ? <AlertTriangle size={11} /> :
+                               rcpt.status === 'Extracted' ? <CheckCircle2 size={11} /> :
+                               rcpt.status === 'Failed' ? <AlertCircle size={11} /> :
+                               rcpt.status === 'Processing' ? <span className="status-dot">●</span> : <span>○</span>}
+                              {needsReview ? 'Needs review' : rcpt.status}
                             </span>
                             {rcpt.status === 'Failed' && rcpt.error_message && (
                               <span className="receipt-error">{rcpt.error_message}</span>
                             )}
                           </div>
+                        </td>
+                        <td className="text-right tx-lines-count">
+                          {rcpt.status === 'Extracted' ? receiptRows.length : '—'}
                         </td>
                         <td>
                           <div className="row-actions">
@@ -1013,8 +1041,17 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                               className="btn btn-secondary btn-sm"
                               onClick={() => handleReviewSingleReceipt(rcpt)}
                             >
-                              Preview Image
+                              Preview
                             </button>
+
+                            {rcpt.status === 'Extracted' && (
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => { void handleOpenReviewer(rcpt); }}
+                              >
+                                Review
+                              </button>
+                            )}
 
                             {rcpt.status === 'Failed' && (
                               <button
@@ -1040,7 +1077,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                           </div>
                         </td>
                       </tr>
-                    ))}
+                    );})}
                   </tbody>
                 </table>
               </div>
@@ -1051,11 +1088,11 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
               record that it happened — and the only way to answer "has this
               already been posted?" before someone posts it twice. */}
           {exportHistory.length > 0 && (
-            <div className="card">
-              <h4 className="section-title">
+            <details className="card export-history">
+              <summary className="section-title export-history-summary">
                 <FileSpreadsheet size={17} color="var(--primary)" />
                 Tally exports from this batch ({exportHistory.length})
-              </h4>
+              </summary>
               <div className="table-container">
                 <table className="custom-table">
                   <thead>
@@ -1073,7 +1110,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                   </tbody>
                 </table>
               </div>
-            </div>
+            </details>
           )}
         </div>
         )}

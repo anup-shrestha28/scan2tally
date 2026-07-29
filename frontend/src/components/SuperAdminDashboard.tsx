@@ -113,12 +113,12 @@ export default function SuperAdminDashboard() {
 
         <div className="card">
           <div className="stat-label">Active Staff Users</div>
-          <div className="stat-value tone-emerald">{stats.activeUsers}</div>
+          <div className="stat-value">{stats.activeUsers}</div>
         </div>
 
         <div className="card">
           <div className="stat-label">Receipts Scanned</div>
-          <div className="stat-value tone-indigo">{stats.receipts}</div>
+          <div className="stat-value">{stats.receipts}</div>
           <div className="stat-note">
             across {stats.batches} {stats.batches === 1 ? 'batch' : 'batches'}
           </div>

@@ -243,7 +243,7 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
           new accounts they intend to create — but they should be making that
           choice, not discovering it after the import. */}
       {unresolvedNames.length > 0 && (
-        <div className="alert alert-warning alert-top" style={{ padding: '12px 14px', gap: '10px' }}>
+        <div className="alert alert-error alert-top">
           <AlertTriangle size={16} className="alert-icon" style={{ marginTop: '2px' }} />
           <div>
             <strong className="alert-title">
@@ -321,13 +321,18 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
                     <td className="voucher-col-head">Dr</td>
                     <td className="voucher-col-head">Cr</td>
                   </tr>
-                  {groupTxs.map((tx) => (
-                    <tr key={tx.id}>
+                  {groupTxs.map((tx) => {
+                    const unknownLedger = LEDGER_MATCHING && (tx.ledger_match === 'Unmatched' || tx.ledger_match === 'Suggested');
+                    return (
+                    <tr key={tx.id} className={unknownLedger ? 'voucher-ledger-warning' : ''}>
                       <td></td>
                       <td className="voucher-side">
                         {tx.entry_type || (tx.debit_amount ? 'Dr' : 'Cr')}
                       </td>
-                      <td>{tx.ledger_name || tx.debit_ledger || tx.credit_ledger || ''}</td>
+                      <td>
+                        {tx.ledger_name || tx.debit_ledger || tx.credit_ledger || ''}
+                        {unknownLedger && <span className="voucher-new-account">New account</span>}
+                      </td>
                       <td className="voucher-lf"></td>
                       <td className="voucher-amount">
                         {tx.debit_amount ? formatAmt(Number(tx.debit_amount)) : ''}
@@ -336,7 +341,7 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
                         {tx.credit_amount ? formatAmt(Number(tx.credit_amount)) : ''}
                       </td>
                     </tr>
-                  ))}
+                  );})}
                   <tr>
                     <td></td>
                     <td></td>

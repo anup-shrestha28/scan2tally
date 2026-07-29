@@ -106,13 +106,12 @@ export default function AdminDashboard({
         <Tile
           label="Receipts Extracted"
           value={receipts.Extracted}
-          tone="emerald"
           note={`${rows} voucher ${rows === 1 ? 'line' : 'lines'} on record`}
         />
         <Tile
           label="Awaiting Extraction"
           value={awaiting}
-          tone={awaiting ? 'indigo' : undefined}
+          tone={awaiting ? 'amber' : undefined}
           note={receipts.Processing ? `${receipts.Processing} being read right now` : 'nothing in progress'}
         />
       </div>
@@ -123,7 +122,7 @@ export default function AdminDashboard({
         <Tile
           label="Failed Receipts"
           value={receipts.Failed}
-          tone={receipts.Failed ? 'rose' : 'emerald'}
+          tone={receipts.Failed ? 'rose' : undefined}
           note={receipts.Failed ? 'these need a retry or a better photo' : 'nothing failed'}
         />
         {LEDGER_MATCHING && (
@@ -136,7 +135,7 @@ export default function AdminDashboard({
             <Tile
               label="Rows Needing a Ledger"
               value={ledgersUnresolved}
-              tone={ledgersUnresolved ? 'amber' : 'emerald'}
+              tone={ledgersUnresolved ? 'amber' : undefined}
               note={ledgersUnresolved ? 'Tally would create new accounts for these' : 'all rows resolve'}
             />
           </>
