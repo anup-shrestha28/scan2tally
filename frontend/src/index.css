@@ -2706,9 +2706,9 @@ input[type='number']::-webkit-inner-spin-button {
   flex-direction: column;
   gap: var(--sp-6);
   padding: var(--sp-4);
-  background: #ffffff;
-  color: #0f172a;
-  border-color: #94a3b8;
+  background: var(--bg-field);
+  color: var(--text-1);
+  border-color: var(--border-strong);
 }
 
 /* Mirrors the bordered blocks of the generated spreadsheet, so what is on
@@ -2716,17 +2716,25 @@ input[type='number']::-webkit-inner-spin-button {
 .voucher-table {
   width: 100%;
   border-collapse: collapse;
-  border: 1px solid #64748b;
-  background: #ffffff;
-  color: #0f172a;
+  border: var(--bw-hair) solid var(--border-strong);
+  background: var(--bg-surface);
+  color: var(--text-1);
 }
 .voucher-table td {
-  border: 1px solid #94a3b8;
+  border: var(--bw-hair) solid var(--border-strong);
   padding: var(--sp-2);
-  color: #0f172a;
+  color: var(--text-1);
 }
-.voucher-heading { text-align: center; font-weight: var(--fw-bold); }
-.voucher-col-head { text-align: center; font-weight: var(--fw-bold); }
+.voucher-heading {
+  text-align: center;
+  font-weight: var(--fw-bold);
+  background: var(--bg-surface-2);
+}
+.voucher-col-head {
+  text-align: center;
+  font-weight: var(--fw-bold);
+  background: color-mix(in srgb, var(--bg-surface-2) 72%, var(--bg-surface));
+}
 .voucher-particulars { width: 250px; }
 .voucher-side { width: 50px; text-align: center; }
 .voucher-lf { width: 50px; }
@@ -2736,14 +2744,14 @@ input[type='number']::-webkit-inner-spin-button {
   min-width: 100px;
   font-variant-numeric: tabular-nums;
 }
-.voucher-narration { font-weight: var(--fw-bold); }
-.voucher-ledger-warning td { background: #fff7ed; }
+.voucher-narration { background: var(--bg-surface-2); font-weight: var(--fw-bold); }
+.voucher-ledger-warning td { background: var(--warn-bg); }
 .voucher-new-account {
   display: inline-block;
   margin-left: var(--sp-2);
   padding: 1px var(--sp-1);
-  color: #9f1239;
-  border: 1px solid #be123c;
+  color: var(--danger-text);
+  border: var(--bw-hair) solid var(--danger-text);
   border-radius: var(--radius-sm);
   font-size: var(--fs-2xs);
   font-weight: var(--fw-bold);
