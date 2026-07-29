@@ -2180,6 +2180,21 @@ input[type='number']::-webkit-inner-spin-button {
 .files-table .file-status-column { width: 210px; }
 .files-table .file-actions-column { width: 236px; }
 .receipt-status { align-items: flex-start; }
+
+/* Receipt states share one visual treatment so the table stays calm. Meaning
+   comes from the icon and label; only the tiny icon keeps semantic colour. */
+.files-table .status-pill {
+  min-width: 132px;
+  border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--bg-surface-2) 72%, transparent);
+  color: var(--text-2);
+}
+.files-table .status-extracted svg { color: var(--ok-text); }
+.files-table .status-review svg { color: var(--warn-text); }
+.files-table .status-failed svg { color: var(--danger-text); }
+.files-table .status-processing .status-dot { color: var(--primary-text); }
+.files-table .status-pending > :first-child { color: var(--text-3); }
+
 .receipt-review-btn {
   border-color: color-mix(in srgb, var(--primary) 65%, var(--border));
   background: color-mix(in srgb, var(--primary) 10%, transparent);
