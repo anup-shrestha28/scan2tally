@@ -128,26 +128,26 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
 
   if (loading) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', minHeight: '40vh', color: 'var(--text-muted)' }}>
+      <div className="loading-state">
         <Loader2 size={18} className="animate-spin" /> Loading users...
       </div>
     );
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+    <div className="page page-compact">
+      <div className="page-header page-header-center">
+        <div className="row">
           {onBack && (
             <button className="btn btn-secondary" onClick={onBack}>
               <ArrowLeft size={16} /> Back
             </button>
           )}
           <div>
-            <h2 style={{ fontSize: '1.5rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <h2 className="page-title page-title-icon">
               <Users size={22} color="var(--primary)" /> Team Members
             </h2>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>
+            <p className="page-subtitle">
               {isSuperAdmin
                 ? 'Everyone across all client organizations'
                 : `Staff in ${currentUser.orgName || 'your organization'}`}
@@ -163,29 +163,23 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
       </div>
 
       {notice && (
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: '8px',
-          background: 'rgba(16, 185, 129, 0.12)', border: '1px solid rgba(16, 185, 129, 0.35)',
-          color: '#10b981', borderRadius: 'var(--radius-md)', padding: '10px 14px', fontSize: '0.85rem'
-        }}>
-          <CheckCircle2 size={16} /> {notice}
+        <div className="alert alert-success">
+          <CheckCircle2 size={16} className="alert-icon" /> {notice}
         </div>
       )}
 
       {loadError && (
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: '8px',
-          background: 'rgba(244, 63, 94, 0.12)', border: '1px solid rgba(244, 63, 94, 0.35)',
-          color: '#f43f5e', borderRadius: 'var(--radius-md)', padding: '10px 14px', fontSize: '0.85rem'
-        }}>
-          <AlertCircle size={16} /> {loadError}
+        <div className="alert alert-error">
+          <AlertCircle size={16} className="alert-icon" /> {loadError}
         </div>
       )}
 
       {showForm && (
         <div className="card">
-          <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '4px' }}>Add a team member</h3>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.82rem', marginBottom: '18px' }}>
+          <h3 className="section-title" style={{ marginBottom: '4px', fontSize: '1.05rem', fontWeight: 700 }}>
+            Add a team member
+          </h3>
+          <p className="text-muted text-xs" style={{ marginBottom: '18px' }}>
             Set their login details and share the password securely. It will not be emailed.
           </p>
 
@@ -206,11 +200,10 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
             <div className="grid-2">
               <div className="form-group">
                 <label className="form-label">Password</label>
-                <div style={{ position: 'relative' }}>
+                <div className="input-affix">
                   <input
                     type={showPassword ? 'text' : 'password'}
                     className="form-input"
-                    style={{ width: '100%', paddingRight: '40px' }}
                     value={password}
                     onChange={e => setPassword(e.target.value)}
                     placeholder="At least 8 characters"
@@ -221,13 +214,9 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
                   />
                   <button
                     type="button"
+                    className="input-affix-btn"
                     onClick={() => setShowPassword(v => !v)}
                     title={showPassword ? 'Hide password' : 'Show password'}
-                    style={{
-                      position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)',
-                      background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer',
-                      display: 'flex', alignItems: 'center'
-                    }}
                   >
                     {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
                   </button>
@@ -246,7 +235,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
 
             <div className="grid-2">
               <div className="form-group">
-                <label className="form-label">Designation <span style={{ color: 'var(--text-dim)' }}>(optional)</span></label>
+                <label className="form-label">Designation <span className="text-dim">(optional)</span></label>
                 <input className="form-input" value={designation} onChange={e => setDesignation(e.target.value)}
                        placeholder="Accountant" disabled={busy} />
               </div>
@@ -262,27 +251,20 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
                     {activeOrgs.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
                   </select>
                   {activeOrgs.length === 0 && (
-                    <p style={{ color: 'var(--text-dim)', fontSize: '0.78rem', marginTop: '6px' }}>
-                      No active organizations. Reactivate one first.
-                    </p>
+                    <p className="form-hint">No active organizations. Reactivate one first.</p>
                   )}
                 </div>
               )}
             </div>
 
             {formError && (
-              <div style={{
-                display: 'flex', alignItems: 'flex-start', gap: '8px',
-                background: 'rgba(244, 63, 94, 0.12)', border: '1px solid rgba(244, 63, 94, 0.35)',
-                color: '#f43f5e', borderRadius: 'var(--radius-md)', padding: '10px 12px',
-                fontSize: '0.82rem', marginBottom: '12px'
-              }}>
-                <AlertCircle size={15} style={{ flexShrink: 0, marginTop: '1px' }} />
+              <div className="alert alert-error alert-top" style={{ marginBottom: '12px' }}>
+                <AlertCircle size={15} className="alert-icon" />
                 <span>{formError}</span>
               </div>
             )}
 
-            <div style={{ display: 'flex', gap: '10px' }}>
+            <div className="form-actions">
               <button type="submit" className="btn btn-primary" disabled={busy}>
                 {busy ? <><Loader2 size={16} className="animate-spin" /> Creating...</> : <><UserPlus size={16} /> Create account</>}
               </button>
@@ -311,7 +293,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
             <tbody>
               {users.length === 0 ? (
                 <tr>
-                  <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '28px' }}>
+                  <td colSpan={6} className="table-empty">
                     No team members yet.
                   </td>
                 </tr>
@@ -320,27 +302,27 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
                 const style = ROLE_STYLES[u.role];
                 return (
                   <tr key={u.id}>
-                    <td style={{ fontWeight: 600 }}>
+                    <td className="text-strong">
                       {u.name}
                       {isSelf && (
-                        <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: '0.78rem', marginLeft: '6px' }}>
+                        <span className="text-dim" style={{ fontWeight: 400, fontSize: '0.78rem', marginLeft: '6px' }}>
                           (you)
                         </span>
                       )}
                       {u.designation && (
-                        <div style={{ color: 'var(--text-muted)', fontWeight: 400, fontSize: '0.75rem' }}>
+                        <div className="text-muted text-2xs" style={{ fontWeight: 400 }}>
                           {u.designation}
                         </div>
                       )}
                     </td>
-                    <td style={{ color: 'var(--text-muted)' }}>{u.email}</td>
+                    <td className="text-muted">{u.email}</td>
                     <td>
                       {isSuperAdmin
                         ? (orgs.find(o => o.id === u.organization_id)?.name || 'Platform')
                         : (currentUser.orgName || 'Your organization')}
                     </td>
                     <td>
-                      <span className={`role-tag ${style.cls}`} style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                      <span className={`role-tag role-tag-icon ${style.cls}`}>
                         {style.icon} {u.role}
                       </span>
                     </td>
@@ -352,7 +334,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
                     <td>
                       {/* Locking yourself out would need another admin to undo. */}
                       {isSelf ? (
-                        <span style={{ color: 'var(--text-dim)', fontSize: '0.78rem' }}>—</span>
+                        <span className="text-dim" style={{ fontSize: '0.78rem' }}>—</span>
                       ) : (
                         <button
                           className={`btn btn-sm ${u.status === 'Active' ? 'btn-danger' : 'btn-secondary'}`}

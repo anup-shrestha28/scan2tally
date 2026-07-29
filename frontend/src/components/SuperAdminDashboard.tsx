@@ -75,21 +75,18 @@ export default function SuperAdminDashboard() {
 
   if (loading) {
     return (
-      <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        gap: '10px', minHeight: '40vh', color: 'var(--text-muted)'
-      }}>
+      <div className="loading-state">
         <Loader2 size={18} className="animate-spin" /> Loading organizations...
       </div>
     );
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+    <div className="page">
+      <div className="page-header page-header-center">
         <div>
-          <h2 style={{ fontSize: '1.5rem', fontWeight: 700 }}>Super Admin Platform Control</h2>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>
+          <h2 className="page-title">Super Admin Platform Control</h2>
+          <p className="page-subtitle">
             Manage client organizations, global storage, and multi-tenant security
           </p>
         </div>
@@ -101,12 +98,8 @@ export default function SuperAdminDashboard() {
       </div>
 
       {error && (
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: '8px',
-          background: 'rgba(244, 63, 94, 0.12)', border: '1px solid rgba(244, 63, 94, 0.35)',
-          color: '#f43f5e', borderRadius: 'var(--radius-md)', padding: '10px 14px', fontSize: '0.85rem'
-        }}>
-          <AlertCircle size={16} style={{ flexShrink: 0 }} /> {error}
+        <div className="alert alert-error">
+          <AlertCircle size={16} className="alert-icon" /> {error}
         </div>
       )}
 
@@ -114,23 +107,19 @@ export default function SuperAdminDashboard() {
           used to sit here reported a fixed "14.2 MB / 1 GB" that was never real. */}
       <div className="grid-3">
         <div className="card">
-          <div style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>Total Client Organizations</div>
-          <div style={{ fontSize: '2rem', fontWeight: 700, marginTop: '4px' }}>{orgs.length}</div>
+          <div className="stat-label">Total Client Organizations</div>
+          <div className="stat-value">{orgs.length}</div>
         </div>
 
         <div className="card">
-          <div style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>Active Staff Users</div>
-          <div style={{ fontSize: '2rem', fontWeight: 700, marginTop: '4px', color: '#10b981' }}>
-            {stats.activeUsers}
-          </div>
+          <div className="stat-label">Active Staff Users</div>
+          <div className="stat-value tone-emerald">{stats.activeUsers}</div>
         </div>
 
         <div className="card">
-          <div style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>Receipts Scanned</div>
-          <div style={{ fontSize: '2rem', fontWeight: 700, marginTop: '4px', color: '#818cf8' }}>
-            {stats.receipts}
-          </div>
-          <div style={{ color: 'var(--text-dim)', fontSize: '0.75rem', marginTop: '2px' }}>
+          <div className="stat-label">Receipts Scanned</div>
+          <div className="stat-value tone-indigo">{stats.receipts}</div>
+          <div className="stat-note">
             across {stats.batches} {stats.batches === 1 ? 'batch' : 'batches'}
           </div>
         </div>
@@ -138,12 +127,12 @@ export default function SuperAdminDashboard() {
 
       {showAddModal && (
         <div className="card" style={{ borderColor: 'var(--primary)' }}>
-          <h3 style={{ fontSize: '1.1rem', marginBottom: '12px' }}>Create New Client Organization</h3>
-          <form onSubmit={handleCreateOrg} style={{ display: 'flex', gap: '12px', alignItems: 'flex-end' }}>
-            <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+          <h3 className="section-title section-title-lg section-title-tight">Create New Client Organization</h3>
+          <form onSubmit={handleCreateOrg} className="inline-form">
+            <div className="form-group fill">
               <label className="form-label">Organization / Client Company Name</label>
-              <input 
-                type="text" 
+              <input
+                type="text"
                 className="form-input"
                 placeholder="e.g. Everest Logistics & Distributing"
                 value={newOrgName}
@@ -165,7 +154,7 @@ export default function SuperAdminDashboard() {
       )}
 
       <div className="card">
-        <h3 style={{ fontSize: '1.1rem', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <h3 className="section-title section-title-lg">
           <Building2 size={20} color="var(--primary)" />
           Subscribed Client Organizations
         </h3>
@@ -184,13 +173,13 @@ export default function SuperAdminDashboard() {
             <tbody>
               {orgs.length === 0 ? (
                 <tr>
-                  <td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '28px' }}>
+                  <td colSpan={5} className="table-empty">
                     No client organizations yet.
                   </td>
                 </tr>
               ) : orgs.map((org) => (
                 <tr key={org.id}>
-                  <td style={{ fontWeight: 600 }}>{org.name}</td>
+                  <td className="text-strong">{org.name}</td>
                   <td>
                     <span className={`status-pill ${org.status === 'Active' ? 'status-extracted' : 'status-failed'}`}>
                       {org.status === 'Active' ? <CheckCircle2 size={12} /> : <XCircle size={12} />}

@@ -1,12 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw } from 'lucide-react';
-import { ScanBatch, Receipt, User, UserRole, Transaction } from '../types';
+import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet } from 'lucide-react';
+import { ScanBatch, Receipt, User, Transaction } from '../types';
 import {
   newId,
   fetchBatches,
   createBatch,
   renameBatch,
   deleteBatch,
+  setBatchStatus,
   createReceipt,
   updateReceiptRow,
   deleteReceipt,
@@ -15,6 +16,8 @@ import {
   startReceiptExtraction,
   fetchReceiptStates,
   fetchTransactionsForBatch,
+  fetchExportsForBatch,
+  ExportRecord,
 } from '../lib/db';
 
 /**
@@ -59,12 +62,11 @@ function measureImage(url: string): Promise<{ width: number; height: number } | 
 }
 
 interface BatchWorkspaceProps {
-  userRole: UserRole;
   currentUser: User;
   onSelectBatch: (batch: ScanBatch, selectedReceipt?: Receipt, extractedTx?: Transaction[], txMap?: Record<string, Transaction[]>) => void;
 }
 
-export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }: BatchWorkspaceProps) {
+export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWorkspaceProps) {
   const [batches, setBatches] = useState<ScanBatch[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -83,8 +85,14 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
   // covers just the brief gap before that shows up.
   const [startingExtraction, setStartingExtraction] = useState<boolean>(false);
 
+  // Archived batches are hidden rather than deleted: last quarter's work is
+  // still needed for its records, it just should not sit between an operator and
+  // this morning's batch.
+  const [showArchived, setShowArchived] = useState<boolean>(false);
+
   const [uploadedFilesMap, setUploadedFilesMap] = useState<Record<string, File>>({});
   const [receiptTransactionsMap, setReceiptTransactionsMap] = useState<Record<string, Transaction[]>>({});
+  const [exportHistory, setExportHistory] = useState<ExportRecord[]>([]);
 
   // The server reads the image out of storage, so an extraction must not be
   // requested until that upload has actually landed.
@@ -99,15 +107,23 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
   // than on an older extraction that happens to sit earlier in the batch.
   const autoOpenRef = useRef<{ batchId: string; receiptIds: string[] } | null>(null);
 
+  const wantedStatus = showArchived ? 'Archived' : 'Active';
+  const visibleBatches = batches.filter(b => b.status === wantedStatus);
+  const archivedCount = batches.filter(b => b.status === 'Archived').length;
+
   // May be undefined before the first load finishes, or when the user has no
   // batches yet — every read below has to tolerate that.
   const activeBatch: ScanBatch | undefined =
-    batches.find(b => b.id === activeBatchId) || batches[0];
+    visibleBatches.find(b => b.id === activeBatchId) || visibleBatches[0];
   const activeReceipts = activeBatch?.receipts ?? [];
+  // An archived batch is a record, not a workspace. It stays fully readable and
+  // exportable; what stops is adding to it.
+  const isArchived = activeBatch?.status === 'Archived';
   // Derived from the receipts themselves rather than tracked separately, so a
   // reopened tab shows work still running on the server.
   const batchIsProcessing = (batch: ScanBatch) => batch.receipts.some(r => r.status === 'Processing');
   const isProcessing = startingExtraction || activeReceipts.some(r => r.status === 'Processing');
+  const uploadsLocked = isProcessing || isArchived;
   const extractableCount = activeReceipts.filter(r => r.status === 'Pending' || r.status === 'Failed').length;
   const hasFailedExtraction = activeReceipts.some(r => r.status === 'Failed');
   // Only counts receipts still awaiting extraction — no point nagging about
@@ -171,6 +187,20 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
         // Allow a later attempt rather than leaving the batch permanently blank.
         loadedTxBatchesRef.current.delete(batchId);
       });
+  }, [activeBatch?.id]);
+
+  // Which Tally spreadsheets this batch has already produced. Kept beside the
+  // batch because the question it answers — "was this already posted?" — comes
+  // up while looking at the batch, not somewhere else.
+  useEffect(() => {
+    const batchId = activeBatch?.id;
+    if (!batchId) { setExportHistory([]); return; }
+
+    let cancelled = false;
+    fetchExportsForBatch(batchId)
+      .then(records => { if (!cancelled) setExportHistory(records); })
+      .catch(() => { if (!cancelled) setExportHistory([]); });
+    return () => { cancelled = true; };
   }, [activeBatch?.id]);
 
   // Watch whatever the server is still extracting, wherever it was started
@@ -372,6 +402,32 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
     } catch (err: any) {
       setBatches(snapshot);
       setSaveError(err?.message || 'Could not delete the batch.');
+    }
+  };
+
+  /**
+   * Archives or restores a batch.
+   *
+   * Nothing is destroyed — the receipts, rows and export history stay exactly
+   * where they are, which is what makes this the safe alternative to the delete
+   * button people would otherwise reach for to tidy up.
+   */
+  const handleToggleArchive = async (batch: ScanBatch) => {
+    if (batchIsProcessing(batch)) {
+      setSaveError('This batch cannot be archived while extraction is in progress.');
+      return;
+    }
+    const next = batch.status === 'Archived' ? 'Active' : 'Archived';
+    const snapshot = batches;
+    setBatches(prev => prev.map(b => (b.id === batch.id ? { ...b, status: next } : b)));
+    if (activeBatchId === batch.id) setActiveBatchId('');
+
+    try {
+      await setBatchStatus(batch.id, next);
+      setSaveError(null);
+    } catch (err: any) {
+      setBatches(snapshot);
+      setSaveError(err?.message || 'Could not update that batch.');
     }
   };
 
@@ -590,10 +646,7 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
 
   if (loading) {
     return (
-      <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px',
-        minHeight: '50vh', color: 'var(--text-muted)'
-      }}>
+      <div className="loading-state loading-state-tall">
         <Loader2 size={18} className="animate-spin" />
         Loading your scan batches...
       </div>
@@ -602,45 +655,55 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
 
   if (loadError) {
     return (
-      <div className="card" style={{ maxWidth: '560px', margin: '40px auto', textAlign: 'center' }}>
-        <AlertCircle size={28} color="#f43f5e" style={{ marginBottom: '10px' }} />
-        <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '6px' }}>
-          Could not load your batches
-        </h3>
-        <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>{loadError}</p>
+      <div className="card panel-message">
+        <AlertCircle size={28} className="panel-message-icon tone-rose" />
+        <h3>Could not load your batches</h3>
+        <p>{loadError}</p>
       </div>
     );
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+    <div className="page">
       {saveError && (
-        <div style={{
-          display: 'flex', alignItems: 'flex-start', gap: '8px',
-          background: 'rgba(245, 158, 11, 0.12)', border: '1px solid rgba(245, 158, 11, 0.4)',
-          color: '#f59e0b', borderRadius: 'var(--radius-md)', padding: '10px 14px', fontSize: '0.82rem'
-        }}>
-          <AlertTriangle size={15} style={{ flexShrink: 0, marginTop: '1px' }} />
-          <span style={{ flex: 1 }}>{saveError}</span>
-          <button
-            onClick={() => setSaveError(null)}
-            style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: '1rem', lineHeight: 1 }}
-            title="Dismiss"
-          >
+        <div className="alert alert-warning alert-top text-xs">
+          <AlertTriangle size={15} className="alert-icon" />
+          <span className="alert-body">{saveError}</span>
+          <button className="alert-dismiss" onClick={() => setSaveError(null)} title="Dismiss">
             ×
           </button>
         </div>
       )}
-      <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: '24px' }}>
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '12px', minHeight: 'calc(100vh - 120px)', position: 'sticky', top: '24px', alignSelf: 'start' }}>
-          <h3 className="batch-sidebar-heading">Your Batches</h3>
-          <button className="btn btn-primary" onClick={handleCreateBatch} style={{ width: '100%', padding: '12px 16px', fontSize: '0.9rem' }}>
-            <FolderPlus size={18} />
-            Create New Batch
-          </button>
-          
+      <div className="workspace-grid">
+        <div className="card batch-sidebar">
+          <h3 className="batch-sidebar-heading">
+            {showArchived ? 'Archived Batches' : 'Your Batches'}
+          </h3>
+          {!showArchived && (
+            <button className="btn btn-primary btn-block-lg" onClick={handleCreateBatch}>
+              <FolderPlus size={18} />
+              Create New Batch
+            </button>
+          )}
+
+          {(archivedCount > 0 || showArchived) && (
+            <button
+              className="btn btn-secondary btn-sm btn-block"
+              onClick={() => { setShowArchived(v => !v); setActiveBatchId(''); }}
+            >
+              {showArchived
+                ? <><ArchiveRestore size={14} /> Back to active batches</>
+                : <><Archive size={14} /> View archived ({archivedCount})</>}
+            </button>
+          )}
+
           <div className="batch-list">
-            {batches.map(b => (
+            {!visibleBatches.length && (
+              <div className="batch-list-empty">
+                {showArchived ? 'Nothing archived yet.' : 'No active batches.'}
+              </div>
+            )}
+            {visibleBatches.map(b => (
               <div 
                 key={b.id} 
                 onClick={() => setActiveBatchId(b.id)}
@@ -648,17 +711,16 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                 className={`batch-item${b.id === activeBatchId ? ' batch-item-active' : ''}`}
               >
                 {editingBatchId === b.id ? (
-                  <div style={{ display: 'flex', gap: '6px' }} onClick={e => e.stopPropagation()}>
-                    <input 
-                      type="text" 
-                      className="form-input" 
+                  <div className="row-xs" onClick={e => e.stopPropagation()}>
+                    <input
+                      type="text"
+                      className="form-input batch-rename-input"
                       value={editedBatchName}
                       onChange={e => setEditedBatchName(e.target.value)}
                       onKeyDown={e => {
                         if (e.key === 'Enter') handleRenameBatch(b.id);
                         if (e.key === 'Escape') setEditingBatchId(null);
                       }}
-                      style={{ padding: '6px 10px', fontSize: '0.85rem', flex: 1, boxSizing: 'border-box' }}
                       autoFocus
                     />
                   </div>
@@ -677,8 +739,8 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                     </div>
 
                     <div className="batch-actions">
-                      <button 
-                        className="btn btn-secondary btn-sm batch-action" 
+                      <button
+                        className="btn btn-secondary btn-sm batch-action"
                         onClick={(e) => {
                           e.stopPropagation();
                           setEditingBatchId(b.id);
@@ -688,7 +750,17 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                       >
                         <Edit2 size={12} />
                       </button>
-                      <button 
+                      <button
+                        className="btn btn-secondary btn-sm batch-action"
+                        disabled={batchIsProcessing(b)}
+                        onClick={(e) => { e.stopPropagation(); handleToggleArchive(b); }}
+                        title={b.status === 'Archived'
+                          ? 'Restore this batch to the active list'
+                          : 'Archive — keeps everything, just moves it out of the way'}
+                      >
+                        {b.status === 'Archived' ? <ArchiveRestore size={12} /> : <Archive size={12} />}
+                      </button>
+                      <button
                         className="btn btn-danger btn-sm batch-action"
                         disabled={batchIsProcessing(b) || (startingExtraction && b.id === activeBatchId)}
                         onClick={(e) => {
@@ -721,23 +793,25 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
               <div className="empty-file empty-file-right"><Camera size={18} /></div>
             </div>
             <h3>
-              Start your first scan
+              {showArchived ? 'Nothing archived' : 'Start your first scan'}
             </h3>
             <p>
-              Create a batch to upload handwritten vouchers.
+              {showArchived
+                ? 'Batches you archive are kept here, out of the way but never deleted.'
+                : 'Create a batch to upload handwritten vouchers.'}
             </p>
           </div>
         ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+        <div className="batch-panel">
           <div className="batch-header">
             <div>
-              <h3 style={{ fontSize: '1.2rem', fontWeight: 700 }}>{activeBatch.name}</h3>
-              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+              <h3>{activeBatch.name}</h3>
+              <p>
                 {activeBatch.receipts.length} receipt images · Upload and review files below
               </p>
               {lowResPendingCount > 0 && (
-                <p style={{ fontSize: '0.8rem', color: '#f59e0b', display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px' }}>
-                  <AlertTriangle size={14} style={{ flexShrink: 0 }} />
+                <p className="batch-lowres-warning">
+                  <AlertTriangle size={14} />
                   {lowResPendingCount === 1
                     ? '1 photo is low resolution — you may want to retake it before extracting.'
                     : `${lowResPendingCount} photos are low resolution — you may want to retake them before extracting.`}
@@ -748,7 +822,8 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
             <button
               className="btn btn-primary"
               onClick={handleTriggerExtraction}
-              disabled={!extractableCount || isProcessing || hasFailedExtraction}
+              disabled={!extractableCount || uploadsLocked || hasFailedExtraction}
+              title={isArchived ? 'This batch is archived. Restore it to extract more receipts.' : undefined}
             >
               {isProcessing ? (
                 <>
@@ -766,57 +841,40 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
             </button>
           </div>
 
-          <div 
-            className="card"
-            style={{
-              border: `2px dashed ${dragOver ? 'var(--primary)' : 'var(--border-color)'}`,
-              background: dragOver ? 'rgba(99, 102, 241, 0.05)' : 'var(--bg-card)',
-              textAlign: 'center',
-              padding: '36px',
-              cursor: isProcessing ? 'not-allowed' : 'pointer',
-              position: 'relative',
-              opacity: isProcessing ? 0.5 : 1,
-              pointerEvents: isProcessing ? 'none' : 'auto'
-            }}
-            onDragOver={(e) => { e.preventDefault(); if (!isProcessing) setDragOver(true); }}
+          <div
+            className={`card dropzone${dragOver ? ' dropzone-active' : ''}${uploadsLocked ? ' dropzone-locked' : ''}`}
+            onDragOver={(e) => { e.preventDefault(); if (!uploadsLocked) setDragOver(true); }}
             onDragLeave={() => setDragOver(false)}
             onDrop={(e) => {
               e.preventDefault();
               setDragOver(false);
-              if (isProcessing) return;
+              if (uploadsLocked) return;
               handleFileUpload({ target: { files: e.dataTransfer.files } });
             }}
           >
             <input
               type="file"
+              className="dropzone-input"
               multiple
               accept="image/*,.pdf"
               onChange={handleFileUpload}
-              disabled={isProcessing}
-              style={{
-                position: 'absolute',
-                top: 0, left: 0, width: '100%', height: '100%',
-                opacity: 0, cursor: isProcessing ? 'not-allowed' : 'pointer'
-              }}
+              disabled={uploadsLocked}
             />
-            <div style={{
-              width: '56px', height: '56px',
-              borderRadius: '50%',
-              background: 'rgba(99, 102, 241, 0.1)',
-              color: 'var(--primary)',
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              marginBottom: '12px'
-            }}>
+            <div className="dropzone-icon">
               <UploadCloud size={28} />
             </div>
 
-            <h4 style={{ fontSize: '1.1rem', fontWeight: 600 }}>
-              {isProcessing ? 'Extraction in Progress — Uploads Locked' : `Upload to ${activeBatch.name}`}
+            <h4 className="dropzone-title">
+              {isArchived ? 'This Batch is Archived'
+                : isProcessing ? 'Extraction in Progress — Uploads Locked'
+                : `Upload to ${activeBatch.name}`}
             </h4>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem', marginTop: '4px' }}>
-              {isProcessing ? 'Please wait for the current batch to finish processing before adding more receipts.' : 'Drag and drop handwritten vouchers here, or browse your files'}
+            <p className="dropzone-text">
+              {isArchived ? 'Everything in it is still readable and exportable. Restore it to add more receipts.'
+                : isProcessing ? 'Please wait for the current batch to finish processing before adding more receipts.'
+                : 'Drag and drop handwritten vouchers here, or browse your files'}
             </p>
-            <div style={{ marginTop: '12px', display: 'flex', gap: '8px', justifyContent: 'center' }}>
+            <div className="dropzone-cta">
               <span className="btn btn-secondary btn-sm">
                 <Camera size={14} /> Upload Photo / Browse Files
               </span>
@@ -824,12 +882,12 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
           </div>
 
           <div className="card">
-            <h4 style={{ fontSize: '1rem', fontWeight: 600, marginBottom: '16px' }}>
+            <h4 className="section-title">
               Files in {activeBatch.name} ({activeBatch.receipts.length})
             </h4>
 
             {!activeBatch.receipts.length ? (
-              <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-muted)', fontSize: '0.875rem' }}>
+              <div className="table-empty text-sm" style={{ padding: '24px' }}>
                 No receipts uploaded in this batch yet. Use the upload box above to add paper receipt photos.
               </div>
             ) : (
@@ -846,16 +904,16 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                     {activeBatch.receipts.map(rcpt => (
                       <tr key={rcpt.id}>
                         <td style={{ fontWeight: 500 }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <div className="file-cell">
                             <FileText size={16} color="var(--primary)" />
                             {rcpt.filename}
                           </div>
                           {isLowResolution(rcpt) && (
                             <div
-                              style={{ fontSize: '0.72rem', color: '#f59e0b', display: 'flex', gap: '4px', marginTop: '4px', fontWeight: 400 }}
+                              className="file-warning"
                               title={`This photo is ${rcpt.image_width}x${rcpt.image_height}. Vouchers read reliably at about 1350x1800.`}
                             >
-                              <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: '2px' }} />
+                              <AlertTriangle size={12} />
                               <span>
                                 This photo may be difficult to read. Try uploading a closer, clearer photo.
                               </span>
@@ -863,7 +921,7 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                           )}
                         </td>
                         <td>
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                          <div className="stack-xs">
                             <span className={`status-pill ${
                               rcpt.status === 'Extracted' ? 'status-extracted' :
                               rcpt.status === 'Processing' ? 'status-processing' :
@@ -874,14 +932,12 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                               {rcpt.status}
                             </span>
                             {rcpt.status === 'Failed' && rcpt.error_message && (
-                              <span style={{ fontSize: '0.72rem', color: '#f43f5e', maxWidth: '260px' }}>
-                                {rcpt.error_message}
-                              </span>
+                              <span className="receipt-error">{rcpt.error_message}</span>
                             )}
                           </div>
                         </td>
                         <td>
-                          <div style={{ display: 'flex', gap: '8px' }}>
+                          <div className="row-actions">
                             <button
                               className="btn btn-secondary btn-sm"
                               onClick={() => handleReviewSingleReceipt(rcpt)}
@@ -907,13 +963,13 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
                                 className="btn btn-secondary btn-sm"
                                 onClick={() => handleRetryReceipt(rcpt)}
                                 title="Retry Extraction"
-                                disabled={isProcessing}
+                                disabled={uploadsLocked}
                               >
                                 <RotateCw size={13} /> Retry
                               </button>
                             )}
 
-                            {rcpt.status !== 'Processing' && (
+                            {rcpt.status !== 'Processing' && !isArchived && (
                               <button
                                 className="btn btn-danger btn-sm"
                                 onClick={() => handleDeleteReceipt(rcpt.id)}
@@ -932,55 +988,57 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
               </div>
             )}
           </div>
+
+          {/* The spreadsheet is imported into Tally by hand, so this is the only
+              record that it happened — and the only way to answer "has this
+              already been posted?" before someone posts it twice. */}
+          {exportHistory.length > 0 && (
+            <div className="card">
+              <h4 className="section-title">
+                <FileSpreadsheet size={17} color="var(--primary)" />
+                Tally exports from this batch ({exportHistory.length})
+              </h4>
+              <div className="table-container">
+                <table className="custom-table">
+                  <thead>
+                    <tr><th>File Name</th><th>Rows</th><th>Generated By</th><th>When</th></tr>
+                  </thead>
+                  <tbody>
+                    {exportHistory.map(record => (
+                      <tr key={record.id}>
+                        <td style={{ fontWeight: 500 }}>{record.file_name}</td>
+                        <td>{record.record_count}</td>
+                        <td className="text-muted">{record.generated_by_name || '—'}</td>
+                        <td className="text-muted text-xs">{record.created_at}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
         )}
       </div>
 
       {/* Delete Confirmation Modal */}
       {deletingBatchId && (
-        <div style={{
-          position: 'fixed', inset: 0, zIndex: 1000,
-          background: 'rgba(0,0,0,0.55)',
-          backdropFilter: 'blur(4px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center'
-        }}>
-          <div style={{
-            background: 'var(--card-bg, #1e1e2e)',
-            border: '1px solid var(--border-color)',
-            borderRadius: '16px',
-            padding: '32px 36px',
-            maxWidth: '420px',
-            width: '90%',
-            boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
-            textAlign: 'center',
-            animation: 'fadeIn 0.2s ease'
-          }}>
-            <div style={{
-              width: '52px', height: '52px', borderRadius: '50%',
-              background: 'rgba(239,68,68,0.15)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              margin: '0 auto 16px auto'
-            }}>
-              <Trash2 size={24} style={{ color: '#ef4444' }} />
+        <div className="modal-overlay">
+          <div className="modal modal-confirm">
+            <div className="modal-icon modal-icon-danger">
+              <Trash2 size={24} />
             </div>
-            <h3 style={{ fontSize: '1.15rem', fontWeight: 700, marginBottom: '8px' }}>Delete Batch?</h3>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '24px', lineHeight: 1.5 }}>
-              Are you sure you want to delete <strong style={{ color: 'var(--text)' }}>"{batches.find(b => b.id === deletingBatchId)?.name}"</strong>? This action cannot be undone.
+            <h3 className="modal-title">Delete Batch?</h3>
+            <p className="modal-text">
+              Are you sure you want to delete <strong>"{batches.find(b => b.id === deletingBatchId)?.name}"</strong>? This action cannot be undone.
             </p>
-            <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
-              <button
-                className="btn btn-secondary"
-                onClick={() => setDeletingBatchId(null)}
-                style={{ minWidth: '110px' }}
-              >
+            <div className="modal-actions">
+              <button className="btn btn-secondary" onClick={() => setDeletingBatchId(null)}>
                 Cancel
               </button>
               <button
-                className="btn btn-danger"
+                className="btn btn-danger btn-danger-solid"
                 onClick={() => handleDeleteBatch(deletingBatchId)}
-                style={{ minWidth: '110px', background: 'linear-gradient(135deg, #ef4444, #dc2626)', boxShadow: '0 2px 8px rgba(239,68,68,0.4)', color: '#ffffff', fontWeight: 600, transition: 'transform 0.15s, box-shadow 0.15s' }}
-                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1.06)'; (e.currentTarget as HTMLButtonElement).style.boxShadow = '0 6px 18px rgba(239,68,68,0.65)'; }}
-                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1)'; (e.currentTarget as HTMLButtonElement).style.boxShadow = '0 2px 8px rgba(239,68,68,0.4)'; }}
               >
                 <Trash2 size={15} /> Yes, Delete
               </button>
@@ -990,121 +1048,50 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
       )}
 
       {previewReceipt && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            zIndex: 1100,
-            background: 'rgba(0,0,0,0.65)',
-            backdropFilter: 'blur(3px)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '20px'
-          }}
-          onClick={() => setPreviewReceipt(null)}
-        >
-          <div
-            className="card"
-            style={{
-              width: 'min(920px, 96vw)',
-              maxHeight: '92vh',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '12px',
-              padding: '18px'
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+        <div className="modal-overlay modal-overlay-top" onClick={() => setPreviewReceipt(null)}>
+          <div className="card preview-card" onClick={(e) => e.stopPropagation()}>
+            <div className="row row-between">
               <h3 style={{ fontSize: '1rem', fontWeight: 700, margin: 0 }}>Image Preview</h3>
-              <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>{previewReceipt.filename}</span>
+              <span className="text-muted text-xs">{previewReceipt.filename}</span>
             </div>
 
-            <div
-              style={{
-                border: '1px solid var(--border-color)',
-                borderRadius: '10px',
-                overflow: 'hidden',
-                background: 'var(--bg-input)',
-                minHeight: '360px',
-                height: '68vh',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                position: 'relative'
-              }}
-            >
+            <div className="preview-stage">
               {isPdfReceipt(previewReceipt) ? (
                 <iframe
+                  className="preview-frame"
                   src={previewReceipt.previewUrl}
                   title={previewReceipt.filename}
-                  style={{ width: '100%', height: '100%', border: 'none' }}
                 />
               ) : (
                 <img
+                  className="preview-img"
                   src={previewReceipt.previewUrl}
                   alt={previewReceipt.filename}
+                  // Rotation swaps which axis is constrained, so these two are
+                  // genuinely dynamic and stay inline.
                   style={{
                     transform: `rotate(${previewRotation}deg)`,
-                    transition: 'transform 0.3s ease',
                     maxWidth: Math.abs(previewRotation % 180) === 90 ? '68vh' : '100%',
                     maxHeight: Math.abs(previewRotation % 180) === 90 ? '100%' : '68vh',
-                    objectFit: 'contain',
-                    display: 'block'
                   }}
                 />
               )}
 
               {!isPdfReceipt(previewReceipt) && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    bottom: '16px',
-                    left: '50%',
-                    transform: 'translateX(-50%)',
-                    display: 'flex',
-                    gap: '10px',
-                    zIndex: 2
-                  }}
-                >
+                <div className="rotate-bar">
                   <button
                     type="button"
+                    className="rotate-btn"
                     title="Rotate Left"
                     onClick={() => setPreviewRotation(r => r - 90)}
-                    style={{
-                      width: '44px',
-                      height: '44px',
-                      borderRadius: '50%',
-                      border: 'none',
-                      background: 'rgba(15, 23, 42, 0.75)',
-                      color: '#fff',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      cursor: 'pointer',
-                      boxShadow: '0 4px 14px rgba(0,0,0,0.35)'
-                    }}
                   >
                     <RotateCcw size={22} />
                   </button>
                   <button
                     type="button"
+                    className="rotate-btn"
                     title="Rotate Right"
                     onClick={() => setPreviewRotation(r => r + 90)}
-                    style={{
-                      width: '44px',
-                      height: '44px',
-                      borderRadius: '50%',
-                      border: 'none',
-                      background: 'rgba(15, 23, 42, 0.75)',
-                      color: '#fff',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      cursor: 'pointer',
-                      boxShadow: '0 4px 14px rgba(0,0,0,0.35)'
-                    }}
                   >
                     <RotateCw size={22} />
                   </button>
@@ -1112,7 +1099,7 @@ export default function BatchWorkspace({ userRole, currentUser, onSelectBatch }:
               )}
             </div>
 
-            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <div className="row row-end">
               <button className="btn btn-secondary" onClick={() => setPreviewReceipt(null)}>
                 Close
               </button>

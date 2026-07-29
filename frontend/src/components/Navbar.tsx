@@ -1,5 +1,5 @@
 import React from 'react';
-import { Layers, User as UserIcon, LogOut, Building2, Sun, Moon, Users, LayoutGrid } from 'lucide-react';
+import { Layers, User as UserIcon, LogOut, Building2, Sun, Moon, Users, LayoutGrid, BookOpen, PieChart } from 'lucide-react';
 import { User, UserRole } from '../types';
 
 interface NavbarProps {
@@ -9,14 +9,22 @@ interface NavbarProps {
   onToggleTheme: () => void;
   /** Absent for roles that cannot manage staff, which hides the control entirely. */
   onManageUsers?: () => void;
+  /** Admin only: the chart of accounts every extraction is matched against. */
+  onManageLedgers?: () => void;
+  /** Admin only: the organisation-wide view of scanning and exports. */
+  onViewOverview?: () => void;
   onGoToWorkspace?: () => void;
-  showingUsers?: boolean;
+  currentView?: string;
 }
 
 export default function Navbar({
   currentUser, onLogout, isDark, onToggleTheme,
-  onManageUsers, onGoToWorkspace, showingUsers
+  onManageUsers, onManageLedgers, onViewOverview, onGoToWorkspace, currentView
 }: NavbarProps) {
+  // The workspace is where the actual work happens, so every other screen keeps
+  // a way straight back to it rather than relying on the browser's back button.
+  const awayFromWorkspace =
+    currentView === 'users' || currentView === 'ledgers' || currentView === 'overview';
   const getRoleClass = (role: UserRole) => {
     switch (role) {
       case 'Super Admin': return 'role-super';
@@ -37,55 +45,55 @@ export default function Navbar({
         </div>
       )}
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+      <div className="nav-right">
         {/* Theme Toggle */}
         <button
+          className="theme-toggle"
           onClick={onToggleTheme}
           title={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
-          style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            width: '36px', height: '36px',
-            borderRadius: '50%',
-            border: '1px solid var(--border-color)',
-            background: 'transparent',
-            backgroundColor: 'transparent',
-            appearance: 'none',
-            WebkitAppearance: 'none',
-            padding: 0,
-            cursor: 'pointer',
-            color: isDark ? '#f59e0b' : '#6366f1',
-            transition: 'all 0.2s ease',
-            boxShadow: 'none',
-          }}
-          onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1.12)'; }}
-          onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1)'; }}
         >
           {isDark ? <Sun size={17} /> : <Moon size={17} />}
         </button>
 
         {currentUser && (
           <div className="nav-user">
-            {onManageUsers && (
-              showingUsers ? (
-                <button className="btn btn-secondary btn-sm" onClick={onGoToWorkspace} title="Back to scan batches">
-                  <LayoutGrid size={15} />
-                  <span>Workspace</span>
-                </button>
-              ) : (
-                <button className="btn btn-secondary btn-sm" onClick={onManageUsers} title="Manage team members">
-                  <Users size={15} />
-                  <span>Team</span>
-                </button>
-              )
+            {awayFromWorkspace ? (
+              <button className="btn btn-secondary btn-sm" onClick={onGoToWorkspace} title="Back to scan batches">
+                <LayoutGrid size={15} />
+                <span>Workspace</span>
+              </button>
+            ) : (
+              <>
+                {onViewOverview && (
+                  <button className="btn btn-secondary btn-sm" onClick={onViewOverview}
+                          title="How your organisation is doing">
+                    <PieChart size={15} />
+                    <span>Overview</span>
+                  </button>
+                )}
+                {onManageLedgers && (
+                  <button className="btn btn-secondary btn-sm" onClick={onManageLedgers}
+                          title="The ledgers extracted names are matched against">
+                    <BookOpen size={15} />
+                    <span>Ledgers</span>
+                  </button>
+                )}
+                {onManageUsers && (
+                  <button className="btn btn-secondary btn-sm" onClick={onManageUsers} title="Manage team members">
+                    <Users size={15} />
+                    <span>Team</span>
+                  </button>
+                )}
+              </>
             )}
 
             <div className="user-badge">
-              <Building2 size={16} color="#94a3b8" />
-              <span style={{ fontWeight: 600 }}>{currentUser.orgName || 'Platform Owner'}</span>
+              <Building2 size={16} color="var(--text-muted)" />
+              <span className="text-strong">{currentUser.orgName || 'Platform Owner'}</span>
             </div>
 
             <div className="user-badge">
-              <UserIcon size={16} color="#94a3b8" />
+              <UserIcon size={16} color="var(--text-muted)" />
               <span>{currentUser.name}</span>
               <span className={`role-tag ${getRoleClass(currentUser.role)}`}>
                 {currentUser.role}
