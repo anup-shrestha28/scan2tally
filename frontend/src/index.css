@@ -1174,8 +1174,19 @@ input[type='number']::-webkit-inner-spin-button {
   flex-direction: column;
   gap: 16px;
 }
+/* Spacing here comes from the column gap. The title/text margins that
+   .modal-confirm needs would stack on top of it. */
+.modal-prompt .modal-title,
+.modal-prompt .modal-text { margin-bottom: 0; }
 .modal-prompt .modal-actions,
-.modal-prompt .row-end { gap: 12px; }
+.modal-prompt .row-end { gap: 12px; justify-content: flex-end; }
+
+/* Icon beside the heading, tinted by severity — the icon carries the colour so
+   the heading itself stays at full contrast against the card. */
+.modal-head { display: flex; align-items: center; gap: 10px; }
+.modal-head .modal-title { color: var(--text-main); }
+.modal-head-danger { color: var(--accent-rose); }
+.modal-head-warning { color: var(--accent-amber); }
 .modal-icon {
   width: 52px;
   height: 52px;

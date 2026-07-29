@@ -29,8 +29,6 @@ import {
  */
 const EXTRACTION_POLL_MS = 3000;
 
-const NOT_JOURNAL_ENTRY_ERROR = 'The uploaded image is not a journal entry. Please check and try again.';
-
 /**
  * Which batch the operator was last looking at, per tab.
  *

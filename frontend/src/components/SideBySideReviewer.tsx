@@ -326,7 +326,6 @@ export default function SideBySideReviewer({
         setSaveError(null);
         dirtyRef.current = false;
         window.setTimeout(() => setSaveState('idle'), 2500);
-        window.setTimeout(() => setSaveState('idle'), 2500);
       } catch (err: any) {
         setSaveState('error');
         setSaveError(err?.message || 'Changes could not be saved.');
@@ -752,16 +751,14 @@ export default function SideBySideReviewer({
       {showImbalanceModal && (
         <div className="modal-overlay modal-overlay-top">
           <div className="modal modal-prompt">
-            <div className="row tone-amber">
+            <div className="modal-head modal-head-warning">
               <AlertTriangle size={24} />
-              <h3 className="modal-title" style={{ marginBottom: 0, color: 'var(--text-main)' }}>
-                Imbalance Detected
-              </h3>
+              <h3 className="modal-title">Imbalance Detected</h3>
             </div>
-            <p className="modal-text" style={{ marginBottom: 0, fontSize: '0.95rem' }}>
+            <p className="modal-text">
               Debit / Credit Imbalance Detected in one or more receipts. Are you sure you want to continue with the export?
             </p>
-            <div className="row row-end" style={{ marginTop: '8px' }}>
+            <div className="modal-actions">
               <button className="btn btn-secondary" onClick={cancelExport}>
                 Cancel
               </button>
@@ -774,27 +771,20 @@ export default function SideBySideReviewer({
       )}
 
       {showDeleteModal && currentReceipt && (
-        <div style={{
-          position: 'fixed', inset: 0, zIndex: 9999,
-          backgroundColor: 'rgba(0, 0, 0, 0.68)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          padding: '20px', backdropFilter: 'blur(4px)'
-        }}>
-          <div className="card" style={{ width: '100%', maxWidth: '430px', padding: '24px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: '#f43f5e', marginBottom: '12px' }}>
+        <div className="modal-overlay modal-overlay-top">
+          <div className="modal modal-prompt">
+            <div className="modal-head modal-head-danger">
               <Trash2 size={22} />
-              <h3 style={{ fontSize: '1.15rem', fontWeight: 700, color: 'var(--text-main)' }}>
-                Delete receipt?
-              </h3>
+              <h3 className="modal-title">Delete receipt?</h3>
             </div>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', lineHeight: 1.5 }}>
-              This will permanently delete <strong style={{ color: 'var(--text-main)' }}>{currentReceipt.filename}</strong> and its extracted data. This action cannot be undone.
+            <p className="modal-text">
+              This will permanently delete <strong>{currentReceipt.filename}</strong> and its extracted data. This action cannot be undone.
             </p>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '22px' }}>
+            <div className="modal-actions">
               <button className="btn btn-secondary" onClick={() => setShowDeleteModal(false)} disabled={deletingReceipt}>
                 Cancel
               </button>
-              <button className="btn btn-danger" onClick={handleDeleteCurrentReceipt} disabled={deletingReceipt}>
+              <button className="btn btn-danger btn-danger-solid" onClick={handleDeleteCurrentReceipt} disabled={deletingReceipt}>
                 {deletingReceipt ? <><Loader2 size={15} className="animate-spin" /> Deleting...</> : <><Trash2 size={15} /> Delete Receipt</>}
               </button>
             </div>
