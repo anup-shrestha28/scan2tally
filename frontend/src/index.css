@@ -138,6 +138,24 @@ body.light {
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.08);
   --shadow-md: 0 4px 12px rgb(0 0 0 / 0.10);
   --shadow-lg: 0 16px 40px rgb(0 0 0 / 0.16);
+
+  /* Compatibility aliases must be rebound in the same scope as the light
+     tokens. If they are only inherited from :root, their nested var() values
+     resolve against the dark root palette and split the page between themes. */
+  --bg-dark: var(--bg-app);
+  --bg-card: var(--bg-surface);
+  --bg-card-hover: var(--bg-surface-2);
+  --bg-input: var(--bg-field);
+  --bg-table-header: var(--bg-surface-2);
+  --border-color: var(--border);
+  --border-focus: var(--primary);
+  --primary-glow: rgb(79 70 229 / 0.18);
+  --text-main: var(--text-1);
+  --text-muted: var(--text-2);
+  --text-dim: var(--text-3);
+  --accent-emerald: var(--ok-text);
+  --accent-amber: var(--warn-text);
+  --accent-rose: var(--danger-text);
 }
 
 /* Digits must align in a column or a transposed figure hides in the stack. */
@@ -159,6 +177,7 @@ body.light .navbar {
 
 body.light ::-webkit-scrollbar-track { background: #f1f5f9; }
 body.light ::-webkit-scrollbar-thumb { background: #cbd5e1; }
+body.light .image-viewer { background: var(--bg-surface-2); }
 
 
 * {
@@ -1604,7 +1623,7 @@ input[type='number']::-webkit-inner-spin-button {
   justify-content: center;
   overflow: hidden;
   padding: var(--sp-4);
-  background: #0b1220;
+  background: var(--bg-field);
 }
 
 .receipt-img {
@@ -1744,7 +1763,7 @@ input[type='number']::-webkit-inner-spin-button {
 .tone-emerald { color: var(--accent-emerald); }
 .tone-amber { color: var(--accent-amber); }
 .tone-rose { color: var(--accent-rose); }
-.tone-indigo { color: #818cf8; }
+.tone-indigo { color: var(--primary-text); }
 
 /* ============================================================
    States
@@ -2604,8 +2623,8 @@ input[type='number']::-webkit-inner-spin-button {
 .totals-warn { background: rgba(245, 158, 11, 0.1); border-color: rgba(245, 158, 11, 0.3); }
 .total-label { display: block; font-size: var(--fs-2xs); color: var(--text-muted); }
 .total-value { font-size: var(--fs-md); font-weight: var(--fw-bold); }
-.total-debit { color: #818cf8; }
-.total-credit { color: #34d399; }
+.total-debit { color: var(--primary-text); }
+.total-credit { color: var(--ok-text); }
 .total-divider { border-left: 1px solid var(--border-color); padding-left: 16px; }
 
 .narration-row {
