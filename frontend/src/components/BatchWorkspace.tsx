@@ -88,6 +88,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const [previewReceipt, setPreviewReceipt] = useState<Receipt | null>(null);
   const [previewRotation, setPreviewRotation] = useState(0);
   const [dragOver, setDragOver] = useState<boolean>(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   // True only while extraction requests are being handed to the server. Once
   // they are accepted the receipts' own Processing status takes over, so this
   // covers just the brief gap before that shows up.
@@ -299,11 +300,20 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     }
     if (batch.receipts.some(r => r.status === 'Processing')) return;
 
+    const runReceipts = batch.receipts.filter(r => pending.receiptIds.includes(r.id));
+    // Never move away from the upload page when any receipt in this run failed.
+    // This is especially important for the "not a journal entry" response:
+    // the failed row and its retry action must remain visible to the user.
+    if (
+      runReceipts.length !== pending.receiptIds.length ||
+      runReceipts.some(r => r.status !== 'Extracted')
+    ) {
+      if (runReceipts.some(r => r.status === 'Failed')) autoOpenRef.current = null;
+      return;
+    }
+
     autoOpenRef.current = null;
-    const firstExtracted = batch.receipts.find(
-      r => pending.receiptIds.includes(r.id) && r.status === 'Extracted'
-    );
-    // If every receipt failed, stay here so the Failed rows and Retry are visible.
+    const firstExtracted = runReceipts[0];
     if (firstExtracted) {
       onSelectBatch(
         batch,
@@ -906,11 +916,18 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
             }}
           >
             <input
+              ref={fileInputRef}
               type="file"
               className="dropzone-input"
               multiple
               accept="image/*,.pdf"
-              onChange={handleFileUpload}
+              onChange={e => {
+                handleFileUpload(e);
+                // Clearing the value lets the same filename be picked again
+                // after it was removed — otherwise the browser sees no change
+                // and the second upload silently does nothing.
+                e.currentTarget.value = '';
+              }}
               disabled={uploadsLocked}
             />
             <div className="dropzone-icon">
@@ -932,6 +949,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                 <Camera size={14} /> Upload Photo / Browse Files
               </span>
             </div>
+            <span className="upload-hint">Supports JPG, PNG, WEBP, and PDF · Multiple files allowed</span>
           </div>
 
           <div className="card">
@@ -997,19 +1015,6 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                             >
                               Preview Image
                             </button>
-
-                            {/* The way back into extracted rows on a later
-                                visit — without this the reviewer is reachable
-                                only in the session that ran the extraction. */}
-                            {rcpt.status === 'Extracted' && (
-                              <button
-                                className="btn btn-primary btn-sm"
-                                onClick={() => handleOpenReviewer(rcpt)}
-                                title="Review and edit the extracted rows"
-                              >
-                                Review &amp; Edit
-                              </button>
-                            )}
 
                             {rcpt.status === 'Failed' && (
                               <button

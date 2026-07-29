@@ -433,6 +433,30 @@ export default function SideBySideReviewer({
   const hasPrev = currentIndex > 0;
   const hasNext = currentIndex < visibleReceipts.length - 1;
 
+  // Let reviewers move between receipts without reaching for the mouse.
+  // Form fields keep the native left/right cursor behavior while editing.
+  useEffect(() => {
+    const handlePaginationKey = (event: KeyboardEvent) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      if (showDeleteModal || showImbalanceModal) return;
+
+      const target = event.target as HTMLElement | null;
+      const tagName = target?.tagName;
+      if (tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT' || target?.isContentEditable) return;
+
+      const nextIndex = event.key === 'ArrowLeft'
+        ? (hasPrev ? currentIndex - 1 : null)
+        : (hasNext ? currentIndex + 1 : null);
+      if (nextIndex === null) return;
+
+      event.preventDefault();
+      saveCurrentTx(nextIndex);
+    };
+
+    window.addEventListener('keydown', handlePaginationKey);
+    return () => window.removeEventListener('keydown', handlePaginationKey);
+  }, [currentIndex, hasPrev, hasNext, showDeleteModal, showImbalanceModal, transactions, currentReceipt?.id]);
+
   const stepClass = (active: boolean) => `nav-step${active ? ' nav-step-active' : ''}`;
 
   return (

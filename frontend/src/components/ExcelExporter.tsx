@@ -9,6 +9,7 @@ interface ExcelExporterProps {
   transactions: Transaction[];
   batch: ScanBatch | null;
   currentUser: User;
+  receiptNames?: Record<string, string>;
   onBack: () => void;
 }
 
@@ -40,9 +41,10 @@ const formatAmt = (n: number | undefined | null): string => {
   return Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 
-export default function ExcelExporter({ transactions, batch, currentUser, onBack }: ExcelExporterProps) {
+export default function ExcelExporter({ transactions, receiptNames = {}, batch, currentUser, onBack }: ExcelExporterProps) {
   const [downloading, setDownloading] = useState(false);
   const [recordError, setRecordError] = useState<string | null>(null);
+  const [showImbalanceWarning, setShowImbalanceWarning] = useState(false);
 
   // Group transactions by receipt_id so we can format each receipt as a separate voucher block
   const groupedTransactions: Record<string, Transaction[]> = {};
@@ -61,8 +63,31 @@ export default function ExcelExporter({ transactions, batch, currentUser, onBack
     ? transactions.filter(t => t.ledger_match === 'Unmatched' || t.ledger_match === 'Suggested')
     : [];
   const unresolvedNames = [...new Set(unresolved.map(t => t.ledger_name).filter(Boolean))];
+  const imbalancedGroups = groups.map((groupTxs, index) => {
+    const debit = groupTxs.reduce((sum, t) => sum + (Number(t.debit_amount) || 0), 0);
+    const credit = groupTxs.reduce((sum, t) => sum + (Number(t.credit_amount) || 0), 0);
+    const difference = Math.round((debit - credit) * 100) / 100;
+    const receiptId = groupTxs[0]?.receipt_id || 'default';
+    return {
+      name: receiptNames[receiptId] || `Journal ${index + 1}`,
+      debit,
+      credit,
+      difference,
+    };
+  }).filter(group => Math.abs(group.difference) >= 0.01);
+
+  // An unbalanced voucher is not blocked, but it is never exported silently:
+  // the confirmation names which ones, so the decision is made knowingly.
+  const handleDownloadClick = () => {
+    if (imbalancedGroups.length) {
+      setShowImbalanceWarning(true);
+      return;
+    }
+    generateAndDownloadExcel();
+  };
 
   const generateAndDownloadExcel = async () => {
+    setShowImbalanceWarning(false);
     setDownloading(true);
     try {
       await buildAndDownload();
@@ -205,7 +230,7 @@ export default function ExcelExporter({ transactions, batch, currentUser, onBack
         </button>
         <button
           className="btn btn-primary export-download-btn"
-          onClick={generateAndDownloadExcel}
+          onClick={handleDownloadClick}
           disabled={downloading}
         >
           {downloading
@@ -329,6 +354,41 @@ export default function ExcelExporter({ transactions, batch, currentUser, onBack
           })}
         </div>
       </div>
+
+      {showImbalanceWarning && (
+        <div className="modal-overlay modal-overlay-top">
+          <div className="modal modal-prompt">
+            <div className="modal-head modal-head-warning">
+              <AlertTriangle size={23} />
+              <h3 className="modal-title">Imbalance Detected</h3>
+            </div>
+            <p className="modal-text">
+              These vouchers do not balance. Tally will not post them as written.
+              Download the file anyway?
+            </p>
+            {/* Naming them is the point: "one or more receipts" sends the
+                accountant back to hunt through the whole batch. */}
+            <ul className="imbalance-list">
+              {imbalancedGroups.map(group => (
+                <li key={group.name}>
+                  <span className="imbalance-name">{group.name}</span>
+                  <span className="imbalance-diff">
+                    off by Rs. {Math.abs(group.difference).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <div className="modal-actions">
+              <button className="btn btn-secondary" onClick={() => setShowImbalanceWarning(false)}>
+                Cancel
+              </button>
+              <button className="btn btn-warning" onClick={generateAndDownloadExcel}>
+                Download Anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

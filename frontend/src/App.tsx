@@ -14,7 +14,28 @@ import { supabase } from './lib/supabase';
 import { fetchCurrentUser, signOut } from './lib/db';
 import { LEDGER_MATCHING } from './lib/features';
 
+type AppView = 'batches' | 'reviewer' | 'exporter' | 'users' | 'overview' | 'ledgers';
+const APP_VIEW_STORAGE_KEY = 'scan2tally-current-view';
+const APP_STATE_STORAGE_KEY = 'scan2tally-current-state';
+
+function readSavedAppState(): {
+  view?: AppView;
+  activeBatch?: ScanBatch | null;
+  selectedReceipt?: Receipt | null;
+  liveTransactions?: Transaction[];
+  activeTransactions?: Transaction[];
+  receiptTransactions?: Record<string, Transaction[]>;
+} {
+  try {
+    const saved = sessionStorage.getItem(APP_STATE_STORAGE_KEY);
+    return saved ? JSON.parse(saved) : {};
+  } catch {
+    return {};
+  }
+}
+
 export default function App() {
+  const savedState = readSavedAppState();
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   // Distinguishes "still checking for a saved session" from "definitely signed
   // out", so a returning user is not flashed the login form before their
@@ -22,18 +43,33 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
 
-  const [currentView, setCurrentView] =
-    useState<'batches' | 'reviewer' | 'exporter' | 'users' | 'overview' | 'ledgers'>('batches');
-  const [activeBatch, setActiveBatch] = useState<ScanBatch | null>(null);
-  const [selectedReceipt, setSelectedReceipt] = useState<Receipt | null>(null);
-  const [liveExtractedTransactions, setLiveExtractedTransactions] = useState<Transaction[]>([]);
-  const [activeTransactions, setActiveTransactions] = useState<Transaction[]>([]);
-  const [allReceiptTransactions, setAllReceiptTransactions] = useState<Record<string, Transaction[]>>({});
+  const [currentView, setCurrentView] = useState<AppView>(() => {
+    const savedView = sessionStorage.getItem(APP_VIEW_STORAGE_KEY);
+    return savedView === 'reviewer' || savedView === 'exporter' || savedView === 'users'
+      ? savedView
+      : 'batches';
+  });
+  const [activeBatch, setActiveBatch] = useState<ScanBatch | null>(savedState.activeBatch || null);
+  const [selectedReceipt, setSelectedReceipt] = useState<Receipt | null>(savedState.selectedReceipt || null);
+  const [liveExtractedTransactions, setLiveExtractedTransactions] = useState<Transaction[]>(savedState.liveTransactions || []);
+  const [activeTransactions, setActiveTransactions] = useState<Transaction[]>(savedState.activeTransactions || []);
+  const [allReceiptTransactions, setAllReceiptTransactions] = useState<Record<string, Transaction[]>>(savedState.receiptTransactions || {});
   const [isDark, setIsDark] = useState<boolean>(true);
 
   useEffect(() => {
     document.body.classList.toggle('light', !isDark);
   }, [isDark]);
+
+  useEffect(() => {
+    sessionStorage.setItem(APP_VIEW_STORAGE_KEY, currentView);
+    sessionStorage.setItem(APP_STATE_STORAGE_KEY, JSON.stringify({
+      activeBatch,
+      selectedReceipt,
+      liveTransactions: liveExtractedTransactions,
+      activeTransactions,
+      receiptTransactions: allReceiptTransactions,
+    }));
+  }, [currentView, activeBatch, selectedReceipt, liveExtractedTransactions, activeTransactions, allReceiptTransactions]);
 
   const loadProfile = async () => {
     try {
@@ -72,6 +108,8 @@ export default function App() {
         setSelectedReceipt(null);
         setAllReceiptTransactions({});
         setCurrentView('batches');
+        sessionStorage.removeItem(APP_VIEW_STORAGE_KEY);
+        sessionStorage.removeItem(APP_STATE_STORAGE_KEY);
         setAuthLoading(false);
       } else if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
         loadProfile();
@@ -203,6 +241,7 @@ export default function App() {
         ) : (
           <ExcelExporter
             transactions={activeTransactions}
+            receiptNames={Object.fromEntries((activeBatch?.receipts || []).map(receipt => [receipt.id, receipt.filename]))}
             batch={activeBatch}
             currentUser={currentUser}
             onBack={() => setCurrentView('reviewer')}
