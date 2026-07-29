@@ -1,10 +1,11 @@
-import React from 'react';
-import { Download, ArrowLeft } from 'lucide-react';
+import React, { useState } from 'react';
+import { Download, ArrowLeft, AlertTriangle } from 'lucide-react';
 import ExcelJS from 'exceljs';
 import { Transaction } from '../types';
 
 interface ExcelExporterProps {
   transactions: Transaction[];
+  receiptNames?: Record<string, string>;
   onBack: () => void;
 }
 
@@ -36,7 +37,8 @@ const formatAmt = (n: number | undefined | null): string => {
   return Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 
-export default function ExcelExporter({ transactions, onBack }: ExcelExporterProps) {
+export default function ExcelExporter({ transactions, receiptNames = {}, onBack }: ExcelExporterProps) {
+  const [showImbalanceWarning, setShowImbalanceWarning] = useState(false);
   // Group transactions by receipt_id so we can format each receipt as a separate voucher block
   const groupedTransactions: Record<string, Transaction[]> = {};
   transactions.forEach(t => {
@@ -45,6 +47,19 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
     groupedTransactions[key].push(t);
   });
   const groups = Object.values(groupedTransactions);
+
+  const imbalancedGroups = groups.map((groupTxs, index) => {
+    const debit = groupTxs.reduce((sum, t) => sum + (Number(t.debit_amount) || 0), 0);
+    const credit = groupTxs.reduce((sum, t) => sum + (Number(t.credit_amount) || 0), 0);
+    const difference = Math.round((debit - credit) * 100) / 100;
+    const receiptId = groupTxs[0]?.receipt_id || 'default';
+    return {
+      name: receiptNames[receiptId] || `Journal ${index + 1}`,
+      debit,
+      credit,
+      difference,
+    };
+  }).filter(group => Math.abs(group.difference) >= 0.01);
 
   const generateAndDownloadExcel = async () => {
     const workbook = new ExcelJS.Workbook();
@@ -144,10 +159,16 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
 
   };
 
+  const handleDownloadClick = () => {
+    if (imbalancedGroups.length) {
+      setShowImbalanceWarning(true);
+      return;
+    }
+    generateAndDownloadExcel();
+  };
+
   const totalDebit = transactions.reduce((acc, curr) => acc + (Number(curr.debit_amount) || 0), 0);
   const totalCredit = transactions.reduce((acc, curr) => acc + (Number(curr.credit_amount) || 0), 0);
-  const balanceDifference = totalDebit - totalCredit;
-  const isBalanced = Math.abs(balanceDifference) < 0.01;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', maxWidth: '1050px', margin: '0 auto' }}>
@@ -156,7 +177,7 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
           <ArrowLeft size={16} />
           Back to Review & Edit
         </button>
-        <button className="btn btn-primary export-download-btn" onClick={generateAndDownloadExcel}>
+        <button className="btn btn-primary export-download-btn" onClick={handleDownloadClick}>
           <Download size={18} />
           Download Excel (.xlsx)
         </button>
@@ -176,11 +197,6 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
               <span>Total Debit: <strong style={{ color: '#818cf8' }}>Rs. {totalDebit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong></span>
               <span>Total Credit: <strong style={{ color: '#34d399' }}>Rs. {totalCredit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong></span>
             </div>
-            {!isBalanced && (
-              <span style={{ color: '#f87171', fontWeight: 600 }}>
-                Unbalanced by Rs. {Math.abs(balanceDifference).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-              </span>
-            )}
           </div>
         </div>
 
@@ -261,6 +277,38 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
           })}
         </div>
       </div>
+
+      {showImbalanceWarning && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: '20px', background: 'rgba(0, 0, 0, 0.62)',
+          backdropFilter: 'blur(4px)'
+        }}>
+          <div className="card" style={{ width: '100%', maxWidth: '460px', padding: '24px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: '#f59e0b', marginBottom: '12px' }}>
+              <AlertTriangle size={23} />
+              <h3 style={{ color: 'var(--text-main)', fontSize: '1.15rem' }}>Imbalance Detected</h3>
+            </div>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.96rem', lineHeight: 1.55, marginBottom: '14px' }}>
+              Debit / Credit Imbalance Detected in one or more receipts. Do you want to download the Excel file anyway?
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '20px' }}>
+              <button className="btn btn-secondary" onClick={() => setShowImbalanceWarning(false)}>Cancel</button>
+              <button
+                className="btn btn-primary excel-download-anyway-btn"
+                onClick={() => {
+                  setShowImbalanceWarning(false);
+                  generateAndDownloadExcel();
+                }}
+                style={{ background: '#f59e0b', borderColor: '#f59e0b' }}
+              >
+                <span style={{ fontSize: '0.92rem' }}>Download Anyway</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

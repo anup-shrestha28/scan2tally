@@ -221,6 +221,22 @@ body {
   font-family: inherit;
 }
 
+/* Consistent feedback for every interactive button. Inline button styles can
+   still provide their own colour/scale treatment where needed. */
+button:not(:disabled) {
+  transition: transform 160ms ease, box-shadow 160ms ease, filter 160ms ease;
+}
+
+button:not(:disabled):hover {
+  transform: translateY(-2px);
+  filter: brightness(1.04);
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.2);
+}
+
+button:not(:disabled):active {
+  transform: translateY(0);
+}
+
 .btn-primary {
   background-color: var(--primary);
   color: white;
@@ -512,6 +528,26 @@ body {
   margin-top: 14px;
   color: var(--text-dim);
   font-size: 0.72rem;
+}
+
+.imbalance-proceed-btn {
+  transition: transform 160ms ease, box-shadow 160ms ease, background-color 160ms ease;
+}
+
+.imbalance-proceed-btn:hover {
+  background: #d97706 !important;
+  box-shadow: 0 6px 16px rgba(245, 158, 11, 0.3);
+  transform: translateY(-1px);
+}
+
+.excel-download-anyway-btn {
+  transition: transform 160ms ease, box-shadow 160ms ease, background-color 160ms ease;
+}
+
+.excel-download-anyway-btn:hover {
+  background: #d97706 !important;
+  box-shadow: 0 6px 16px rgba(245, 158, 11, 0.3);
+  transform: translateY(-1px) scale(1.02);
 }
 
 .files-card {
