@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, MoreHorizontal, ChevronLeft, ChevronRight } from 'lucide-react';
-import { ScanBatch, Receipt, User, Transaction } from '../types';
+import { ScanBatch, Receipt, ReceiptStatus, User, Transaction } from '../types';
+import StatusFilter from './StatusFilter';
 import {
   newId,
   fetchBatches,
@@ -51,6 +52,7 @@ const BATCHES_PER_PAGE = 7;
 const DEFAULT_RECEIPTS_PER_PAGE = 10;
 
 type PaginationItem = number | 'start-ellipsis' | 'end-ellipsis';
+type ReceiptStatusFilter = 'All' | ReceiptStatus | 'Needs Review';
 
 /** Keeps long pagination compact while always exposing the first and last page. */
 function getPaginationItems(currentPage: number, pageCount: number): PaginationItem[] {
@@ -107,6 +109,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const [batchPage, setBatchPage] = useState(1);
   const [receiptPage, setReceiptPage] = useState(1);
   const [receiptsPerPage, setReceiptsPerPage] = useState(DEFAULT_RECEIPTS_PER_PAGE);
+  const [receiptStatusFilter, setReceiptStatusFilter] = useState<ReceiptStatusFilter>('All');
   const filesPanelRef = useRef<HTMLElement | null>(null);
   const [editedBatchName, setEditedBatchName] = useState<string>('');
   const [deletingBatchId, setDeletingBatchId] = useState<string | null>(null);
@@ -153,9 +156,20 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const activeBatch: ScanBatch | undefined =
     visibleBatches.find(b => b.id === activeBatchId) || visibleBatches[0];
   const activeReceipts = activeBatch?.receipts ?? [];
-  const receiptPageCount = Math.max(1, Math.ceil(activeReceipts.length / receiptsPerPage));
+  const receiptNeedsReview = (receipt: Receipt) =>
+    receipt.status === 'Extracted' &&
+    (receiptTransactionsMap[receipt.id] || []).some(row => row.needs_review);
+  const filteredReceipts = activeReceipts.filter(receipt => {
+    if (receiptStatusFilter === 'All') return true;
+    if (receiptStatusFilter === 'Needs Review') return receiptNeedsReview(receipt);
+    if (receiptStatusFilter === 'Extracted') {
+      return receipt.status === 'Extracted' && !receiptNeedsReview(receipt);
+    }
+    return receipt.status === receiptStatusFilter;
+  });
+  const receiptPageCount = Math.max(1, Math.ceil(filteredReceipts.length / receiptsPerPage));
   const receiptPageStart = (receiptPage - 1) * receiptsPerPage;
-  const paginatedReceipts = activeReceipts.slice(receiptPageStart, receiptPageStart + receiptsPerPage);
+  const paginatedReceipts = filteredReceipts.slice(receiptPageStart, receiptPageStart + receiptsPerPage);
   // An archived batch is a record, not a workspace. It stays fully readable and
   // exportable; what stops is adding to it.
   const isArchived = activeBatch?.status === 'Archived';
@@ -557,7 +571,9 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
       }
       return b;
     }));
-    setReceiptPage(Math.ceil((activeReceipts.length + newReceipts.length) / receiptsPerPage));
+    if (receiptStatusFilter === 'All' || receiptStatusFilter === 'Pending') {
+      setReceiptPage(Math.ceil((filteredReceipts.length + newReceipts.length) / receiptsPerPage));
+    }
 
     // Persist the row first so the receipt survives a refresh even if the
     // image upload is still running, then attach the stored image. The promise
@@ -1101,14 +1117,47 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                 <h4 className="section-title">Receipt files</h4>
                 <p>Review extracted entries or preview the original upload.</p>
               </div>
-              <span className="files-count">
-                {activeBatch.receipts.length} {activeBatch.receipts.length === 1 ? 'file' : 'files'}
-              </span>
+              <div className="files-panel-actions">
+                <StatusFilter
+                  value={receiptStatusFilter}
+                  onChange={value => {
+                    setReceiptStatusFilter(value);
+                    setReceiptPage(1);
+                  }}
+                  ariaLabel="Filter receipt files by status"
+                  options={[
+                    { value: 'All', label: `All statuses (${activeReceipts.length})` },
+                    { value: 'Needs Review', label: `Needs review (${activeReceipts.filter(receiptNeedsReview).length})` },
+                    { value: 'Extracted', label: `Extracted (${activeReceipts.filter(receipt => receipt.status === 'Extracted' && !receiptNeedsReview(receipt)).length})` },
+                    { value: 'Processing', label: `Processing (${activeReceipts.filter(receipt => receipt.status === 'Processing').length})` },
+                    { value: 'Pending', label: `Pending (${activeReceipts.filter(receipt => receipt.status === 'Pending').length})` },
+                    { value: 'Failed', label: `Failed (${activeReceipts.filter(receipt => receipt.status === 'Failed').length})` },
+                  ]}
+                />
+                <span className="files-count">
+                  {receiptStatusFilter === 'All'
+                    ? `${activeReceipts.length} ${activeReceipts.length === 1 ? 'file' : 'files'}`
+                    : `${filteredReceipts.length} of ${activeReceipts.length}`}
+                </span>
+              </div>
             </div>
 
             {!activeBatch.receipts.length ? (
               <div className="table-empty text-sm" style={{ padding: '24px' }}>
                 No receipts uploaded in this batch yet. Use the upload box above to add paper receipt photos.
+              </div>
+            ) : !filteredReceipts.length ? (
+              <div className="filtered-empty">
+                <span>No receipts match this status.</span>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => {
+                    setReceiptStatusFilter('All');
+                    setReceiptPage(1);
+                  }}
+                >
+                  Show all receipts
+                </button>
               </div>
             ) : (
               <>
@@ -1213,10 +1262,10 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                   </table>
                 </div>
 
-                {activeReceipts.length > DEFAULT_RECEIPTS_PER_PAGE && (
+                {filteredReceipts.length > DEFAULT_RECEIPTS_PER_PAGE && (
                   <div className="files-pagination">
                     <span className="pagination-summary" aria-live="polite">
-                      Showing {receiptPageStart + 1}–{Math.min(receiptPageStart + receiptsPerPage, activeReceipts.length)} of {activeReceipts.length}
+                      Showing {receiptPageStart + 1}–{Math.min(receiptPageStart + receiptsPerPage, filteredReceipts.length)} of {filteredReceipts.length}
                     </span>
 
                     <label className="page-size-control">

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Building2, Plus, CheckCircle2, XCircle, Loader2, AlertCircle } from 'lucide-react';
-import { Organization } from '../types';
+import { Organization, OrgStatus } from '../types';
+import StatusFilter from './StatusFilter';
 import {
   fetchOrganizationsWithStats,
   createOrganization,
@@ -8,15 +9,21 @@ import {
   fetchPlatformStats,
 } from '../lib/db';
 
+type OrganizationStatusFilter = 'All' | OrgStatus;
+
 export default function SuperAdminDashboard() {
   const [orgs, setOrgs] = useState<Organization[]>([]);
   const [stats, setStats] = useState({ activeUsers: 0, receipts: 0, batches: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<OrganizationStatusFilter>('All');
 
   const [newOrgName, setNewOrgName] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
+  const filteredOrgs = statusFilter === 'All'
+    ? orgs
+    : orgs.filter(org => org.status === statusFilter);
 
   const load = async () => {
     try {
@@ -154,10 +161,22 @@ export default function SuperAdminDashboard() {
       )}
 
       <div className="card">
-        <h3 className="section-title section-title-lg">
-          <Building2 size={20} color="var(--primary)" />
-          Subscribed Client Organizations
-        </h3>
+        <div className="table-section-toolbar">
+          <h3 className="section-title section-title-lg">
+            <Building2 size={20} color="var(--primary)" />
+            Subscribed Client Organizations
+          </h3>
+          <StatusFilter
+            value={statusFilter}
+            onChange={setStatusFilter}
+            ariaLabel="Filter organizations by status"
+            options={[
+              { value: 'All', label: `All statuses (${orgs.length})` },
+              { value: 'Active', label: `Active (${orgs.filter(org => org.status === 'Active').length})` },
+              { value: 'Inactive', label: `Inactive (${orgs.filter(org => org.status === 'Inactive').length})` },
+            ]}
+          />
+        </div>
 
         <div className="table-container">
           <table className="custom-table">
@@ -171,13 +190,15 @@ export default function SuperAdminDashboard() {
               </tr>
             </thead>
             <tbody>
-              {orgs.length === 0 ? (
+              {filteredOrgs.length === 0 ? (
                 <tr>
                   <td colSpan={5} className="table-empty">
-                    No client organizations yet.
+                    {orgs.length === 0
+                      ? 'No client organizations yet.'
+                      : `No ${statusFilter.toLowerCase()} organizations.`}
                   </td>
                 </tr>
-              ) : orgs.map((org) => (
+              ) : filteredOrgs.map((org) => (
                 <tr key={org.id}>
                   <td className="text-strong">{org.name}</td>
                   <td>

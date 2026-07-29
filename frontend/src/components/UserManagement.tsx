@@ -3,8 +3,9 @@ import {
   UserPlus, Users, Loader2,
   AlertCircle, CheckCircle2, XCircle, ArrowLeft, Eye, EyeOff
 } from 'lucide-react';
-import { User, UserRole } from '../types';
+import { User, UserRole, UserStatus } from '../types';
 import { fetchOrgUsers, createUserAccount, setUserStatus, fetchOrganizations } from '../lib/db';
+import StatusFilter from './StatusFilter';
 
 interface UserManagementProps {
   currentUser: User;
@@ -16,6 +17,8 @@ const ROLE_STYLES: Record<UserRole, string> = {
   'Admin': 'role-admin',
   'Operator': 'role-operator',
 };
+
+type UserStatusFilter = 'All' | UserStatus;
 
 const toTitleCase = (value: string) =>
   value.trim().toLocaleLowerCase().replace(/(^|[\s'-])(\p{L})/gu, (_, separator, letter) =>
@@ -30,6 +33,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
   const activeOrgs = orgs.filter(o => o.status === 'Active');
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<UserStatusFilter>('All');
 
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState('');
@@ -73,6 +77,9 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
         return getSortRank(a) - getSortRank(b) || a.name.localeCompare(b.name);
       })
     : users;
+  const filteredUsers = statusFilter === 'All'
+    ? displayedUsers
+    : displayedUsers.filter(user => user.status === statusFilter);
 
   const resetForm = () => {
     setName(''); setEmail(''); setPassword(''); setDesignation('');
@@ -155,11 +162,23 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
           </div>
         </div>
 
-        {!showForm && (
-          <button className="btn btn-primary" onClick={() => { setShowForm(true); setFormError(null); }}>
-            <UserPlus size={17} /> Add Team Member
-          </button>
-        )}
+        <div className="page-header-actions">
+          <StatusFilter
+            value={statusFilter}
+            onChange={setStatusFilter}
+            ariaLabel="Filter team members by status"
+            options={[
+              { value: 'All', label: `All statuses (${users.length})` },
+              { value: 'Active', label: `Active (${users.filter(user => user.status === 'Active').length})` },
+              { value: 'Inactive', label: `Inactive (${users.filter(user => user.status === 'Inactive').length})` },
+            ]}
+          />
+          {!showForm && (
+            <button className="btn btn-primary" onClick={() => { setShowForm(true); setFormError(null); }}>
+              <UserPlus size={17} /> Add Team Member
+            </button>
+          )}
+        </div>
       </div>
 
       {notice && (
@@ -291,13 +310,15 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
               </tr>
             </thead>
             <tbody>
-              {users.length === 0 ? (
+              {filteredUsers.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="table-empty">
-                    No team members yet.
+                    {users.length === 0
+                      ? 'No team members yet.'
+                      : `No ${statusFilter.toLowerCase()} team members.`}
                   </td>
                 </tr>
-              ) : displayedUsers.map(u => {
+              ) : filteredUsers.map(u => {
                 const isSelf = u.id === currentUser.id;
                 const roleClass = ROLE_STYLES[u.role];
                 return (
