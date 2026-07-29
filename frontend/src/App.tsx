@@ -3,6 +3,8 @@ import { Loader2 } from 'lucide-react';
 import Navbar from './components/Navbar';
 import LoginModal from './components/LoginModal';
 import SuperAdminDashboard from './components/SuperAdminDashboard';
+import AdminDashboard from './components/AdminDashboard';
+import LedgerManager from './components/LedgerManager';
 import UserManagement from './components/UserManagement';
 import BatchWorkspace from './components/BatchWorkspace';
 import SideBySideReviewer from './components/SideBySideReviewer';
@@ -10,6 +12,7 @@ import ExcelExporter from './components/ExcelExporter';
 import { User, ScanBatch, Receipt, Transaction } from './types';
 import { supabase } from './lib/supabase';
 import { fetchCurrentUser, signOut } from './lib/db';
+import { LEDGER_MATCHING } from './lib/features';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -19,7 +22,8 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
 
-  const [currentView, setCurrentView] = useState<'batches' | 'reviewer' | 'exporter' | 'users'>('batches');
+  const [currentView, setCurrentView] =
+    useState<'batches' | 'reviewer' | 'exporter' | 'users' | 'overview' | 'ledgers'>('batches');
   const [activeBatch, setActiveBatch] = useState<ScanBatch | null>(null);
   const [selectedReceipt, setSelectedReceipt] = useState<Receipt | null>(null);
   const [liveExtractedTransactions, setLiveExtractedTransactions] = useState<Transaction[]>([]);
@@ -132,29 +136,31 @@ export default function App() {
             ? () => setCurrentView('users')
             : undefined
         }
+        // The chart of accounts and the organisation overview are an Admin's
+        // responsibility; an Operator has no use for either and cannot write to
+        // the first, so neither control is shown to them at all.
+        onManageLedgers={
+          LEDGER_MATCHING && currentUser?.role === 'Admin'
+            ? () => setCurrentView('ledgers')
+            : undefined
+        }
+        onViewOverview={
+          currentUser?.role === 'Admin' ? () => setCurrentView('overview') : undefined
+        }
         onGoToWorkspace={() => setCurrentView('batches')}
-        showingUsers={currentView === 'users'}
+        currentView={currentView}
       />
 
       <main className="main-content">
         {authLoading ? (
-          <div style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            gap: '10px', minHeight: 'calc(100vh - 160px)', color: 'var(--text-muted)'
-          }}>
+          <div className="loading-state loading-state-page">
             <Loader2 size={18} className="animate-spin" />
             Loading your account...
           </div>
         ) : !currentUser ? (
           <>
             {authError && (
-              <div style={{
-                maxWidth: '440px', margin: '0 auto 12px auto',
-                background: 'rgba(244, 63, 94, 0.12)',
-                border: '1px solid rgba(244, 63, 94, 0.35)',
-                color: '#f43f5e', borderRadius: 'var(--radius-md)',
-                padding: '10px 12px', fontSize: '0.82rem'
-              }}>
+              <div className="alert alert-error" style={{ maxWidth: '440px', margin: '0 auto 12px auto' }}>
                 {authError}
               </div>
             )}
@@ -167,9 +173,20 @@ export default function App() {
           />
         ) : currentUser.role === 'Super Admin' ? (
           <SuperAdminDashboard />
+        ) : currentView === 'ledgers' && LEDGER_MATCHING ? (
+          <LedgerManager
+            currentUser={currentUser}
+            onBack={() => setCurrentView('batches')}
+          />
+        ) : currentView === 'overview' ? (
+          <AdminDashboard
+            currentUser={currentUser}
+            onOpenWorkspace={() => setCurrentView('batches')}
+            onOpenLedgers={() => setCurrentView('ledgers')}
+            onOpenTeam={() => setCurrentView('users')}
+          />
         ) : currentView === 'batches' ? (
           <BatchWorkspace
-            userRole={currentUser.role}
             currentUser={currentUser}
             onSelectBatch={handleSelectBatch}
           />
@@ -184,9 +201,11 @@ export default function App() {
             onExportExcel={handleExportExcel}
           />
         ) : (
-          <ExcelExporter 
-            transactions={activeTransactions} 
-            onBack={() => setCurrentView('reviewer')} 
+          <ExcelExporter
+            transactions={activeTransactions}
+            batch={activeBatch}
+            currentUser={currentUser}
+            onBack={() => setCurrentView('reviewer')}
           />
         )}
       </main>

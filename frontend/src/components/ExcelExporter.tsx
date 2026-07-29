@@ -1,10 +1,14 @@
-import React from 'react';
-import { Download, ArrowLeft } from 'lucide-react';
+import React, { useState } from 'react';
+import { Download, ArrowLeft, AlertTriangle, Loader2 } from 'lucide-react';
 import ExcelJS from 'exceljs';
-import { Transaction } from '../types';
+import { ScanBatch, Transaction, User } from '../types';
+import { recordExport } from '../lib/db';
+import { LEDGER_MATCHING } from '../lib/features';
 
 interface ExcelExporterProps {
   transactions: Transaction[];
+  batch: ScanBatch | null;
+  currentUser: User;
   onBack: () => void;
 }
 
@@ -36,7 +40,10 @@ const formatAmt = (n: number | undefined | null): string => {
   return Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 
-export default function ExcelExporter({ transactions, onBack }: ExcelExporterProps) {
+export default function ExcelExporter({ transactions, batch, currentUser, onBack }: ExcelExporterProps) {
+  const [downloading, setDownloading] = useState(false);
+  const [recordError, setRecordError] = useState<string | null>(null);
+
   // Group transactions by receipt_id so we can format each receipt as a separate voucher block
   const groupedTransactions: Record<string, Transaction[]> = {};
   transactions.forEach(t => {
@@ -46,7 +53,25 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
   });
   const groups = Object.values(groupedTransactions);
 
+  // Names Tally has no account for. It will not reject them — it will create a
+  // new ledger for each, which is how one account's balance ends up split in
+  // two. Last chance to say so before the file leaves. Nothing to say when there
+  // is no chart of accounts to have checked them against.
+  const unresolved = LEDGER_MATCHING
+    ? transactions.filter(t => t.ledger_match === 'Unmatched' || t.ledger_match === 'Suggested')
+    : [];
+  const unresolvedNames = [...new Set(unresolved.map(t => t.ledger_name).filter(Boolean))];
+
   const generateAndDownloadExcel = async () => {
+    setDownloading(true);
+    try {
+      await buildAndDownload();
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const buildAndDownload = async () => {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Goshwara Import');
 
@@ -132,16 +157,38 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
       }
     });
 
+    const fileName = `Tally_Goshwara_Import_${new Date().toISOString().split('T')[0]}.xlsx`;
+
     const buffer = await workbook.xlsx.writeBuffer();
     const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `Tally_Goshwara_Import_${new Date().toISOString().split('T')[0]}.xlsx`;
+    link.download = fileName;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
 
+    // The spreadsheet is imported into Tally by hand, so this row is the only
+    // trace it ever existed — and the only way to answer "has this batch
+    // already been posted, and by whom?" when someone suspects a double entry.
+    // Recorded after the download so a failure here cannot cost the file.
+    if (batch) {
+      try {
+        await recordExport({
+          batchId: batch.id,
+          userId: currentUser.id,
+          fileName,
+          recordCount: transactions.length,
+        });
+        setRecordError(null);
+      } catch (err: any) {
+        setRecordError(
+          `The file downloaded, but it could not be recorded in your export history (${err?.message || 'unknown error'}).`
+        );
+      }
+    }
   };
 
   const totalDebit = transactions.reduce((acc, curr) => acc + (Number(curr.debit_amount) || 0), 0);
@@ -150,41 +197,74 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
   const isBalanced = Math.abs(balanceDifference) < 0.01;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', maxWidth: '1050px', margin: '0 auto' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' }}>
+    <div className="export-page">
+      <div className="row row-between row-wrap">
         <button className="btn btn-secondary" onClick={onBack}>
           <ArrowLeft size={16} />
           Back to Review & Edit
         </button>
-        <button className="btn btn-primary export-download-btn" onClick={generateAndDownloadExcel}>
-          <Download size={18} />
-          Download Excel (.xlsx)
+        <button
+          className="btn btn-primary export-download-btn"
+          onClick={generateAndDownloadExcel}
+          disabled={downloading}
+        >
+          {downloading
+            ? <><Loader2 size={18} className="animate-spin" /> Preparing...</>
+            : <><Download size={18} /> Download Excel (.xlsx)</>}
         </button>
       </div>
 
-      <div className="card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+      {/* Not a blocker. The accountant may know perfectly well that these are
+          new accounts they intend to create — but they should be making that
+          choice, not discovering it after the import. */}
+      {unresolvedNames.length > 0 && (
+        <div className="alert alert-warning alert-top" style={{ padding: '12px 14px', gap: '10px' }}>
+          <AlertTriangle size={16} className="alert-icon" style={{ marginTop: '2px' }} />
           <div>
-            <h3 style={{ fontSize: '1.1rem', fontWeight: 600 }}>Excel File Preview</h3>
-            <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+            <strong className="alert-title">
+              {unresolvedNames.length === 1
+                ? '1 ledger name is not in your chart of accounts'
+                : `${unresolvedNames.length} ledger names are not in your chart of accounts`}
+            </strong>
+            <div className="alert-detail">
+              {unresolvedNames.slice(0, 6).map(n => `"${n}"`).join(', ')}
+              {unresolvedNames.length > 6 && ` and ${unresolvedNames.length - 6} more`}.
+              {' '}Tally will create a new account for each of these on import. Go back and
+              pick the matching ledger if that is not what you want.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {recordError && (
+        <div className="alert alert-error">
+          <AlertTriangle size={16} className="alert-icon" /> {recordError}
+        </div>
+      )}
+
+      <div className="card">
+        <div className="row row-between" style={{ marginBottom: '16px' }}>
+          <div>
+            <h3 className="section-title section-title-lg" style={{ marginBottom: 0 }}>Excel File Preview</h3>
+            <span className="text-muted text-2xs">
               {groups.length} {groups.length === 1 ? 'voucher' : 'vouchers'}
             </span>
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px', fontSize: '0.875rem' }}>
-            <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-              <span>Total Debit: <strong style={{ color: '#818cf8' }}>Rs. {totalDebit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong></span>
-              <span>Total Credit: <strong style={{ color: '#34d399' }}>Rs. {totalCredit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong></span>
+          <div className="export-totals">
+            <div className="export-totals-row">
+              <span>Total Debit: <strong className="total-debit">Rs. {totalDebit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong></span>
+              <span>Total Credit: <strong className="total-credit">Rs. {totalCredit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong></span>
             </div>
             {!isBalanced && (
-              <span style={{ color: '#f87171', fontWeight: 600 }}>
+              <span className="export-unbalanced">
                 Unbalanced by Rs. {Math.abs(balanceDifference).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
               </span>
             )}
           </div>
         </div>
 
-        <div className="table-container" style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+        <div className="table-container export-preview">
           {groups.map((groupTxs, index) => {
             const rawType = groupTxs[0]?.voucher_type || 'Journal';
             const headerText = rawType === 'Journal' ? 'Journal Voucher' : rawType;
@@ -196,64 +276,52 @@ export default function ExcelExporter({ transactions, onBack }: ExcelExporterPro
             const grpTotalCr = groupTxs.reduce((sum, t) => sum + (Number(t.credit_amount) || 0), 0);
 
             return (
-              <table key={index} className="custom-table" style={{ borderCollapse: 'collapse', width: '100%', border: '1px solid var(--border-color, #e5e7eb)' }}>
+              <table key={index} className="voucher-table">
                 <tbody>
                   <tr>
-                    <td colSpan={6} style={{ textAlign: 'center', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>
-                      {headerText}
-                    </td>
+                    <td colSpan={6} className="voucher-heading">{headerText}</td>
                   </tr>
                   <tr>
-                    <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>Voucher No</td>
-                    <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>{voucherNo}</td>
-                    <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}></td>
-                    <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>Date</td>
-                    <td colSpan={2} style={{ border: '1px solid var(--border-color, #e5e7eb)', fontWeight: 'bold', padding: '8px' }}>
-                      {voucherDate}
-                    </td>
+                    <td>Voucher No</td>
+                    <td>{voucherNo}</td>
+                    <td></td>
+                    <td>Date</td>
+                    <td colSpan={2} className="text-strong">{voucherDate}</td>
                   </tr>
                   <tr>
-                    <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}></td>
-                    <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}></td>
-                    <td style={{ textAlign: 'center', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px', width: '250px' }}>Particulars</td>
-                    <td style={{ textAlign: 'center', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>LF</td>
-                    <td style={{ textAlign: 'center', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>Dr</td>
-                    <td style={{ textAlign: 'center', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>Cr</td>
+                    <td></td>
+                    <td></td>
+                    <td className="voucher-col-head voucher-particulars">Particulars</td>
+                    <td className="voucher-col-head">LF</td>
+                    <td className="voucher-col-head">Dr</td>
+                    <td className="voucher-col-head">Cr</td>
                   </tr>
                   {groupTxs.map((tx) => (
                     <tr key={tx.id}>
-                      <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}></td>
-                      <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px', width: '50px', textAlign: 'center' }}>
+                      <td></td>
+                      <td className="voucher-side">
                         {tx.entry_type || (tx.debit_amount ? 'Dr' : 'Cr')}
                       </td>
-                      <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>
-                        {tx.ledger_name || tx.debit_ledger || tx.credit_ledger || ''}
-                      </td>
-                      <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px', width: '50px' }}></td>
-                      <td style={{ textAlign: 'right', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px', minWidth: '100px' }}>
+                      <td>{tx.ledger_name || tx.debit_ledger || tx.credit_ledger || ''}</td>
+                      <td className="voucher-lf"></td>
+                      <td className="voucher-amount">
                         {tx.debit_amount ? formatAmt(Number(tx.debit_amount)) : ''}
                       </td>
-                      <td style={{ textAlign: 'right', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px', minWidth: '100px' }}>
+                      <td className="voucher-amount">
                         {tx.credit_amount ? formatAmt(Number(tx.credit_amount)) : ''}
                       </td>
                     </tr>
                   ))}
                   <tr>
-                    <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}></td>
-                    <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}></td>
-                    <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}></td>
-                    <td style={{ border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}></td>
-                    <td style={{ textAlign: 'right', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>
-                      {formatAmt(grpTotalDr)}
-                    </td>
-                    <td style={{ textAlign: 'right', fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>
-                      {formatAmt(grpTotalCr)}
-                    </td>
+                    <td></td>
+                    <td></td>
+                    <td></td>
+                    <td></td>
+                    <td className="voucher-amount">{formatAmt(grpTotalDr)}</td>
+                    <td className="voucher-amount">{formatAmt(grpTotalCr)}</td>
                   </tr>
                   <tr>
-                    <td colSpan={6} style={{ fontWeight: 'bold', border: '1px solid var(--border-color, #e5e7eb)', padding: '8px' }}>
-                      {narration}
-                    </td>
+                    <td colSpan={6} className="voucher-narration">{narration}</td>
                   </tr>
                 </tbody>
               </table>

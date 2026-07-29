@@ -1,5 +1,14 @@
 import { supabase } from './supabase';
-import { ScanBatch, Receipt, ReceiptStatus, Transaction, User, UserRole, Organization } from '../types';
+import {
+  ScanBatch, Receipt, ReceiptStatus, Transaction, User, UserRole, Organization,
+  BatchStatus, Ledger, LedgerMatchState,
+} from '../types';
+import { ledgerMatchKey } from './ledgers';
+import { LEDGER_MATCHING } from './features';
+
+// The rules about ledger names live in ./ledgers so they can be tested without a
+// Supabase client. Re-exported here because callers reach for one data module.
+export { ledgerMatchKey, resolveLedgerName, parsePastedLedgers } from './ledgers';
 
 /**
  * Every read and write goes through here.
@@ -308,6 +317,19 @@ export async function deleteBatch(id: string): Promise<void> {
   if (error) throw new Error(error.message);
 }
 
+/**
+ * Archives or restores a batch.
+ *
+ * Archiving is the answer to a workspace that only ever grows: last quarter's
+ * batches are still needed for their records, but they should not sit between
+ * an operator and this morning's work. Nothing is deleted, and an archived
+ * batch can still be reopened and exported.
+ */
+export async function setBatchStatus(id: string, status: BatchStatus): Promise<void> {
+  const { error } = await supabase.from('scan_batches').update({ status }).eq('id', id);
+  if (error) throw new Error(error.message);
+}
+
 // ---------------------------------------------------------------- receipts
 
 export async function createReceipt(receipt: {
@@ -434,18 +456,34 @@ export async function downloadReceiptImage(path: string): Promise<File | null> {
 export async function fetchTransactionsForBatch(
   batchId: string
 ): Promise<Record<string, Transaction[]>> {
-  const { data, error } = await supabase
-    .from('transactions')
-    .select(
-      'id, receipt_id, position, voucher_date, voucher_type, entry_type, ledger_name, debit_amount, credit_amount, needs_review, narration'
-    )
-    .eq('batch_id', batchId)
-    .order('position', { ascending: true });
+  // The ledger columns arrive with migration 002. Asking for them on a database
+  // that has not had it applied does not simply omit them — PostgREST rejects the
+  // whole query, which would leave the reviewer showing no rows at all for a
+  // voucher that extracted perfectly well.
+  const result = LEDGER_MATCHING
+    ? await supabase
+        .from('transactions')
+        .select(`
+          id, receipt_id, position, voucher_date, voucher_type, entry_type,
+          ledger_name, ledger_id, ledger_match, ledger_match_score,
+          debit_amount, credit_amount, needs_review, narration
+        `)
+        .eq('batch_id', batchId)
+        .order('position', { ascending: true })
+    : await supabase
+        .from('transactions')
+        .select(`
+          id, receipt_id, position, voucher_date, voucher_type, entry_type,
+          ledger_name, debit_amount, credit_amount, needs_review, narration
+        `)
+        .eq('batch_id', batchId)
+        .order('position', { ascending: true });
 
+  const { error } = result;
   if (error) throw new Error(error.message);
 
   const grouped: Record<string, Transaction[]> = {};
-  for (const row of data || []) {
+  for (const row of (result.data || []) as any[]) {
     const tx: Transaction = {
       id: row.id,
       receipt_id: row.receipt_id,
@@ -453,6 +491,9 @@ export async function fetchTransactionsForBatch(
       voucher_type: row.voucher_type || 'Journal',
       entry_type: row.entry_type,
       ledger_name: row.ledger_name || '',
+      ledger_id: row.ledger_id || null,
+      ledger_match: (row.ledger_match as LedgerMatchState) || 'Unchecked',
+      ledger_match_score: row.ledger_match_score != null ? Number(row.ledger_match_score) : null,
       debit_amount: Number(row.debit_amount) || 0,
       credit_amount: Number(row.credit_amount) || 0,
       needs_review: row.needs_review || undefined,
@@ -475,6 +516,18 @@ export async function saveTransactionsForReceipt(
   ids: { batchId: string; organizationId: string; userId: string },
   transactions: Transaction[]
 ): Promise<void> {
+  // What the model originally read, keyed by row. Delete-then-insert would drop
+  // it, and losing it means a figure disputed months later can no longer be
+  // traced back to a misreading rather than an edit — so rows that survive the
+  // rewrite carry their original reading across it.
+  const { data: existing } = await supabase
+    .from('transactions')
+    .select('id, raw_extracted_data')
+    .eq('receipt_id', receiptId);
+  const originalReadings = new Map<string, unknown>(
+    (existing || []).map((row: any) => [row.id, row.raw_extracted_data])
+  );
+
   const { error: delError } = await supabase
     .from('transactions')
     .delete()
@@ -495,16 +548,290 @@ export async function saveTransactionsForReceipt(
     voucher_type: t.voucher_type || 'Journal',
     entry_type: t.entry_type,
     ledger_name: t.ledger_name || '',
+    // Only written when the feature is on, for the same reason it is only read
+    // then: these columns do not exist before migration 002.
+    ...(LEDGER_MATCHING ? {
+      ledger_id: t.ledger_id || null,
+      ledger_match: t.ledger_match || 'Unchecked',
+      ledger_match_score: t.ledger_match_score ?? null,
+    } : {}),
     // The CHECK constraint requires the unused side to be exactly zero.
     debit_amount: t.entry_type === 'Dr' ? Number(t.debit_amount) || 0 : 0,
     credit_amount: t.entry_type === 'Cr' ? Number(t.credit_amount) || 0 : 0,
     needs_review: t.needs_review === true,
     narration: t.narration || '',
     updated_by: ids.userId,
+    raw_extracted_data: originalReadings.get(t.id) ?? null,
   }));
 
   const { error } = await supabase.from('transactions').insert(rows);
   if (error) throw new Error(error.message);
+}
+
+// ---------------------------------------------------------------- chart of accounts
+
+/** The organisation's chart of accounts. RLS scopes this to their own org. */
+export async function fetchLedgers(includeInactive = false): Promise<Ledger[]> {
+  let query = supabase
+    .from('ledgers')
+    .select('id, name, parent_group, aliases, is_active')
+    .order('name');
+  if (!includeInactive) query = query.eq('is_active', true);
+
+  const { data, error } = await query;
+  if (error) throw new Error(error.message);
+  return (data || []).map((l: any) => ({
+    id: l.id,
+    name: l.name,
+    parent_group: l.parent_group || undefined,
+    aliases: Array.isArray(l.aliases) ? l.aliases : [],
+    is_active: l.is_active,
+  }));
+}
+
+export async function createLedger(input: {
+  organizationId: string;
+  userId: string;
+  name: string;
+  parentGroup?: string;
+  aliases?: string[];
+}): Promise<Ledger> {
+  const { data, error } = await supabase
+    .from('ledgers')
+    .insert({
+      organization_id: input.organizationId,
+      created_by: input.userId,
+      name: input.name.trim(),
+      parent_group: input.parentGroup?.trim() || null,
+      aliases: (input.aliases || []).map(a => a.trim()).filter(Boolean),
+    })
+    .select('id, name, parent_group, aliases, is_active')
+    .single();
+
+  if (error) {
+    // The unique index is on the normalised name, so this is the database
+    // refusing to hold one account under two spellings.
+    if (error.code === '23505') {
+      throw new Error(`"${input.name.trim()}" is already in your chart of accounts.`);
+    }
+    throw new Error(error.message);
+  }
+  return {
+    id: data.id,
+    name: data.name,
+    parent_group: data.parent_group || undefined,
+    aliases: Array.isArray(data.aliases) ? data.aliases : [],
+    is_active: data.is_active,
+  };
+}
+
+export async function updateLedger(
+  id: string,
+  patch: { name?: string; parentGroup?: string | null; aliases?: string[]; isActive?: boolean }
+): Promise<void> {
+  const row: Record<string, unknown> = {};
+  if (patch.name !== undefined) row.name = patch.name.trim();
+  if (patch.parentGroup !== undefined) row.parent_group = patch.parentGroup?.trim() || null;
+  if (patch.aliases !== undefined) row.aliases = patch.aliases.map(a => a.trim()).filter(Boolean);
+  if (patch.isActive !== undefined) row.is_active = patch.isActive;
+
+  const { error } = await supabase.from('ledgers').update(row).eq('id', id);
+  if (error) {
+    if (error.code === '23505') {
+      throw new Error('Another ledger already uses that name.');
+    }
+    throw new Error(error.message);
+  }
+}
+
+/**
+ * Adds several ledgers at once, skipping any the organisation already has.
+ *
+ * A chart of accounts is pasted out of Tally, and a re-paste after adding a few
+ * accounts is the normal way to keep it current. Failing that whole paste over
+ * names that are already correct would make the obvious action the wrong one, so
+ * duplicates are reported rather than treated as errors.
+ */
+export async function importLedgers(
+  ids: { organizationId: string; userId: string },
+  entries: { name: string; parentGroup?: string }[]
+): Promise<{ added: number; skipped: string[] }> {
+  const existing = await fetchLedgers(true);
+  const known = new Set(existing.map(l => ledgerMatchKey(l.name)));
+
+  const skipped: string[] = [];
+  const rows: Record<string, unknown>[] = [];
+  for (const entry of entries) {
+    const name = entry.name.trim();
+    const key = ledgerMatchKey(name);
+    // `known` also absorbs duplicates within the paste itself, which would
+    // otherwise collide with each other rather than with the existing chart.
+    if (!key || known.has(key)) {
+      if (name) skipped.push(name);
+      continue;
+    }
+    known.add(key);
+    rows.push({
+      organization_id: ids.organizationId,
+      created_by: ids.userId,
+      name,
+      parent_group: entry.parentGroup?.trim() || null,
+      aliases: [],
+    });
+  }
+
+  if (rows.length) {
+    const { error } = await supabase.from('ledgers').insert(rows);
+    if (error) throw new Error(error.message);
+  }
+  return { added: rows.length, skipped };
+}
+
+// ---------------------------------------------------------------- exports
+
+/**
+ * Records that a Tally file was generated.
+ *
+ * The spreadsheet leaves the browser and is imported by hand, so this row is the
+ * only trace that it ever existed. Without it there is no way to answer "was
+ * this batch already sent to Tally, and by whom?" — which is exactly the
+ * question that comes up when someone suspects a voucher was posted twice.
+ */
+export async function recordExport(input: {
+  batchId: string;
+  userId: string;
+  fileName: string;
+  recordCount: number;
+}): Promise<void> {
+  const { error } = await supabase.from('exports').insert({
+    batch_id: input.batchId,
+    generated_by: input.userId,
+    file_name: input.fileName,
+    record_count: input.recordCount,
+  });
+  if (error) throw new Error(error.message);
+}
+
+export interface ExportRecord {
+  id: string;
+  file_name: string;
+  record_count: number;
+  created_at: string;
+  generated_by_name?: string;
+}
+
+export async function fetchExportsForBatch(batchId: string): Promise<ExportRecord[]> {
+  const { data, error } = await supabase
+    .from('exports')
+    .select('id, file_name, record_count, created_at, generated_by')
+    .eq('batch_id', batchId)
+    .order('created_at', { ascending: false });
+
+  if (error) throw new Error(error.message);
+
+  // Only an Admin may read the user directory, so an Operator sees their own
+  // exports without a name attached rather than an error.
+  let names = new Map<string, string>();
+  const authorIds = [...new Set((data || []).map((r: any) => r.generated_by).filter(Boolean))];
+  if (authorIds.length) {
+    const { data: people } = await supabase.from('users').select('id, name').in('id', authorIds);
+    names = new Map((people || []).map((p: any) => [p.id, p.name]));
+  }
+
+  return (data || []).map((r: any) => ({
+    id: r.id,
+    file_name: r.file_name,
+    record_count: r.record_count,
+    created_at: new Date(r.created_at).toLocaleString(),
+    generated_by_name: names.get(r.generated_by),
+  }));
+}
+
+// ---------------------------------------------------------------- organisation overview
+
+export interface OrgOverview {
+  batches: { active: number; archived: number };
+  receipts: Record<ReceiptStatus, number>;
+  rows: number;
+  /** Rows whose ledger Tally will not recognise as-is. */
+  ledgersUnresolved: number;
+  ledgerCount: number;
+  exports: ExportRecord[];
+  staff: { id: string; name: string; receipts: number }[];
+}
+
+/**
+ * Everything an Admin needs to see how their organisation is doing.
+ *
+ * Counted from the database on every load rather than kept as running totals:
+ * a figure that is derived cannot drift from what it claims to describe, and at
+ * one company's volume the cost of counting is irrelevant.
+ */
+export async function fetchOrgOverview(): Promise<OrgOverview> {
+  const [batchRes, receiptRes, txRes, exportRes, userRes] = await Promise.all([
+    supabase.from('scan_batches').select('id, status'),
+    supabase.from('receipts').select('id, status, uploaded_by'),
+    LEDGER_MATCHING
+      ? supabase.from('transactions').select('id, ledger_match')
+      : supabase.from('transactions').select('id'),
+    supabase.from('exports').select('id, file_name, record_count, created_at, generated_by')
+      .order('created_at', { ascending: false }).limit(10),
+    supabase.from('users').select('id, name'),
+  ]);
+
+  const firstError = batchRes.error || receiptRes.error || txRes.error;
+  if (firstError) throw new Error(firstError.message);
+
+  // Only counted when there is a chart of accounts to count against; the table
+  // itself does not exist before migration 002.
+  const ledgerRes = LEDGER_MATCHING
+    ? await supabase.from('ledgers').select('id', { count: 'exact', head: true }).eq('is_active', true)
+    : { count: 0 };
+
+  const batches = { active: 0, archived: 0 };
+  for (const b of batchRes.data || []) {
+    if (b.status === 'Archived') batches.archived++;
+    else batches.active++;
+  }
+
+  const receipts: Record<ReceiptStatus, number> =
+    { Pending: 0, Processing: 0, Extracted: 0, Failed: 0 };
+  const perUploader = new Map<string, number>();
+  for (const r of receiptRes.data || []) {
+    if (r.status in receipts) receipts[r.status as ReceiptStatus]++;
+    if (r.uploaded_by) perUploader.set(r.uploaded_by, (perUploader.get(r.uploaded_by) || 0) + 1);
+  }
+
+  const rows = (txRes.data || []).length;
+  const ledgersUnresolved = LEDGER_MATCHING
+    ? ((txRes.data || []) as any[]).filter(
+        t => t.ledger_match === 'Unmatched' || t.ledger_match === 'Suggested'
+      ).length
+    : 0;
+
+  const names = new Map((userRes.data || []).map((u: any) => [u.id, u.name]));
+  // Keyed by id, not name: two people with the same name are two people.
+  const staff = [...perUploader.entries()]
+    .map(([id, count]) => ({ id, name: names.get(id) || 'Unknown', receipts: count }))
+    .sort((a, b) => b.receipts - a.receipts);
+
+  const exports = (exportRes.data || []).map((r: any) => ({
+    id: r.id,
+    file_name: r.file_name,
+    record_count: r.record_count,
+    created_at: new Date(r.created_at).toLocaleString(),
+    generated_by_name: names.get(r.generated_by),
+  }));
+
+  return {
+    batches,
+    receipts,
+    rows,
+    ledgersUnresolved,
+    ledgerCount: ledgerRes.count ?? 0,
+    exports,
+    staff,
+  };
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

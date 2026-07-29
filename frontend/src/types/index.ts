@@ -5,6 +5,25 @@ export type BatchStatus = 'Active' | 'Archived';
 export type ReceiptStatus = 'Pending' | 'Processing' | 'Extracted' | 'Failed';
 export type EntryType = 'Dr' | 'Cr';
 
+/**
+ * How confident we are that a row's ledger name is one Tally will accept.
+ *
+ * 'Unchecked' means the organisation has no chart of accounts yet, so there was
+ * nothing to check against — deliberately distinct from 'Unmatched', which means
+ * we did check and the name is not there.
+ */
+export type LedgerMatchState = 'Unchecked' | 'Exact' | 'Alias' | 'Suggested' | 'Unmatched';
+
+/** One account in an organisation's chart of accounts, as it exists in Tally. */
+export interface Ledger {
+  id: string;
+  name: string;
+  parent_group?: string;
+  /** Other spellings staff write by hand, treated as equal to the name itself. */
+  aliases: string[];
+  is_active: boolean;
+}
+
 export interface Organization {
   id: string;
   name: string;
@@ -59,7 +78,17 @@ export interface Transaction {
   voucher_date: string;
   voucher_type: string;
   entry_type: EntryType; // 'Dr' or 'Cr'
+  /**
+   * The name that gets exported. Holds the canonical Tally spelling once the row
+   * is confidently matched to a ledger, and the name as written on the paper
+   * while the match is still only a suggestion.
+   */
   ledger_name: string;
+  /** Which ledger in the organisation's chart of accounts this resolved to. */
+  ledger_id?: string | null;
+  ledger_match?: LedgerMatchState;
+  /** Similarity behind a 'Suggested' match, 0-1. Absent in every other state. */
+  ledger_match_score?: number | null;
   debit_ledger?: string; // Legacy compatibility
   credit_ledger?: string; // Legacy compatibility
   // Single source of truth for money. A legacy flat `amount` may arrive on the

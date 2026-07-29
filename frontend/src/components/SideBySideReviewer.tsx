@@ -1,7 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2, RotateCcw, RotateCw, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
-import { ScanBatch, Receipt, Transaction, User } from '../types';
-import { saveTransactionsForReceipt, getReceiptImageUrl, deleteReceipt } from '../lib/db';
+import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2, RotateCcw, RotateCw, ChevronLeft, ChevronRight, Loader2, HelpCircle } from 'lucide-react';
+import { ScanBatch, Receipt, Transaction, User, Ledger } from '../types';
+import { saveTransactionsForReceipt, getReceiptImageUrl, deleteReceipt, fetchLedgers, resolveLedgerName } from '../lib/db';
+import { LEDGER_MATCHING } from '../lib/features';
+
+/** Ties the ledger inputs to the single datalist rendered at the bottom. */
+const LEDGER_OPTIONS_ID = 'chart-of-accounts';
 
 interface SideBySideReviewerProps {
   batch: ScanBatch | null;
@@ -114,6 +118,9 @@ export default function SideBySideReviewer({
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deletingReceipt, setDeletingReceipt] = useState(false);
   const [deletedReceiptIds, setDeletedReceiptIds] = useState<Set<string>>(new Set());
+  // The organisation's real ledgers, so a name can be picked rather than typed
+  // and so the reviewer is told when one will not survive the trip into Tally.
+  const [ledgers, setLedgers] = useState<Ledger[]>([]);
 
   const visibleReceipts = receipts.filter(receipt => !deletedReceiptIds.has(receipt.id));
   const currentReceipt = visibleReceipts[currentIndex] || null;
@@ -215,6 +222,20 @@ export default function SideBySideReviewer({
     return () => { cancelled = true; };
   }, [currentReceipt?.id, currentReceipt?.previewUrl, currentReceipt?.storage_path]);
 
+  // An empty chart of accounts is a normal state, not an error: matching simply
+  // does not apply, and every row stays 'Unchecked'. With the feature off the
+  // ledgers table may not exist at all, so it is not asked for.
+  useEffect(() => {
+    if (!LEDGER_MATCHING) return;
+    let cancelled = false;
+    fetchLedgers()
+      .then(list => { if (!cancelled) setLedgers(list); })
+      .catch(() => { /* the reviewer still works as a plain text field */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  const ledgerById = (id?: string | null) => ledgers.find(l => l.id === id);
+
   const rotateLeft = () => setRotation(r => r - 90);
   const rotateRight = () => setRotation(r => r + 90);
 
@@ -227,6 +248,14 @@ export default function SideBySideReviewer({
         if (field === 'ledger_name') {
           if (updated.entry_type === 'Dr') updated.debit_ledger = value;
           else updated.credit_ledger = value;
+          // Re-check against the chart of accounts on every keystroke: whatever
+          // the server decided applied to the name it extracted, and this is no
+          // longer that name. Leaving the old verdict attached would show a
+          // confident tick beside something nobody has checked.
+          const resolved = resolveLedgerName(value, ledgers);
+          updated.ledger_id = resolved.ledger_id;
+          updated.ledger_match = resolved.ledger_match;
+          updated.ledger_match_score = null;
         }
         if (field === 'entry_type') {
           if (value === 'Dr') {
@@ -241,6 +270,19 @@ export default function SideBySideReviewer({
       }
       return t;
     }));
+  };
+
+  /**
+   * Takes the server's suggestion for a row.
+   *
+   * The suggestion was deliberately never applied on its own: extraction can see
+   * that a handwritten name is close to a real ledger, but "close" is not a
+   * reason to post money somewhere nobody chose. This is that decision being
+   * made by a person, which is the only thing that makes it safe.
+   */
+  const acceptLedgerSuggestion = (tx: Transaction) => {
+    const suggested = ledgerById(tx.ledger_id);
+    if (suggested) handleUpdateTransaction(tx.id, 'ledger_name', suggested.name);
   };
 
   const handleAddTransaction = (entryType: 'Dr' | 'Cr' = 'Dr') => {
@@ -374,6 +416,12 @@ export default function SideBySideReviewer({
   const totalCredit = transactions.reduce((acc, curr) => acc + (Number(curr.credit_amount) || 0), 0);
   const isBalanced = Math.abs(totalDebit - totalCredit) < 0.05;
 
+  // Rows whose ledger Tally would not recognise. Only meaningful once the
+  // organisation actually has a chart of accounts to be measured against.
+  const unresolvedLedgers = ledgers.length
+    ? transactions.filter(t => t.ledger_match === 'Unmatched' || t.ledger_match === 'Suggested').length
+    : 0;
+
   // Narration is shared across all rows in a receipt
   const narration = transactions[0]?.narration || 'Being Expenses paid via cheque no.';
 
@@ -386,24 +434,14 @@ export default function SideBySideReviewer({
   const hasPrev = currentIndex > 0;
   const hasNext = currentIndex < visibleReceipts.length - 1;
 
-  const btnStyle = (active: boolean) => ({
-    display: 'inline-flex', alignItems: 'center', gap: '6px',
-    padding: '7px 14px', borderRadius: '8px', border: '1px solid var(--border-color)',
-    background: active ? 'var(--primary)' : 'var(--bg-card)',
-    color: active ? '#fff' : 'var(--text-muted)',
-    cursor: active ? 'pointer' : 'not-allowed',
-    opacity: active ? 1 : 0.4,
-    fontWeight: 600, fontSize: '0.82rem',
-    transition: 'all 0.15s ease',
-    boxShadow: active ? '0 2px 8px rgba(99,102,241,0.35)' : 'none'
-  });
+  const stepClass = (active: boolean) => `nav-step${active ? ' nav-step-active' : ''}`;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', height: '100%' }}>
+    <div className="reviewer-page">
       {/* Review header */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', padding: '14px 20px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '16px', flexWrap: 'wrap' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+      <div className="reviewer-header">
+      <div className="row row-between row-wrap" style={{ gap: '16px' }}>
+        <div className="row" style={{ gap: '16px' }}>
           <button className="btn btn-secondary" onClick={handleBack}>
             <ArrowLeft size={16} /> Back to Batches
           </button>
@@ -414,29 +452,26 @@ export default function SideBySideReviewer({
           </div>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+        <div className="row-sm" style={{ gap: '10px' }}>
           {/* Reflects what has actually reached the database, so "Saved" is
               never claimed for work that only exists in the browser. */}
           {saveState === 'saving' && (
-            <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '5px' }}>
+            <span className="save-state save-state-busy">
               <Loader2 size={15} className="animate-spin" /> Saving...
             </span>
           )}
           {saveState === 'saved' && !savedSuccess && (
-            <span style={{ color: '#10b981', fontSize: '0.85rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <span className="save-state save-state-ok">
               <CheckCircle2 size={16} /> All changes saved
             </span>
           )}
           {saveState === 'error' && (
-            <span
-              style={{ color: '#f43f5e', fontSize: '0.85rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}
-              title={saveError || undefined}
-            >
+            <span className="save-state save-state-error" title={saveError || undefined}>
               <AlertTriangle size={16} /> Not saved
             </span>
           )}
           {savedSuccess && (
-            <span style={{ color: '#10b981', fontSize: '0.85rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <span className="save-state save-state-ok">
               <CheckCircle2 size={16} /> Saved!
             </span>
           )}
@@ -451,49 +486,37 @@ export default function SideBySideReviewer({
 
       {/* Receipt navigation */}
       {visibleReceipts.length > 1 && (
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '16px',
-          paddingTop: '12px',
-          borderTop: '1px solid var(--border-color)',
-        }}>
+        <div className="reviewer-nav">
           <button
-            style={btnStyle(hasPrev)}
+            className={stepClass(hasPrev)}
             disabled={!hasPrev}
             onClick={() => hasPrev && saveCurrentTx(currentIndex - 1)}
           >
             <ChevronLeft size={16} /> Previous
           </button>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div className="row-sm">
             {visibleReceipts.map((r, i) => (
               <button
                 key={r.id}
                 title={r.filename}
+                className={`receipt-dot${i === currentIndex ? ' receipt-dot-active' : ''}`}
                 onClick={() => i !== currentIndex && saveCurrentTx(i)}
-                style={{
-                  width: '32px', height: '32px', borderRadius: '50%',
-                  border: `2px solid ${i === currentIndex ? 'var(--primary)' : 'var(--border-color)'}`,
-                  background: i === currentIndex ? 'var(--primary)' : 'var(--bg-card)',
-                  color: i === currentIndex ? '#fff' : 'var(--text-muted)',
-                  fontWeight: 700, fontSize: '0.8rem',
-                  cursor: 'pointer', transition: 'all 0.15s',
-                  boxShadow: i === currentIndex ? '0 0 10px rgba(99,102,241,0.5)' : 'none'
-                }}
               >
                 {i + 1}
               </button>
             ))}
           </div>
 
-          <div style={{ textAlign: 'center', minWidth: '140px' }}>
-            <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>Viewing receipt</div>
-            <div style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--text-main)' }}>
+          <div className="reviewer-count">
+            <div className="text-muted" style={{ fontSize: '0.78rem' }}>Viewing receipt</div>
+            <div style={{ fontSize: '0.9rem', fontWeight: 700 }}>
               {currentIndex + 1} / {visibleReceipts.length}
             </div>
           </div>
 
           <button
-            style={btnStyle(hasNext)}
+            className={stepClass(hasNext)}
             disabled={!hasNext}
             onClick={() => hasNext && saveCurrentTx(currentIndex + 1)}
           >
@@ -509,7 +532,7 @@ export default function SideBySideReviewer({
         <div className="image-panel">
           <div className="panel-header">
             <span>📷 {currentReceipt?.filename || 'Handwritten Voucher'}</span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <div className="row-xs">
               <button
                 className="btn btn-danger btn-sm"
                 onClick={() => setShowDeleteModal(true)}
@@ -518,65 +541,47 @@ export default function SideBySideReviewer({
               >
                 <Trash2 size={14} />
               </button>
-              <button
-                onClick={rotateLeft}
-                title="Rotate Left"
-                style={{ background: 'linear-gradient(135deg, #4f46e5, #6366f1)', border: 'none', borderRadius: '8px', cursor: 'pointer', padding: '5px 10px', color: '#fff', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', fontWeight: 600, boxShadow: '0 2px 8px rgba(99,102,241,0.4)', transition: 'transform 0.15s, box-shadow 0.15s' }}
-                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1.08)'; }}
-                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1)'; }}
-              >
+              <button className="panel-rotate" onClick={rotateLeft} title="Rotate Left">
                 <RotateCcw size={14} />
               </button>
-              <button
-                onClick={rotateRight}
-                title="Rotate Right"
-                style={{ background: 'linear-gradient(135deg, #4f46e5, #6366f1)', border: 'none', borderRadius: '8px', cursor: 'pointer', padding: '5px 10px', color: '#fff', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', fontWeight: 600, boxShadow: '0 2px 8px rgba(99,102,241,0.4)', transition: 'transform 0.15s, box-shadow 0.15s' }}
-                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1.08)'; }}
-                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.transform = 'scale(1)'; }}
-              >
+              <button className="panel-rotate" onClick={rotateRight} title="Rotate Right">
                 <RotateCw size={14} />
               </button>
             </div>
           </div>
 
-          <div className="image-viewer" style={{ overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div className="image-viewer image-viewer-fixed">
             {imageUrl ? (
               <img
                 src={imageUrl}
                 alt="Uploaded Handwritten Bill Receipt"
-                className="receipt-img"
-                style={{ transform: `rotate(${rotation}deg)`, transition: 'transform 0.3s ease', maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+                className="receipt-img receipt-img-rotatable"
+                style={{ transform: `rotate(${rotation}deg)` }}
               />
             ) : (
-              <div style={{ color: 'var(--text-muted)', textAlign: 'center' }}>No Receipt Image Selected</div>
+              <div className="text-muted text-center">No Receipt Image Selected</div>
             )}
           </div>
         </div>
 
         {/* Right Panel: Extracted Transaction Editor */}
         <div className="data-panel">
-          <div className="panel-header" style={{ gap: '12px', flexWrap: 'wrap' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+          <div className="panel-header row-wrap" style={{ gap: '12px' }}>
+            <div className="row-sm" style={{ minWidth: 0 }}>
               <span>✏️ Voucher entries</span>
-              <span style={{ color: 'var(--text-muted)', fontSize: '0.78rem', fontWeight: 500 }}>
+              <span className="text-muted" style={{ fontSize: '0.78rem', fontWeight: 500 }}>
                 {transactions.length} {transactions.length === 1 ? 'ledger line' : 'ledger lines'}
               </span>
+              {unresolvedLedgers > 0 && (
+                <span
+                  className="ledger-count-pill"
+                  title="Tally creates a new account for any ledger name it does not already have"
+                >
+                  {unresolvedLedgers} unresolved {unresolvedLedgers === 1 ? 'ledger' : 'ledgers'}
+                </span>
+              )}
             </div>
-            <span style={{
-              fontSize: '0.82rem',
-              color: isBalanced ? '#10b981' : '#f59e0b',
-              fontWeight: 600,
-              display: 'flex',
-              alignItems: 'center',
-              gap: '5px',
-              padding: '7px 10px',
-              borderRadius: '999px',
-              background: isBalanced ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)',
-              border: `1px solid ${isBalanced ? 'rgba(16, 185, 129, 0.45)' : 'rgba(245, 158, 11, 0.45)'}`,
-              boxShadow: isBalanced ? '0 0 12px rgba(16, 185, 129, 0.16)' : '0 0 12px rgba(245, 158, 11, 0.16)',
-              whiteSpace: 'nowrap',
-              flexShrink: 0
-            }}>
+            <span className={`balance-pill ${isBalanced ? 'balance-ok' : 'balance-warn'}`}>
               {isBalanced ? (
                 <><CheckCircle2 size={14} /> Voucher balanced</>
               ) : (
@@ -585,8 +590,8 @@ export default function SideBySideReviewer({
             </span>
           </div>
 
-          <div style={{ flex: 1, padding: '16px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0 4px', fontSize: '0.95rem' }}>
+          <div className="reviewer-body">
+            <div className="voucher-meta">
               <div><strong>Date:</strong> {transactions[0]?.voucher_date || ''}</div>
               <div><strong>Voucher No:</strong> {(transactions[0] as any)?.voucher_no || '-'}</div>
             </div>
@@ -594,22 +599,24 @@ export default function SideBySideReviewer({
               <table className="custom-table tx-table">
                 <thead>
                   <tr>
-                    <th style={{ width: '52px' }}>Type</th>
+                    <th className="tx-col-type">Type</th>
                     <th>Particulars</th>
-                    <th style={{ width: '112px', textAlign: 'right' }}>Debit (Rs.)</th>
-                    <th style={{ width: '112px', textAlign: 'right' }}>Credit (Rs.)</th>
-                    <th style={{ width: '44px' }}></th>
+                    <th className="tx-col-amount">Debit (Rs.)</th>
+                    <th className="tx-col-amount">Credit (Rs.)</th>
+                    <th className="tx-col-actions"></th>
                   </tr>
                 </thead>
                 <tbody>
                   {transactions.map((tx) => (
                     <tr
                       key={tx.id}
-                      className={tx.needs_review ? 'row-needs-review' : undefined}
-                      style={{ background: tx.entry_type === 'Dr' ? 'rgba(99, 102, 241, 0.03)' : 'transparent' }}
+                      className={
+                        `${tx.entry_type === 'Dr' ? 'tx-row-debit' : ''}` +
+                        `${tx.needs_review ? ' row-needs-review' : ''}`
+                      }
                     >
                       <td>
-                        <span className={`status-pill ${tx.entry_type === 'Dr' ? 'status-processing' : 'status-extracted'}`} style={{ fontWeight: 700 }}>
+                        <span className={`status-pill status-pill-strong ${tx.entry_type === 'Dr' ? 'status-processing' : 'status-extracted'}`}>
                           {tx.entry_type}
                         </span>
                       </td>
@@ -617,12 +624,39 @@ export default function SideBySideReviewer({
                         <input
                           type="text"
                           size={1}
-                          className="cell-input"
-                          style={{ fontWeight: tx.entry_type === 'Dr' ? 600 : 400 }}
+                          // Native picker rather than a bespoke dropdown: it
+                          // filters as you type, works on touch, and needs no
+                          // code that a redesign would have to throw away.
+                          list={ledgers.length ? LEDGER_OPTIONS_ID : undefined}
+                          className={`cell-input${tx.entry_type === 'Dr' ? ' cell-input-debit' : ''}`}
                           value={tx.ledger_name || tx.debit_ledger || tx.credit_ledger || ''}
                           title={tx.ledger_name || tx.debit_ledger || tx.credit_ledger || ''}
                           onChange={(e) => handleUpdateTransaction(tx.id, 'ledger_name', e.target.value)}
                         />
+
+                        {/* Nothing is said when there is no chart of accounts to
+                            check against — a flag on every row of every voucher
+                            teaches people to ignore flags. */}
+                        {tx.ledger_match === 'Suggested' && ledgerById(tx.ledger_id) && (
+                          <button
+                            type="button"
+                            className="ledger-hint ledger-hint-suggest"
+                            onClick={() => acceptLedgerSuggestion(tx)}
+                            title="Use this ledger instead of the name written on the voucher"
+                          >
+                            <HelpCircle size={11} />
+                            <span>Did you mean <strong>{ledgerById(tx.ledger_id)!.name}</strong>?</span>
+                          </button>
+                        )}
+                        {tx.ledger_match === 'Unmatched' && (
+                          <div
+                            className="ledger-hint ledger-hint-missing"
+                            title="Tally will create a new account under this name on import"
+                          >
+                            <AlertTriangle size={11} />
+                            <span>Not in your chart of accounts</span>
+                          </div>
+                        )}
                       </td>
                       <td>
                         {tx.entry_type === 'Dr' ? (
@@ -650,10 +684,9 @@ export default function SideBySideReviewer({
                       </td>
                       <td>
                         <button
-                          className="btn btn-danger btn-sm"
+                          className="btn btn-danger btn-sm btn-icon"
                           onClick={() => handleDeleteTransaction(tx.id)}
                           title="Delete Row"
-                          style={{ padding: '4px 6px' }}
                         >
                           <Trash2 size={13} />
                         </button>
@@ -664,8 +697,8 @@ export default function SideBySideReviewer({
               </table>
             </div>
 
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ display: 'flex', gap: '8px' }}>
+            <div className="row row-between">
+              <div className="row-sm">
                 <button className="btn btn-secondary btn-sm" onClick={() => handleAddTransaction('Dr')}>
                   <Plus size={14} /> Add Debit
                 </button>
@@ -674,23 +707,16 @@ export default function SideBySideReviewer({
                 </button>
               </div>
 
-              <div style={{
-                background: isBalanced ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)',
-                padding: '10px 16px',
-                borderRadius: 'var(--radius-md)',
-                border: `1px solid ${isBalanced ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)'}`,
-                display: 'flex',
-                gap: '20px'
-              }}>
+              <div className={`totals-panel ${isBalanced ? 'totals-ok' : 'totals-warn'}`}>
                 <div>
-                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block' }}>Total Debit:</span>
-                  <span style={{ fontSize: '0.95rem', fontWeight: 700, color: '#818cf8' }}>
+                  <span className="total-label">Total Debit:</span>
+                  <span className="total-value total-debit">
                     Rs. {totalDebit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                   </span>
                 </div>
-                <div style={{ borderLeft: '1px solid var(--border-color)', paddingLeft: '16px' }}>
-                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'block' }}>Total Credit:</span>
-                  <span style={{ fontSize: '0.95rem', fontWeight: 700, color: '#34d399' }}>
+                <div className="total-divider">
+                  <span className="total-label">Total Credit:</span>
+                  <span className="total-value total-credit">
                     Rs. {totalCredit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                   </span>
                 </div>
@@ -698,12 +724,11 @@ export default function SideBySideReviewer({
             </div>
 
             {/* Narration */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 4px 0 4px' }}>
-              <label style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-muted)', whiteSpace: 'nowrap', minWidth: '70px' }}>Narration:</label>
+            <div className="narration-row">
+              <label className="narration-label">Narration:</label>
               <input
                 type="text"
-                className="form-input"
-                style={{ flex: 1, padding: '6px 10px', fontSize: '0.85rem', fontStyle: 'italic' }}
+                className="form-input narration-input"
                 value={narration}
                 onChange={(e) => handleUpdateNarration(e.target.value)}
                 placeholder="Being Expenses paid via cheque no."
@@ -713,46 +738,34 @@ export default function SideBySideReviewer({
         </div>
       </div>
 
+      {/* One list shared by every ledger input on the page. */}
+      {ledgers.length > 0 && (
+        <datalist id={LEDGER_OPTIONS_ID}>
+          {ledgers.map(ledger => (
+            <option key={ledger.id} value={ledger.name}>
+              {ledger.parent_group || ''}
+            </option>
+          ))}
+        </datalist>
+      )}
+
       {showImbalanceModal && (
-        <div style={{
-          position: 'fixed',
-          top: 0, left: 0, right: 0, bottom: 0,
-          backgroundColor: 'rgba(0, 0, 0, 0.6)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 9999,
-          backdropFilter: 'blur(4px)'
-        }}>
-          <div className="card" style={{
-            width: '420px',
-            padding: '24px',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '16px',
-            boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.3), 0 10px 10px -5px rgba(0, 0, 0, 0.2)',
-            animation: 'fadeIn 0.2s ease-out'
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', color: '#f59e0b' }}>
+        <div className="modal-overlay modal-overlay-top">
+          <div className="modal modal-prompt">
+            <div className="row tone-amber">
               <AlertTriangle size={24} />
-              <h3 style={{ fontSize: '1.2rem', fontWeight: 700, margin: 0, color: 'var(--text-main)' }}>Imbalance Detected</h3>
+              <h3 className="modal-title" style={{ marginBottom: 0, color: 'var(--text-main)' }}>
+                Imbalance Detected
+              </h3>
             </div>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.95rem', lineHeight: 1.5, margin: 0 }}>
+            <p className="modal-text" style={{ marginBottom: 0, fontSize: '0.95rem' }}>
               Debit / Credit Imbalance Detected in one or more receipts. Are you sure you want to continue with the export?
             </p>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '8px' }}>
-              <button 
-                className="btn btn-secondary" 
-                onClick={cancelExport}
-                style={{ padding: '8px 16px' }}
-              >
+            <div className="row row-end" style={{ marginTop: '8px' }}>
+              <button className="btn btn-secondary" onClick={cancelExport}>
                 Cancel
               </button>
-              <button 
-                className="btn btn-primary" 
-                onClick={confirmExport}
-                style={{ padding: '8px 16px', background: '#f59e0b', color: '#fff', border: 'none' }}
-              >
+              <button className="btn btn-warning" onClick={confirmExport}>
                 Proceed to Export
               </button>
             </div>

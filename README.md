@@ -11,30 +11,82 @@ Store and office staff write transaction details **by hand on paper receipts**. 
 
 ### The Scan2Tally Solution
 1. **Snap / Scan**: Staff snap a photo of the handwritten paper receipt using a mobile phone, tablet, or scanner.
-2. **AI Extraction**: Scan2Tally sharpens the image and extracts the Date, Voucher Type, Debit/Credit Ledgers, Amounts, and Narrations automatically.
+2. **AI Extraction**: Scan2Tally reads the Date, Voucher Type, Debit/Credit Ledgers, Amounts and Narrations, then matches each ledger name against the company's real chart of accounts.
 3. **Side-by-Side Verification**: Accountants double-check and edit entries on a clean side-by-side verification screen with automatic Debit == Credit balance checks.
 4. **1-Click Tally Import**: Scan2Tally generates a standard Tally Prime importable Excel spreadsheet (`.xlsx`).
 
 ---
 
-## 🚀 Accomplishments So Far
+## 🚀 What Is Built
 
-### ✅ Phase 1: Database & Supabase Infrastructure (Complete)
-- Created [`supabase_schema.sql`](./supabase_schema.sql) containing full PostgreSQL DDL for 6 core tables (`organizations`, `users`, `scan_batches`, `receipts`, `transactions`, `exports`).
-- Implemented **Row Level Security (RLS)** with helper functions (`get_auth_user_org_id()`, `get_auth_user_role()`) to guarantee strict multi-tenant client data isolation.
+### Database & Supabase infrastructure
+- [`supabase_schema.sql`](./supabase_schema.sql) holds the full PostgreSQL DDL for 7 tables
+  (`organizations`, `users`, `scan_batches`, `receipts`, `ledgers`, `transactions`, `exports`).
+- **Row Level Security** on every table, with helper functions (`get_auth_user_org_id()`,
+  `get_auth_user_role()`) enforcing multi-tenant isolation in the database rather than in the client.
+- Migrations live in [`scripts/migrations/`](./scripts/migrations) and are safe to re-run.
 
-### ✅ Phase 2: React TypeScript (TSX) Web Interface (Complete)
-- Built a modern, fast React 18 + Vite SPA using **Strict TypeScript (TSX)** and modern CSS design tokens.
-- **3-Tier Role Permission System**:
-  - `Super Admin`: Platform owner panel for managing client organizations and global cloud storage.
-  - `Admin`: Client company manager overview.
-  - `Operator`: Data entry staff workspace for managing batches and uploading receipts.
-- **Scan Batch Hub**: Batch creation, renaming, and drag-and-drop receipt file upload.
-- **Side-by-Side Reviewer**: Original paper receipt image on the left, editable Tally transaction table on the right with live total calculation.
-- **Tally Excel Exporter**: Preview and 1-click download of Tally Prime `.xlsx` spreadsheets.
+### React TypeScript web interface
+- React 18 + Vite SPA in strict TypeScript.
+- **3-tier roles**:
+  - `Super Admin` — platform owner: client organizations and platform-wide figures.
+  - `Admin` — the company's books: an organisation overview, the chart of accounts, and staff accounts.
+  - `Operator` — data entry: batches, uploads and voucher review.
+- **Scan batch hub** with drag-and-drop upload, low-resolution warnings, and archiving.
+- **Side-by-side reviewer**: the paper voucher on the left, an editable transaction table on the
+  right, with live Dr/Cr totals and a picker backed by the organisation's real ledgers.
+- **Tally Excel exporter** with a preview, an unresolved-ledger warning, and a recorded history
+  of every file generated.
 
-### ✅ Phase 3 Foundation: Python FastAPI Backend (Complete)
-- Built FastAPI API server (`backend/main.py`) with CORS middleware, image preprocessing hooks, and openpyxl Tally Excel builder.
+### Python FastAPI backend
+- Multi-pass OpenAI Vision transcription with a **consensus check**: several independent readings
+  of the same voucher are compared, and a cell the model cannot read the same way twice is flagged
+  rather than presented as fact. Gemini is used as a fallback.
+- The voucher's own जम्मा total is read in a **separate** request and used only to reconcile —
+  never shown to the transcription pass, which would otherwise back-solve the line items to match it.
+- **Server-side background extraction** (below).
+- **Ledger matching** against the organisation's chart of accounts (below).
+
+---
+
+## 🧠 Two things worth knowing about the design
+
+### Extraction belongs to the server, not the tab
+
+Reading a voucher takes tens of seconds. If that work lives inside the browser's HTTP request,
+closing the tab, refreshing, or shutting a laptop lid abandons it — and the receipt is left saying
+"Processing" with nothing in existence able to finish it.
+
+So `POST /api/receipts/{id}/extract` returns `202` immediately and the server does the work: it
+reads the image out of storage itself, runs the extraction, and writes both the rows and the final
+status straight to the database. The browser's only jobs are to start the work and to watch the
+receipt row, which leaves it free to disappear at any moment.
+
+An extraction that dies with its process is picked up on start-up. Each job is **claimed** by the
+process running it, and the claim is refreshed while that process is alive, so a booting instance
+takes over only work whose claim nobody is refreshing — which is what makes it safe to run more
+than one backend process.
+
+### A ledger name Tally does not recognise is not a typo
+
+Tally accepts a voucher only if its ledger names already exist in the company. An unrecognised name
+is not a cosmetic problem: on import Tally either rejects the voucher or **quietly creates a second
+ledger**, splitting one account's balance across two without anyone noticing.
+
+An Admin enters the company's ledgers under **Chart of Accounts** (they can be pasted straight out
+of Tally). Every extracted name is then resolved against that list:
+
+| Result | Meaning | What happens to the name |
+| :--- | :--- | :--- |
+| `Exact` | same ledger, different spacing or case | rewritten to the Tally spelling |
+| `Alias` | a spelling the accountant registered | rewritten to the Tally spelling |
+| `Suggested` | close to a real ledger, but not the same | **left exactly as written** |
+| `Unmatched` | checked, and not in the chart of accounts | left as written, reported |
+| `Unchecked` | no chart of accounts to check against | left as written, nothing reported |
+
+Only a certain match rewrites a name. A suggestion is offered to the reviewer to confirm and never
+applied on its own — posting money to a merely-probable account would look identical to posting it
+to a certain one.
 
 ---
 
@@ -42,8 +94,8 @@ Store and office staff write transaction details **by hand on paper receipts**. 
 
 | Layer | Technology |
 | :--- | :--- |
-| **Frontend Web App** | React 18, Vite, TypeScript (TSX), Vanilla CSS, Lucide Icons, Supabase JS SDK |
-| **Backend API** | Python 3, FastAPI, Uvicorn, OpenCV, Pillow, OpenPyXL, Pandas |
+| **Frontend Web App** | React 18, Vite, TypeScript (TSX), Vanilla CSS, Lucide Icons, Supabase JS SDK, ExcelJS |
+| **Backend API** | Python 3, FastAPI, Uvicorn, httpx, OpenCV, Pillow, OpenAI / Gemini Vision |
 | **Database & Cloud** | Supabase (PostgreSQL, Supabase Auth, Cloud Storage Buckets) |
 | **Deployment ($0 Cost)** | Vercel (Frontend), Render (Backend API), Supabase Free Tier (Cloud DB) |
 
@@ -118,6 +170,25 @@ python3 main.py
 4. From **Project Settings → API**, copy the project URL and the **anon** key
    into `frontend/.env` as `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
 
+### Upgrading a database that already has data
+
+`supabase_schema.sql` is the schema for a **new** project. An existing database is brought up to
+date by running the files in [`scripts/migrations/`](./scripts/migrations) in order, in the SQL
+Editor. They are additive and safe to run more than once.
+
+| Migration | What it adds |
+| :--- | :--- |
+| `001_restrict_user_directory.sql` | limits the organisation-wide user directory to Admins |
+| `002_ledgers_claiming_audit.sql` | the `ledgers` chart of accounts, job claiming, and a stored copy of what the model returned |
+
+**Run `002` before deploying this version of the web app** — it reads the ledger columns the
+migration adds, and will show a load error without them.
+
+The *backend* is deliberately tolerant of the gap: it detects the missing columns at start-up,
+prints a warning, and carries on extracting vouchers with ledger matching switched off, so an
+extraction already running during an upgrade is not lost. Only one backend process may run safely
+in that state, because job claiming is one of the things `002` adds.
+
 The bucket is deliberately **private**: receipt images are served through
 short-lived signed URLs, so one organization cannot read another's scans by
 guessing a path.
@@ -166,8 +237,38 @@ a commit.
 
 ---
 
+## 🧪 Tests
+
+```bash
+cd backend
+source venv/bin/activate
+pip install -r requirements-dev.txt
+python3 -m pytest tests/ -q
+```
+
+They run offline: no database, no vision API, no network. What they cover is the logic that decides
+where money ends up — ledger matching, which side of a voucher an amount lands on, reconciliation
+against the printed total, and the consensus check across transcription runs.
+
+One of them, `test_match_key_agreement.py`, exists for a specific hazard. The rule that decides
+whether two spellings are the same ledger is written three times — as a generated column in
+Postgres, in `backend/ledger_matching.py`, and in `frontend/src/lib/ledgers.ts` — because all three
+layers need it independently. Three copies is three chances to change one of them, and the symptom
+would not be an error: a name would simply match in one part of the system and not another. That
+test runs the real TypeScript (via the esbuild Vite already depends on) and compares it against the
+Python. To include the Postgres copy as well, point it at a throwaway database:
+
+```bash
+TEST_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres" python3 -m pytest tests/ -q
+```
+
+---
+
 ## 📋 Next Roadmap Steps
 
-- **Phase 3 (In Progress)**: Connect live Gemini Vision AI API to `backend/main.py` for parsing real uploaded handwritten receipt photos.
-- **Phase 4**: Full multi-tenant client signup and custom ledger auto-complete rules per organization.
-- **Phase 5**: Production deployment to Vercel and Render.
+- **Deployment**: Vercel (frontend) and Render (backend API). Note that running more than one
+  backend instance requires migration `002` — job claiming is what keeps two of them from
+  extracting the same voucher.
+- **Ledger matching from real usage**: the similarity threshold in `backend/ledger_matching.py`
+  was chosen against representative names, not measured against a real chart of accounts. It is
+  worth revisiting once there are real vouchers to tune it on.

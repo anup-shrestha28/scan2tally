@@ -1,11 +1,14 @@
 fastapi>=0.110.0
 uvicorn>=0.28.0
 python-multipart>=0.0.9
+# Every call to Supabase — PostgREST, Auth and Storage — goes through httpx
+# directly. Declared explicitly rather than left as another package's transitive
+# dependency, which would break the backend the day that package drops it.
+httpx>=0.27.0
 opencv-python-headless>=4.9.0.80
 pillow>=10.3.0
-pandas>=2.2.1
+numpy>=1.26.0
 pydantic>=2.6.4
-supabase>=2.4.0
 python-dotenv>=1.0.1
 openai>=1.14.0
 google-generativeai>=0.4.0

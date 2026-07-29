@@ -5,10 +5,14 @@ import re
 import base64
 import hashlib
 import asyncio
+import socket
+import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 import httpx
+import ledger_matching
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -89,11 +93,24 @@ if not openai_available and GEMINI_API_KEY and GEMINI_API_KEY != "placeholder-ge
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Ledger matching and job claiming both need columns that arrived in
+    # migration 002, so find out whether this database actually has them before
+    # anything tries to write one.
+    await detect_schema_features()
+
     # An extraction that was running when this process last stopped left its
     # receipt sitting on "Processing" with nobody to finish it. Pick those up
     # now, so a server restart is a pause rather than a dead end.
     await resume_interrupted_extractions()
-    yield
+
+    # Claims go stale on purpose, so that a process which dies does not hold its
+    # work hostage. This is what keeps the claims of a process that is still
+    # alive from going stale underneath it.
+    heartbeat = asyncio.create_task(refresh_extraction_claims())
+    try:
+        yield
+    finally:
+        heartbeat.cancel()
 
 
 app = FastAPI(
@@ -764,9 +781,41 @@ INTERRUPTED_NO_IMAGE_ERROR = (
     "Please upload it again."
 )
 
+# Identifies this process among however many are running. Only ever compared for
+# equality — "is this claim mine?" — so any value unique per process will do.
+WORKER_ID = os.getenv("WORKER_ID") or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+# How often a live process reasserts its claims, and how long a claim may go
+# unrefreshed before another process may take the work over. The gap between
+# them is deliberately several heartbeats wide: a single slow database call must
+# never be enough to make a healthy job look abandoned.
+CLAIM_HEARTBEAT_SECONDS = 60
+CLAIM_STALE_SECONDS = 240
+
 # Fields the job runner needs about a receipt, including its batch's
 # organisation — transactions rows cannot be written without that.
-RECEIPT_JOB_SELECT = "id,filename,file_path,status,batch_id,uploaded_by,scan_batches(organization_id)"
+_RECEIPT_JOB_FIELDS = "id,filename,file_path,status,batch_id,uploaded_by,scan_batches(organization_id)"
+# The current claim, which decides whether the work is already someone else's.
+_RECEIPT_CLAIM_FIELDS = "extraction_worker,extraction_claimed_at"
+
+
+def receipt_job_select() -> str:
+    """Which receipt fields to ask for, given what this database actually has.
+
+    The claim columns arrived in migration 002. PostgREST fails the WHOLE query
+    when asked for a column that does not exist, so requesting them
+    unconditionally would not merely disable claiming on an un-migrated database
+    — it would make every receipt look as though it had been deleted.
+    """
+    if job_claiming_ready:
+        return f"{_RECEIPT_JOB_FIELDS},{_RECEIPT_CLAIM_FIELDS}"
+    return _RECEIPT_JOB_FIELDS
+
+# Set at start-up by detect_schema_features(). The chart of accounts and the
+# claim columns arrived in migration 002, so a database that has not had it
+# applied must not be sent rows or patches that carry them.
+ledger_matching_ready = False
+job_claiming_ready = False
 
 _extraction_semaphore: Optional[asyncio.Semaphore] = None
 # Receipts this process is already extracting, so a double-click or an impatient
@@ -785,6 +834,60 @@ def _extraction_slot() -> asyncio.Semaphore:
     return _extraction_semaphore
 
 
+def _timestamp(moment: datetime) -> str:
+    """UTC in a form Postgres reads unambiguously and PostgREST accepts in a filter."""
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _now() -> str:
+    return _timestamp(datetime.now(timezone.utc))
+
+
+async def _column_exists(client: httpx.AsyncClient, table: str, column: str) -> bool:
+    """Whether a table and column are actually present in this database."""
+    res = await client.get(
+        f"{SUPABASE_URL}/rest/v1/{table}",
+        headers=_svc_headers(),
+        params={"select": column, "limit": "1"},
+    )
+    return res.status_code == 200
+
+
+async def detect_schema_features() -> None:
+    """Works out which optional features this database can support.
+
+    Everything here depends on migration 002. Running without it is a perfectly
+    reasonable state to be in — an existing deployment on the morning of an
+    upgrade — and the app should keep extracting vouchers in it rather than fail
+    every job on a missing column. What it must not do is fail quietly, hence
+    the warning.
+    """
+    global ledger_matching_ready, job_claiming_ready
+    if not supabase_admin_available:
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            ledger_matching_ready = await _column_exists(client, "ledgers", "id")
+            job_claiming_ready = await _column_exists(client, "receipts", "extraction_worker")
+    except Exception as err:
+        print(f"⚠️ Could not check the database schema: {err}")
+        return
+
+    if ledger_matching_ready and job_claiming_ready:
+        print("✅ Chart-of-accounts matching and job claiming enabled")
+    else:
+        # Not a fault: everything works. This is a note about one deployment
+        # constraint, so it says what to do and when rather than sounding alarmed
+        # on every single start-up.
+        print(
+            "ℹ️ Running in single-process mode (migration 002 not applied). "
+            "Fine for development. Before running more than one backend instance, "
+            "apply scripts/migrations/002_ledgers_claiming_audit.sql — without it "
+            "nothing stops two instances extracting the same receipt twice."
+        )
+
+
 def _spawn(coro) -> None:
     task = asyncio.create_task(coro)
     _background_tasks.add(task)
@@ -800,15 +903,115 @@ async def _patch_receipt(client: httpx.AsyncClient, receipt_id: str, patch: dict
     )
 
 
+def _finished(patch: dict) -> dict:
+    """Adds the release of this process's claim to a terminal status change.
+
+    A receipt that has stopped being worked on must stop looking claimed, or the
+    row keeps naming a worker that is no longer doing anything with it.
+    """
+    if not job_claiming_ready:
+        return patch
+    return {**patch, "extraction_worker": None, "extraction_claimed_at": None}
+
+
+async def _claim_receipt(
+    client: httpx.AsyncClient, receipt_id: str, *, only_if_stale: bool
+) -> bool:
+    """Takes ownership of a receipt for this process. Returns whether it won it.
+
+    The claim is the UPDATE itself, which is what makes this safe with several
+    processes running: two of them racing both issue the same conditional write,
+    Postgres serialises the pair, and the second finds its condition no longer
+    true and updates nothing. PostgREST hands back the rows it changed, so an
+    empty response means "someone else got there first" — a decidable answer,
+    rather than the read-then-write guess that a status check alone would be.
+    """
+    params = {"id": f"eq.{receipt_id}"}
+    patch = {
+        "status": "Processing",
+        "error_message": None,
+        "verification_warnings": [],
+    }
+
+    if job_claiming_ready:
+        patch["extraction_worker"] = WORKER_ID
+        patch["extraction_claimed_at"] = _now()
+        if only_if_stale:
+            cutoff = _timestamp(datetime.now(timezone.utc) - timedelta(seconds=CLAIM_STALE_SECONDS))
+            params["or"] = f"(extraction_claimed_at.is.null,extraction_claimed_at.lt.{cutoff})"
+
+    res = await client.patch(
+        f"{SUPABASE_URL}/rest/v1/receipts",
+        headers={**_svc_headers(), "Prefer": "return=representation"},
+        params=params,
+        json=patch,
+    )
+    if res.status_code not in (200, 201):
+        return False
+    # Without the claim columns there is nothing to race over, so the only
+    # meaningful question is whether the write landed.
+    return bool(res.json()) if job_claiming_ready else True
+
+
+def _claim_is_live(receipt: dict) -> bool:
+    """Whether some process is currently working on this receipt.
+
+    A claim that has stopped being refreshed belonged to a process that died, so
+    it is treated as free rather than trusted forever — that is the difference
+    between a restart being a pause and being a dead end.
+    """
+    if not job_claiming_ready:
+        return False
+    claimed_at = receipt.get("extraction_claimed_at")
+    if not claimed_at:
+        return False
+    try:
+        moment = datetime.fromisoformat(str(claimed_at).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - moment).total_seconds() < CLAIM_STALE_SECONDS
+
+
+async def refresh_extraction_claims() -> None:
+    """Reasserts this process's claims for as long as it is alive.
+
+    Runs for the lifetime of the server. Failures are logged and shrugged off:
+    one missed round is several heartbeats short of a claim going stale, which is
+    exactly the margin those constants were chosen to give.
+    """
+    while True:
+        await asyncio.sleep(CLAIM_HEARTBEAT_SECONDS)
+        in_flight = list(_jobs_in_flight)
+        if not in_flight or not job_claiming_ready:
+            continue
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                await client.patch(
+                    f"{SUPABASE_URL}/rest/v1/receipts",
+                    headers=_svc_headers(),
+                    # Scoped to rows this process still owns, so a job taken over
+                    # elsewhere is not quietly reclaimed from under its new owner.
+                    params={
+                        "id": f"in.({','.join(in_flight)})",
+                        "extraction_worker": f"eq.{WORKER_ID}",
+                    },
+                    json={"extraction_claimed_at": _now()},
+                )
+        except Exception as err:
+            print(f"⚠️ Could not refresh extraction claims: {err}")
+
+
 async def _fail_receipt(receipt_id: str, message: str) -> None:
     """Records a terminal failure. Never raises — this is the last line of defence."""
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            await _patch_receipt(client, receipt_id, {
+            await _patch_receipt(client, receipt_id, _finished({
                 "status": "Failed",
                 "error_message": message,
                 "verification_warnings": [],
-            })
+            }))
     except Exception as err:
         print(f"⚠️ Could not record failure for receipt {receipt_id}: {err}")
 
@@ -853,6 +1056,11 @@ def normalize_transaction_rows(
             "needs_review": t.get("needs_review") is True,
             "narration": t.get("narration") or "",
             "updated_by": updated_by,
+            # What the model actually said about this line, so a figure disputed
+            # months later can be told apart from one a reviewer corrected. The
+            # browser carries this across its own rewrites of the row
+            # (saveTransactionsForReceipt), which is what keeps it comparable.
+            "raw_extracted_data": t,
         })
     return rows
 
@@ -886,12 +1094,18 @@ async def _extract_and_store(receipt: dict, user_id: Optional[str]) -> None:
     warnings = (result.get("verification") or {}).get("warnings") or []
 
     async with httpx.AsyncClient(timeout=60) as client:
+        # Kept whatever happens: a failed reading is precisely the one worth
+        # being able to look at afterwards. Gated on the same probe as claiming
+        # because raw_extraction is the other receipts column migration 002 adds.
+        audit = {"raw_extraction": result} if job_claiming_ready else {}
+
         if error_msg or not transactions:
-            await _patch_receipt(client, receipt_id, {
+            await _patch_receipt(client, receipt_id, _finished({
                 "status": "Failed",
                 "error_message": error_msg or DEFAULT_EXTRACTION_ERROR,
                 "verification_warnings": [],
-            })
+                **audit,
+            }))
             print(f"❌ Extraction failed for {filename}: {error_msg or DEFAULT_EXTRACTION_ERROR}")
             return
 
@@ -902,6 +1116,14 @@ async def _extract_and_store(receipt: dict, user_id: Optional[str]) -> None:
             organization_id=receipt["organization_id"],
             updated_by=user_id or receipt.get("uploaded_by"),
         )
+
+        # Resolve each name against the organisation's real chart of accounts.
+        # Until this happens a row carries whatever was written on the paper,
+        # which Tally will not recognise. Only a certain match rewrites the name;
+        # anything less is reported for a person to confirm.
+        if ledger_matching_ready:
+            ledgers = await _load_org_ledgers(client, receipt["organization_id"])
+            warnings = warnings + ledger_matching.apply_to_rows(rows, ledgers)
 
         # Replace rather than append, so a retry cannot leave the voucher with
         # the rows from a previous attempt still attached to it.
@@ -921,13 +1143,34 @@ async def _extract_and_store(receipt: dict, user_id: Optional[str]) -> None:
         # Only now is the receipt Extracted. Flipping the status before the rows
         # are safely stored would let the app show a finished receipt that has
         # nothing behind it.
-        await _patch_receipt(client, receipt_id, {
+        await _patch_receipt(client, receipt_id, _finished({
             "status": "Extracted",
             "error_message": None,
             "verification_warnings": warnings,
-        })
+            **audit,
+        }))
 
     print(f"✅ Stored {len(rows)} transactions for {filename} (receipt {receipt_id})")
+
+
+async def _load_org_ledgers(client: httpx.AsyncClient, organization_id: str) -> List[dict]:
+    """The organisation's active chart of accounts, for matching against."""
+    res = await client.get(
+        f"{SUPABASE_URL}/rest/v1/ledgers",
+        headers=_svc_headers(),
+        params={
+            "select": "id,name,aliases,is_active",
+            "organization_id": f"eq.{organization_id}",
+            "is_active": "is.true",
+        },
+    )
+    if res.status_code != 200:
+        # Matching is an improvement on the extracted name, not a precondition
+        # for having one, so a failure here leaves the rows unmatched rather
+        # than losing a voucher that was read perfectly well.
+        print(f"⚠️ Could not load the chart of accounts: {res.text}")
+        return []
+    return res.json() or []
 
 
 async def _run_extraction_job(receipt: dict, user_id: Optional[str]) -> None:
@@ -962,7 +1205,7 @@ async def _load_receipt_for_caller(receipt_id: str, caller: dict) -> dict:
         res = await client.get(
             f"{SUPABASE_URL}/rest/v1/receipts",
             headers=_svc_headers(),
-            params={"select": RECEIPT_JOB_SELECT, "id": f"eq.{receipt_id}"},
+            params={"select": receipt_job_select(), "id": f"eq.{receipt_id}"},
         )
     rows = res.json() if res.status_code == 200 else []
     if not rows:
@@ -988,22 +1231,31 @@ async def start_receipt_extraction(receipt_id: str, authorization: Optional[str]
     caller = await resolve_caller(authorization)
     receipt = await _load_receipt_for_caller(receipt_id, caller)
 
-    if receipt_id in _jobs_in_flight:
+    # Already running here, or already running in another process whose claim is
+    # still being refreshed. Either way the work is under way and starting it a
+    # second time would only duplicate the vision-API bill.
+    if receipt_id in _jobs_in_flight or (
+        receipt.get("status") == "Processing" and _claim_is_live(receipt)
+    ):
         return {"receipt_id": receipt_id, "status": "Processing", "detail": "Already being extracted."}
+
     if not receipt.get("file_path"):
         raise HTTPException(status_code=409, detail="The image is still uploading. Please try again in a moment.")
     if not receipt.get("organization_id"):
         raise HTTPException(status_code=400, detail="That receipt's batch is not linked to an organisation.")
 
-    # Claim the receipt before returning, so the status the caller sees next is
-    # already Processing and a second click finds the job in flight.
+    # Registered before the first await, so two requests arriving together find
+    # each other rather than both getting past the check above.
     _jobs_in_flight.add(receipt_id)
-    async with httpx.AsyncClient(timeout=20) as client:
-        await _patch_receipt(client, receipt_id, {
-            "status": "Processing",
-            "error_message": None,
-            "verification_warnings": [],
-        })
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            won = await _claim_receipt(client, receipt_id, only_if_stale=False)
+    except Exception:
+        _jobs_in_flight.discard(receipt_id)
+        raise
+    if not won:
+        _jobs_in_flight.discard(receipt_id)
+        raise HTTPException(status_code=409, detail="That receipt could not be started. Please try again.")
 
     _spawn(_run_extraction_job(receipt, caller.get("id")))
     return {"receipt_id": receipt_id, "status": "Processing"}
@@ -1012,8 +1264,10 @@ async def start_receipt_extraction(receipt_id: str, authorization: Optional[str]
 async def resume_interrupted_extractions() -> None:
     """Restarts extractions that died with a previous server process.
 
-    Assumes a single server process: with several running, one starting up would
-    take over work another is actively doing.
+    Only work whose claim has gone stale is taken over. That distinction is what
+    makes it safe to run more than one of these processes: a receipt being
+    extracted right now by a healthy instance has a claim that instance is still
+    refreshing, so a booting neighbour reads it as taken and leaves it alone.
     """
     if not supabase_admin_available:
         return
@@ -1022,7 +1276,7 @@ async def resume_interrupted_extractions() -> None:
             res = await client.get(
                 f"{SUPABASE_URL}/rest/v1/receipts",
                 headers=_svc_headers(),
-                params={"select": RECEIPT_JOB_SELECT, "status": "eq.Processing"},
+                params={"select": receipt_job_select(), "status": "eq.Processing"},
             )
             if res.status_code != 200:
                 print(f"⚠️ Could not check for interrupted extractions: {res.text}")
@@ -1032,15 +1286,19 @@ async def resume_interrupted_extractions() -> None:
             resumed = 0
             for receipt in stranded:
                 receipt["organization_id"] = (receipt.get("scan_batches") or {}).get("organization_id")
-                if receipt["id"] in _jobs_in_flight:
+                if receipt["id"] in _jobs_in_flight or _claim_is_live(receipt):
                     continue
                 # Without an image or an organisation there is nothing to retry,
                 # and leaving it Processing would strand it permanently.
                 if not receipt.get("file_path") or not receipt["organization_id"]:
-                    await _patch_receipt(client, receipt["id"], {
+                    await _patch_receipt(client, receipt["id"], _finished({
                         "status": "Failed",
                         "error_message": INTERRUPTED_NO_IMAGE_ERROR,
-                    })
+                    }))
+                    continue
+                # The claim is what settles the race when two processes start at
+                # once and both see the same stranded receipt.
+                if not await _claim_receipt(client, receipt["id"], only_if_stale=True):
                     continue
                 _jobs_in_flight.add(receipt["id"])
                 _spawn(_run_extraction_job(receipt, receipt.get("uploaded_by")))

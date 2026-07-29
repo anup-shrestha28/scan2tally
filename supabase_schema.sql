@@ -13,6 +13,10 @@ CREATE TYPE user_status AS ENUM ('Active', 'Inactive');
 CREATE TYPE batch_status AS ENUM ('Active', 'Archived');
 CREATE TYPE receipt_status AS ENUM ('Pending', 'Processing', 'Extracted', 'Failed');
 CREATE TYPE entry_type AS ENUM ('Dr', 'Cr');
+-- How confident we are that a row's ledger name is one Tally will accept.
+-- 'Unchecked' means the organisation has no chart of accounts yet, so there was
+-- nothing to check against — deliberately distinct from "checked and not found".
+CREATE TYPE ledger_match AS ENUM ('Unchecked', 'Exact', 'Alias', 'Suggested', 'Unmatched');
 
 -- 3. Table: organizations
 CREATE TABLE IF NOT EXISTS public.organizations (
@@ -66,6 +70,52 @@ CREATE TABLE IF NOT EXISTS public.receipts (
     error_message TEXT,
     -- Reconciliation notices from extraction (advisory, not failures).
     verification_warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+    -- Which backend process is extracting this receipt, and when it last said so.
+    -- Extraction resumes on start-up, which is correct for a single process and
+    -- harmful for several: without a claim, a booting instance would take over
+    -- work another instance is still running. The timestamp is refreshed while
+    -- the job is alive, so a claim that stopped being refreshed belongs to a
+    -- process that died and is free to take over.
+    extraction_worker TEXT,
+    extraction_claimed_at TIMESTAMPTZ,
+    -- Exactly what the vision model returned, before any normalisation. Kept
+    -- here rather than only on the rows because the reviewer rewrites the rows,
+    -- and the point of this column is to survive that.
+    raw_extraction JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 6b. Table: ledgers — one organisation's chart of accounts
+--
+-- Extraction reads whatever ledger name is written on the paper, and Tally only
+-- recognises names that already exist in the company. An unrecognised name is
+-- not a cosmetic problem: on import Tally either rejects the voucher or quietly
+-- creates a SECOND ledger, splitting one account's balance across two without
+-- anyone noticing. This table is what an extracted name is matched against.
+CREATE TABLE IF NOT EXISTS public.ledgers (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    organization_id UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
+    -- Spelled EXACTLY as it is in Tally. This is the string that gets exported.
+    name TEXT NOT NULL,
+    -- The Tally group the ledger sits under, e.g. 'Indirect Expenses'. Carried
+    -- for the accountant's benefit; nothing matches on it.
+    parent_group TEXT,
+    -- Other spellings staff actually write by hand: 'Bank A/c' for
+    -- 'Bank Account'. Matching treats these as equal to the name itself.
+    aliases TEXT[] NOT NULL DEFAULT '{}',
+    -- Normalised name, used to compare two spellings of the same ledger.
+    -- Generated rather than written by the application so it cannot drift from
+    -- `name`. The identical rule lives in backend/ledger_matching.py
+    -- (`match_key`) and frontend/src/lib/db.ts (`ledgerMatchKey`) — all three
+    -- must agree or the same name will match in one place and not another.
+    match_key TEXT GENERATED ALWAYS AS (
+        lower(regexp_replace(name, '[^A-Za-z0-9]+', '', 'g'))
+    ) STORED,
+    -- Retiring a ledger keeps the history of rows already posted to it, while
+    -- taking it out of matching and out of the reviewer's picker.
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_by UUID REFERENCES public.users(id),
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -91,7 +141,15 @@ CREATE TABLE IF NOT EXISTS public.transactions (
     voucher_date TEXT,
     voucher_type TEXT DEFAULT 'Journal',
     entry_type entry_type NOT NULL,
+    -- The name that gets exported. Holds the canonical Tally spelling once the
+    -- row is confidently matched to a ledger, and the name as written on the
+    -- paper while the match is still only a suggestion.
     ledger_name TEXT NOT NULL DEFAULT '',
+    -- Which ledger in the organisation's chart of accounts this row resolved to.
+    ledger_id UUID REFERENCES public.ledgers(id) ON DELETE SET NULL,
+    ledger_match ledger_match NOT NULL DEFAULT 'Unchecked',
+    -- Similarity behind a 'Suggested' match, 0-1. Null in every other state.
+    ledger_match_score NUMERIC(4, 3),
     debit_amount NUMERIC(14, 2) NOT NULL DEFAULT 0,
     credit_amount NUMERIC(14, 2) NOT NULL DEFAULT 0,
     -- Set when repeated extraction passes disagreed on this line's amount.
@@ -126,7 +184,16 @@ CREATE INDEX IF NOT EXISTS idx_receipts_batch ON public.receipts(batch_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_receipt ON public.transactions(receipt_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_batch ON public.transactions(batch_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_org ON public.transactions(organization_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_ledger ON public.transactions(ledger_id);
 CREATE INDEX IF NOT EXISTS idx_exports_batch ON public.exports(batch_id);
+CREATE INDEX IF NOT EXISTS idx_ledgers_org ON public.ledgers(organization_id);
+-- Two spellings of one ledger defeat the entire point of having a chart of
+-- accounts, so 'TDS Payable' and 'tds payable' collide here rather than becoming
+-- two separate accounts.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledgers_org_key ON public.ledgers(organization_id, match_key);
+-- Start-up recovery scans for stranded jobs, which is a tiny slice of the table.
+CREATE INDEX IF NOT EXISTS idx_receipts_processing
+    ON public.receipts(status) WHERE status = 'Processing';
 
 -- 9b. Table privileges
 -- RLS filters rows, it does not grant access to the table in the first place;
@@ -152,6 +219,7 @@ ALTER TABLE public.scan_batches ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.receipts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.transactions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.exports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.ledgers ENABLE ROW LEVEL SECURITY;
 
 -- 11. Helper Function: Get Current User's Organization ID
 CREATE OR REPLACE FUNCTION public.get_auth_user_org_id()
@@ -189,6 +257,9 @@ CREATE POLICY "Super Admins Full Access Transactions" ON public.transactions
     FOR ALL USING (public.get_auth_user_role() = 'Super Admin');
 
 CREATE POLICY "Super Admins Full Access Exports" ON public.exports
+    FOR ALL USING (public.get_auth_user_role() = 'Super Admin');
+
+CREATE POLICY "Super Admins Full Access Ledgers" ON public.ledgers
     FOR ALL USING (public.get_auth_user_role() = 'Super Admin');
 
 -- Admin & Operator Organization Data Isolation
@@ -250,6 +321,23 @@ CREATE POLICY "Users Access Exports in Org Batches" ON public.exports
         )
     );
 
+-- Everyone in the organisation READS the chart of accounts: an Operator needs it
+-- to pick the right ledger while reviewing a voucher.
+CREATE POLICY "Users Read Org Ledgers" ON public.ledgers
+    FOR SELECT USING (organization_id = public.get_auth_user_org_id());
+
+-- Only Admins MAINTAIN it. This list decides what every future extraction
+-- matches against, so a mistyped entry here misroutes vouchers company-wide —
+-- that is an accountant's decision, not a data-entry one.
+CREATE POLICY "Admins Manage Org Ledgers" ON public.ledgers
+    FOR ALL USING (
+        public.get_auth_user_role() = 'Admin' AND
+        organization_id = public.get_auth_user_org_id()
+    ) WITH CHECK (
+        public.get_auth_user_role() = 'Admin' AND
+        organization_id = public.get_auth_user_org_id()
+    );
+
 -- 14. Keep updated_at honest without every caller remembering to set it
 CREATE OR REPLACE FUNCTION public.touch_updated_at()
 RETURNS TRIGGER AS $$
@@ -268,6 +356,8 @@ CREATE TRIGGER trg_scan_batches_touch BEFORE UPDATE ON public.scan_batches
 CREATE TRIGGER trg_receipts_touch BEFORE UPDATE ON public.receipts
     FOR EACH ROW EXECUTE FUNCTION public.touch_updated_at();
 CREATE TRIGGER trg_transactions_touch BEFORE UPDATE ON public.transactions
+    FOR EACH ROW EXECUTE FUNCTION public.touch_updated_at();
+CREATE TRIGGER trg_ledgers_touch BEFORE UPDATE ON public.ledgers
     FOR EACH ROW EXECUTE FUNCTION public.touch_updated_at();
 
 -- 15. Storage bucket for receipt images
