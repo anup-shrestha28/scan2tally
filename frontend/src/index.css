@@ -34,9 +34,8 @@
   --danger-text: #fb7185;
   --warn-bg: #3a2a06;
 
-  /* Must out-contrast everything else on screen and must not be mistaken
-     for the indigo of interactive chrome — 12.5:1 against the field. */
-  --focus-ring: #fde68a;
+  /* Keyboard focus stays within the product's indigo interaction language. */
+  --focus-ring: #818cf8;
 
   /* Type — six steps, six roles. See .u-fs-* helpers below. */
   --fs-2xs: 11px;   /* uppercase micro-labels: th, pills, role tags, Dr/Cr */
@@ -129,9 +128,7 @@ body.light {
   --danger-text: #be123c;
   --warn-bg: #fef3c7;
 
-  /* Amber would collide with warnings on light, so the ring flips to blue
-     at 8.6:1 against white. */
-  --focus-ring: #1d4ed8;
+  --focus-ring: #4f46e5;
 
   --primary-hover: #4338ca;
 
@@ -291,7 +288,7 @@ body {
   color: var(--primary-text);
   box-shadow: inset 0 -2px var(--primary);
 }
-.nav-link:focus { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 2px; }
+.nav-link:focus-visible { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 2px; }
 
 .account-menu {
   position: relative;
@@ -319,7 +316,7 @@ body {
   background: var(--bg-surface-2);
   border-color: var(--border);
 }
-.account-trigger:focus { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 2px; }
+.account-trigger:focus-visible { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 2px; }
 .account-trigger-name {
   flex: 1;
   min-width: 0;
@@ -382,7 +379,7 @@ body {
   cursor: pointer;
 }
 .account-menu-item:hover { background: var(--bg-surface-2); }
-.account-menu-item:focus { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 1px; }
+.account-menu-item:focus-visible { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 1px; }
 .account-logout { color: var(--danger-text); }
 
 .user-avatar {
@@ -480,8 +477,7 @@ button:not(:disabled):active {
   transform: translateY(1px);
 }
 
-.btn:focus-visible,
-.btn:focus {
+.btn:focus-visible {
   outline: var(--bw-focus) solid var(--focus-ring);
   outline-offset: 2px;
 }
@@ -1316,8 +1312,9 @@ body.light .login-card { box-shadow: none; }
 .form-textarea { padding-top: var(--sp-2); padding-bottom: var(--sp-2); }
 .form-input::placeholder, .form-textarea::placeholder { color: var(--text-3); opacity: 1; }
 .form-input:focus, .form-select:focus, .form-textarea:focus {
-  outline: var(--bw-focus) solid var(--focus-ring);
-  outline-offset: 2px;
+  border-color: var(--primary);
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 22%, transparent);
 }
 .form-input:disabled, .form-select:disabled, .form-textarea:disabled {
   color: var(--text-3);
@@ -1363,8 +1360,9 @@ input:-webkit-autofill:focus {
 
 .cell-input:focus {
   background-color: var(--bg-field);
-  outline: var(--bw-focus) solid var(--focus-ring);
-  outline-offset: 2px;
+  border-color: var(--primary);
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 22%, transparent);
   text-overflow: clip;
 }
 
@@ -1400,7 +1398,7 @@ input:-webkit-autofill:focus {
   font: var(--fw-bold) var(--fs-2xs)/1 var(--font-family);
   cursor: pointer;
 }
-.amount-confirm:focus { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 2px; }
+.amount-confirm:focus-visible { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 2px; }
 
 .amount-debit, .amount-credit { color: var(--text-1); }
 
@@ -1489,7 +1487,7 @@ input[type='number']::-webkit-inner-spin-button {
 .custom-table tr:hover td {
   background-color: var(--bg-surface-2);
 }
-.custom-table tr:focus-within td { box-shadow: inset 0 0 0 var(--bw-focus) var(--focus-ring); }
+.custom-table tr:focus-within td { background-color: color-mix(in srgb, var(--primary) 3%, transparent); }
 
 /* Transaction editor grid (reviewer).
    Declared after .custom-table so its tighter padding wins at equal
@@ -1750,7 +1748,11 @@ input[type='number']::-webkit-inner-spin-button {
   cursor: pointer;
 }
 .status-filter select:hover { border-color: var(--primary); }
-.status-filter select:focus-visible { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 2px; }
+.status-filter select:focus-visible {
+  border-color: var(--primary);
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 22%, transparent);
+}
 
 @media (max-width: 640px) {
   .page-header-actions,
@@ -2030,7 +2032,7 @@ input[type='number']::-webkit-inner-spin-button {
   border-color: var(--primary);
   background: color-mix(in srgb, var(--primary) 5%, var(--bg-surface));
 }
-.dropzone:focus-within { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 2px; }
+.dropzone:has(.dropzone-input:focus-visible) { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 2px; }
 .dropzone-locked {
   opacity: 0.5;
   cursor: not-allowed;
@@ -2286,7 +2288,11 @@ input[type='number']::-webkit-inner-spin-button {
   cursor: pointer;
 }
 .page-size-control select:hover { border-color: var(--border-strong); }
-.page-size-control select:focus-visible { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 1px; }
+.page-size-control select:focus-visible {
+  border-color: var(--primary);
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 22%, transparent);
+}
 .pagination-controls { display: flex; align-items: center; gap: 4px; }
 .pagination-controls button {
   display: inline-flex;
@@ -2334,7 +2340,7 @@ input[type='number']::-webkit-inner-spin-button {
 }
 .export-history-summary { margin-bottom: 0; cursor: pointer; list-style-position: outside; }
 .export-history[open] .export-history-summary { margin-bottom: var(--sp-4); }
-.export-history-summary:focus { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 2px; }
+.export-history-summary:focus-visible { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 2px; }
 
 /* ============================================================
    Image preview
@@ -2388,10 +2394,10 @@ input[type='number']::-webkit-inner-spin-button {
   cursor: pointer;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
 }
-.rotate-btn:focus,
-.input-affix-btn:focus,
-.theme-toggle:focus,
-.alert-dismiss:focus { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 2px; }
+.rotate-btn:focus-visible,
+.input-affix-btn:focus-visible,
+.theme-toggle:focus-visible,
+.alert-dismiss:focus-visible { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 2px; }
 
 /* Compact rotate control that lives in a panel header. Hover was previously
    two JavaScript handlers per button; CSS does it without a re-render. */
@@ -2520,7 +2526,7 @@ input[type='number']::-webkit-inner-spin-button {
   border-radius: 50%;
   background: var(--warn-text);
 }
-.receipt-dot:focus { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 2px; }
+.receipt-dot:focus-visible { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 2px; }
 
 .nav-step {
   display: inline-flex;
@@ -2543,7 +2549,7 @@ input[type='number']::-webkit-inner-spin-button {
   cursor: pointer;
 }
 .nav-step-active:hover { background: color-mix(in srgb, var(--bg-surface-2) 80%, var(--text-1) 6%); }
-.nav-step:focus { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 2px; }
+.nav-step:focus-visible { outline: var(--bw-focus) solid var(--focus-ring); outline-offset: 2px; }
 
 @media (max-width: 980px) {
   .reviewer-nav { flex-wrap: wrap; gap: var(--sp-2); }
