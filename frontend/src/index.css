@@ -263,10 +263,32 @@ body {
 }
 
 .user-context {
-  gap: 8px;
-  max-width: 430px;
+  gap: var(--sp-2);
+  min-width: 220px;
+  max-width: 320px;
   font-size: var(--fs-xs);
   white-space: nowrap;
+}
+
+.user-avatar {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--primary-text);
+  background: var(--bg-surface-2);
+  border: var(--bw-hair) solid var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+
+.user-identity {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  line-height: var(--lh-tight);
 }
 
 .context-org,
@@ -276,12 +298,20 @@ body {
 }
 
 .context-org {
-  max-width: 135px;
-  font-weight: var(--fw-head);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  max-width: 100%;
+  color: var(--text-2);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-label);
 }
 
 .context-user {
-  max-width: 170px;
+  max-width: 100%;
+  color: var(--text-1);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-head);
 }
 
 .context-divider {

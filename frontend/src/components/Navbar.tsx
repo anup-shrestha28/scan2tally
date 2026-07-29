@@ -88,11 +88,16 @@ export default function Navbar({
             )}
 
             <div className="user-badge user-context">
-              <Building2 size={15} color="var(--text-muted)" />
-              <span className="context-org">{currentUser.orgName || 'Platform Owner'}</span>
-              <span className="context-divider" />
-              <UserIcon size={15} color="var(--text-muted)" />
-              <span className="context-user">{currentUser.name}</span>
+              <span className="user-avatar" aria-hidden="true">
+                <UserIcon size={14} />
+              </span>
+              <span className="user-identity">
+                <span className="context-user">{currentUser.name}</span>
+                <span className="context-org">
+                  <Building2 size={11} />
+                  {currentUser.orgName || 'Platform Owner'}
+                </span>
+              </span>
               <span className={`role-tag ${getRoleClass(currentUser.role)}`}>
                 {currentUser.role}
               </span>
