@@ -773,11 +773,11 @@ export default function SideBySideReviewer({
                 Cancel
               </button>
               <button 
-                className="btn btn-primary" 
+                className="btn btn-primary imbalance-proceed-btn" 
                 onClick={confirmExport}
                 style={{ padding: '8px 16px', background: '#f59e0b', color: '#fff', border: 'none' }}
               >
-                Proceed to Export
+                Continue to Excel Preview
               </button>
             </div>
           </div>

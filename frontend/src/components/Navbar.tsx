@@ -74,17 +74,22 @@ export default function Navbar({
               ) : (
                 <button className="btn btn-secondary btn-sm" onClick={onManageUsers} title="Manage team members">
                   <Users size={15} />
-                  <span>Team</span>
+                  <span>Manage Users</span>
                 </button>
               )
             )}
 
             <div className="user-badge user-context">
-              <Building2 size={15} color="#94a3b8" />
-              <span className="context-org">{currentUser.orgName || 'Platform Owner'}</span>
-              <span className="context-divider" />
-              <UserIcon size={15} color="#94a3b8" />
-              <span className="context-user">{currentUser.name}</span>
+              <span className="user-avatar">
+                <UserIcon size={14} />
+              </span>
+              <div className="user-identity">
+                <span className="context-user">{currentUser.name}</span>
+                <span className="context-org">
+                  <Building2 size={11} />
+                  {currentUser.orgName || 'Platform Owner'}
+                </span>
+              </div>
               <span className={`role-tag ${getRoleClass(currentUser.role)}`}>
                 {currentUser.role}
               </span>
