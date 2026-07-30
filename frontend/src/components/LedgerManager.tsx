@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
-  BookOpen, Plus, Loader2, AlertCircle, Trash2, Edit2, Check, X, Upload, RotateCcw, Search, ArrowLeft,
+  BookOpen, Plus, Loader2, AlertCircle, Trash2, Edit2, Check, X, Upload, RotateCcw,
 } from 'lucide-react';
 import { Ledger, User } from '../types';
 import { fetchLedgers, createLedger, updateLedger, importLedgers } from '../lib/db';
@@ -38,7 +38,6 @@ export default function LedgerManager({ currentUser, onBack }: LedgerManagerProp
 
   const [showImport, setShowImport] = useState(false);
   const [pasted, setPasted] = useState('');
-  const [filter, setFilter] = useState('');
 
   const load = async () => {
     try {
@@ -169,19 +168,12 @@ export default function LedgerManager({ currentUser, onBack }: LedgerManagerProp
   }
 
   const active = ledgers.filter(l => l.is_active).length;
-  const normalizedFilter = filter.trim().toLocaleLowerCase();
-  const filteredLedgers = normalizedFilter
-    ? ledgers.filter(ledger =>
-        [ledger.name, ledger.parent_group || '', ...ledger.aliases]
-          .some(value => value.toLocaleLowerCase().includes(normalizedFilter))
-      )
-    : ledgers;
 
   return (
     <div className="page page-compact">
       <div className="page-header">
         <div>
-          <h2 className="page-title">Chart of Accounts</h2>
+          <h2 className="page-title" style={{ fontSize: '1.4rem' }}>Chart of Accounts</h2>
           <p className="page-subtitle page-subtitle-wide">
             The ledgers that exist in your Tally company. Extracted vouchers are matched
             against this list, so a name here is a name Tally will accept on import.
@@ -191,9 +183,7 @@ export default function LedgerManager({ currentUser, onBack }: LedgerManagerProp
           <button className="btn btn-secondary" onClick={() => setShowImport(v => !v)}>
             <Upload size={16} /> Paste from Tally
           </button>
-          <button className="back-link" onClick={onBack}>
-            <ArrowLeft size={16} /> Workspace
-          </button>
+          <button className="btn btn-secondary" onClick={onBack}>Back to Workspace</button>
         </div>
       </div>
 
@@ -275,22 +265,10 @@ export default function LedgerManager({ currentUser, onBack }: LedgerManagerProp
       </div>
 
       <div className="card">
-        <div className="ledger-table-toolbar">
-          <h3 className="section-title">
-            <BookOpen size={18} />
-            Ledgers ({active} in use{ledgers.length - active > 0 ? `, ${ledgers.length - active} retired` : ''})
-          </h3>
-          <label className="ledger-filter">
-            <Search size={14} />
-            <input
-              className="form-input"
-              value={filter}
-              onChange={event => setFilter(event.target.value)}
-              placeholder="Filter ledgers…"
-              aria-label="Filter ledgers"
-            />
-          </label>
-        </div>
+        <h3 className="section-title">
+          <BookOpen size={18} color="var(--primary)" />
+          Ledgers ({active} in use{ledgers.length - active > 0 ? `, ${ledgers.length - active} retired` : ''})
+        </h3>
 
         <div className="table-container">
           <table className="custom-table">
@@ -304,14 +282,14 @@ export default function LedgerManager({ currentUser, onBack }: LedgerManagerProp
               </tr>
             </thead>
             <tbody>
-              {!filteredLedgers.length ? (
+              {!ledgers.length ? (
                 <tr>
                   <td colSpan={5} className="table-empty">
-                    {ledgers.length ? 'No ledgers match that filter.' : 'No ledgers yet. Add them above, or paste your list from Tally.'}
+                    No ledgers yet. Add them above, or paste your list from Tally.
                   </td>
                 </tr>
-              ) : filteredLedgers.map(ledger => (
-                <tr key={ledger.id} className={ledger.is_active ? '' : 'ledger-row-retired'}>
+              ) : ledgers.map(ledger => (
+                <tr key={ledger.id} style={{ opacity: ledger.is_active ? 1 : 0.55 }}>
                   {editingId === ledger.id ? (
                     <>
                       <td>
@@ -350,7 +328,7 @@ export default function LedgerManager({ currentUser, onBack }: LedgerManagerProp
                       </td>
                       <td>
                         <span className={`status-pill ${ledger.is_active ? 'status-extracted' : 'status-pending'}`}>
-                          {ledger.is_active ? '✓ In use' : '○ Retired'}
+                          {ledger.is_active ? 'In use' : 'Retired'}
                         </span>
                       </td>
                       <td>

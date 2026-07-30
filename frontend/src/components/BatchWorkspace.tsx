@@ -1,8 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, MoreHorizontal, ChevronLeft, ChevronRight } from 'lucide-react';
-import { ScanBatch, Receipt, ReceiptStatus, User, Transaction } from '../types';
-import StatusFilter from './StatusFilter';
-import { usePolling } from '../lib/usePolling';
+import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, MoreHorizontal } from 'lucide-react';
+import { ScanBatch, Receipt, User, Transaction } from '../types';
 import {
   newId,
   fetchBatches,
@@ -31,6 +29,8 @@ import {
  */
 const EXTRACTION_POLL_MS = 3000;
 
+const NOT_JOURNAL_ENTRY_ERROR = 'The uploaded image is not a journal entry. Please check and try again.';
+
 /**
  * Which batch the operator was last looking at, per tab.
  *
@@ -49,26 +49,6 @@ const ACTIVE_BATCH_STORAGE_KEY = 'scan2tally-active-batch';
  * consistently and had to flag.
  */
 const MIN_IMAGE_SHORT_EDGE = 1000;
-const BATCHES_PER_PAGE = 7;
-const DEFAULT_RECEIPTS_PER_PAGE = 10;
-
-type PaginationItem = number | 'start-ellipsis' | 'end-ellipsis';
-type ReceiptStatusFilter = 'All' | ReceiptStatus;
-
-/** Keeps long pagination compact while always exposing the first and last page. */
-function getPaginationItems(currentPage: number, pageCount: number): PaginationItem[] {
-  if (pageCount <= 5) return Array.from({ length: pageCount }, (_, index) => index + 1);
-
-  const items: PaginationItem[] = [1];
-  const rangeStart = Math.max(2, currentPage - 1);
-  const rangeEnd = Math.min(pageCount - 1, currentPage + 1);
-
-  if (rangeStart > 2) items.push('start-ellipsis');
-  for (let page = rangeStart; page <= rangeEnd; page += 1) items.push(page);
-  if (rangeEnd < pageCount - 1) items.push('end-ellipsis');
-  items.push(pageCount);
-  return items;
-}
 
 function isLowResolution(receipt: Receipt): boolean {
   if (!receipt.image_width || !receipt.image_height) return false;
@@ -105,19 +85,12 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const [activeBatchId, setActiveBatchId] = useState<string>('');
   const [editingBatchId, setEditingBatchId] = useState<string | null>(null);
   const editingBatchRef = useRef<HTMLDivElement | null>(null);
-  const [openBatchMenuId, setOpenBatchMenuId] = useState<string | null>(null);
-  const batchMenuRef = useRef<HTMLDivElement | null>(null);
-  const [batchPage, setBatchPage] = useState(1);
-  const [receiptPage, setReceiptPage] = useState(1);
-  const [receiptsPerPage, setReceiptsPerPage] = useState(DEFAULT_RECEIPTS_PER_PAGE);
-  const [receiptStatusFilter, setReceiptStatusFilter] = useState<ReceiptStatusFilter>('All');
-  const filesPanelRef = useRef<HTMLElement | null>(null);
   const [editedBatchName, setEditedBatchName] = useState<string>('');
   const [deletingBatchId, setDeletingBatchId] = useState<string | null>(null);
+  const [openBatchMenuId, setOpenBatchMenuId] = useState<string | null>(null);
   const [previewReceipt, setPreviewReceipt] = useState<Receipt | null>(null);
   const [previewRotation, setPreviewRotation] = useState(0);
   const [dragOver, setDragOver] = useState<boolean>(false);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   // True only while extraction requests are being handed to the server. Once
   // they are accepted the receipts' own Processing status takes over, so this
   // covers just the brief gap before that shows up.
@@ -148,22 +121,12 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const wantedStatus = showArchived ? 'Archived' : 'Active';
   const visibleBatches = batches.filter(b => b.status === wantedStatus);
   const archivedCount = batches.filter(b => b.status === 'Archived').length;
-  const batchPageCount = Math.max(1, Math.ceil(visibleBatches.length / BATCHES_PER_PAGE));
-  const batchPageStart = (batchPage - 1) * BATCHES_PER_PAGE;
-  const paginatedBatches = visibleBatches.slice(batchPageStart, batchPageStart + BATCHES_PER_PAGE);
 
   // May be undefined before the first load finishes, or when the user has no
   // batches yet — every read below has to tolerate that.
   const activeBatch: ScanBatch | undefined =
     visibleBatches.find(b => b.id === activeBatchId) || visibleBatches[0];
   const activeReceipts = activeBatch?.receipts ?? [];
-  const filteredReceipts = activeReceipts.filter(receipt => {
-    if (receiptStatusFilter === 'All') return true;
-    return receipt.status === receiptStatusFilter;
-  });
-  const receiptPageCount = Math.max(1, Math.ceil(filteredReceipts.length / receiptsPerPage));
-  const receiptPageStart = (receiptPage - 1) * receiptsPerPage;
-  const paginatedReceipts = filteredReceipts.slice(receiptPageStart, receiptPageStart + receiptsPerPage);
   // An archived batch is a record, not a workspace. It stays fully readable and
   // exportable; what stops is adding to it.
   const isArchived = activeBatch?.status === 'Archived';
@@ -264,95 +227,67 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     .flatMap(b => b.receipts.filter(r => r.status === 'Processing').map(r => r.id))
     .sort();
   const processingKey = processingIds.join(',');
-  // The active batch is also checked at a lower idle rate. That lets this tab
-  // discover an extraction an operator started in another tab, without polling
-  // every historical receipt in the organisation forever.
-  const watchedReceiptIds = [...new Set([
-    ...processingIds,
-    ...activeReceipts.map(receipt => receipt.id),
-  ])].sort();
-  const receiptStateKey = watchedReceiptIds.join(',');
 
-  usePolling(async ({ signal }) => {
-    const watching = receiptStateKey.split(',').filter(Boolean);
-    const states = await fetchReceiptStates(watching);
-    if (signal.aborted) return;
+  useEffect(() => {
+    if (!processingKey) return;
+    const watching = processingKey.split(',');
+    let cancelled = false;
+    let timer: number | undefined;
 
-    const currentById = new Map(
-      batchesRef.current.flatMap(batch => batch.receipts.map(receipt => [receipt.id, receipt] as const))
-    );
-    const changed = states.filter(state => {
-      const current = currentById.get(state.id);
-      if (!current) return false;
-
-      // A receipt can remain Pending in the database while its image is still
-      // uploading. Never let that temporary lag move the optimistic Processing
-      // state backwards and stop the fast polling loop.
-      if (current.status === 'Processing' && state.status === 'Pending') return false;
-      return current.status !== state.status ||
-        current.error_message !== state.error_message ||
-        JSON.stringify(current.verification_warnings || []) !== JSON.stringify(state.verification_warnings || []);
-    });
-    if (!changed.length) return;
-
-    const newlyExtractedIds = new Set(
-      changed.filter(state => state.status === 'Extracted').map(state => state.id)
-    );
-
-    // Load the rows the server saved before flipping the status on screen, so
-    // a receipt never appears Extracted with nothing behind it.
-    const affectedBatchIds = new Set(
-      batchesRef.current
-        .filter(b => b.receipts.some(r => newlyExtractedIds.has(r.id)))
-        .map(b => b.id)
-    );
-    const batchesWithMissingRows = new Set<string>();
-    for (const batchId of affectedBatchIds) {
+    const check = async () => {
       try {
-        const stored = await fetchTransactionsForBatch(batchId);
-        if (signal.aborted) return;
-        setReceiptTransactionsMap(prev => ({ ...prev, ...stored }));
-      } catch {
-        // Leave the receipt non-terminal so the next poll retries, rather than
-        // treating a failed row fetch as though its transactions had arrived.
-        loadedTxBatchesRef.current.delete(batchId);
-        batchesWithMissingRows.add(batchId);
-      }
-    }
+        const states = await fetchReceiptStates(watching);
+        if (cancelled) return;
 
-    if (signal.aborted) return;
-    const deferredReceiptIds = new Set(
-      batchesRef.current
-        .filter(batch => batchesWithMissingRows.has(batch.id))
-        .flatMap(batch => batch.receipts.map(receipt => receipt.id))
-    );
-    const changedById = new Map(
-      changed
-        // Keep polling an extracted receipt until its rows have also arrived;
-        // the reviewer must never open on a finished-looking empty voucher.
-        .filter(state => state.status !== 'Extracted' || !deferredReceiptIds.has(state.id))
-        .map(state => [state.id, state])
-    );
-    setBatches(prev => prev.map(b => ({
-      ...b,
-      receipts: b.receipts.map(r => {
-        const update = changedById.get(r.id);
-        return update
-          ? {
-              ...r,
-              status: update.status,
-              error_message: update.error_message,
-              verification_warnings: update.verification_warnings,
+        const finished = states.filter(s => s.status !== 'Processing');
+        if (finished.length) {
+          const finishedIds = new Set(finished.map(f => f.id));
+
+          // Load the rows the server saved before flipping the status on
+          // screen, so a receipt never appears Extracted with nothing behind it.
+          const affectedBatchIds = new Set(
+            batchesRef.current
+              .filter(b => b.receipts.some(r => finishedIds.has(r.id)))
+              .map(b => b.id)
+          );
+          for (const batchId of affectedBatchIds) {
+            try {
+              const stored = await fetchTransactionsForBatch(batchId);
+              if (cancelled) return;
+              setReceiptTransactionsMap(prev => ({ ...prev, ...stored }));
+            } catch {
+              // The status update below still stands; the rows load on reopen.
             }
-          : r;
-      }),
-    })));
-  }, {
-    enabled: Boolean(receiptStateKey),
-    intervalMs: processingKey ? EXTRACTION_POLL_MS : 30000,
-    maxIntervalMs: processingKey ? 24000 : 120000,
-    resetKey: `${activeBatch?.id || ''}:${receiptStateKey}`,
-  });
+          }
+
+          setBatches(prev => prev.map(b => ({
+            ...b,
+            receipts: b.receipts.map(r => {
+              const update = finished.find(f => f.id === r.id);
+              return update
+                ? {
+                    ...r,
+                    status: update.status,
+                    error_message: update.error_message,
+                    verification_warnings: update.verification_warnings,
+                  }
+                : r;
+            }),
+          })));
+        }
+      } catch {
+        // Transient — the next tick tries again rather than surfacing a scary
+        // error for what is usually a momentary network blip.
+      }
+      if (!cancelled) timer = window.setTimeout(check, EXTRACTION_POLL_MS);
+    };
+
+    timer = window.setTimeout(check, EXTRACTION_POLL_MS);
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [processingKey]);
 
   // Open the reviewer once a run this tab started has finished, preserving the
   // old behaviour of not making the user click through manually.
@@ -367,20 +302,11 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     }
     if (batch.receipts.some(r => r.status === 'Processing')) return;
 
-    const runReceipts = batch.receipts.filter(r => pending.receiptIds.includes(r.id));
-    // Never move away from the upload page when any receipt in this run failed.
-    // This is especially important for the "not a journal entry" response:
-    // the failed row and its retry action must remain visible to the user.
-    if (
-      runReceipts.length !== pending.receiptIds.length ||
-      runReceipts.some(r => r.status !== 'Extracted')
-    ) {
-      if (runReceipts.some(r => r.status === 'Failed')) autoOpenRef.current = null;
-      return;
-    }
-
     autoOpenRef.current = null;
-    const firstExtracted = runReceipts[0];
+    const firstExtracted = batch.receipts.find(
+      r => pending.receiptIds.includes(r.id) && r.status === 'Extracted'
+    );
+    // If every receipt failed, stay here so the Failed rows and Retry are visible.
     if (firstExtracted) {
       onSelectBatch(
         batch,
@@ -416,45 +342,6 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     return () => document.removeEventListener('pointerdown', closeEditOnOutsideClick);
   }, [editingBatchId]);
 
-  useEffect(() => {
-    if (!openBatchMenuId) return;
-
-    const closeMenuOnOutsideClick = (event: PointerEvent) => {
-      if (!batchMenuRef.current?.contains(event.target as Node)) {
-        setOpenBatchMenuId(null);
-      }
-    };
-    const closeMenuOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpenBatchMenuId(null);
-    };
-
-    document.addEventListener('pointerdown', closeMenuOnOutsideClick);
-    document.addEventListener('keydown', closeMenuOnEscape);
-    return () => {
-      document.removeEventListener('pointerdown', closeMenuOnOutsideClick);
-      document.removeEventListener('keydown', closeMenuOnEscape);
-    };
-  }, [openBatchMenuId]);
-
-  // Keep pagination valid when items disappear, and reveal a remembered active
-  // batch even when it lives beyond the first sidebar page.
-  useEffect(() => {
-    setBatchPage(page => Math.min(page, batchPageCount));
-  }, [batchPageCount]);
-
-  useEffect(() => {
-    const activeIndex = visibleBatches.findIndex(batch => batch.id === activeBatchId);
-    if (activeIndex >= 0) setBatchPage(Math.floor(activeIndex / BATCHES_PER_PAGE) + 1);
-  }, [activeBatchId, showArchived, batches]);
-
-  useEffect(() => {
-    setReceiptPage(1);
-  }, [activeBatchId]);
-
-  useEffect(() => {
-    setReceiptPage(page => Math.min(page, receiptPageCount));
-  }, [receiptPageCount]);
-
   const handleCreateBatch = async () => {
     if (!currentUser.organization_id) {
       setSaveError('Your account is not linked to an organisation, so batches cannot be created.');
@@ -487,7 +374,6 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
       });
       setBatches(prev => [newBatch, ...prev]);
       setActiveBatchId(newBatch.id);
-      setBatchPage(1);
       sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, newBatch.id);
       setSaveError(null);
     } catch (err: any) {
@@ -593,9 +479,6 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
       }
       return b;
     }));
-    if (receiptStatusFilter === 'All' || receiptStatusFilter === 'Pending') {
-      setReceiptPage(Math.ceil((filteredReceipts.length + newReceipts.length) / receiptsPerPage));
-    }
 
     // Persist the row first so the receipt survives a refresh even if the
     // image upload is still running, then attach the stored image. The promise
@@ -762,6 +645,16 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     beginExtraction(activeBatch.id, receipt);
   };
 
+  const handleOpenReviewer = (receipt: Receipt) => {
+    if (!activeBatch) return;
+    onSelectBatch(
+      activeBatch,
+      receipt,
+      receiptTransactionsMap[receipt.id] || [],
+      receiptTransactionsMap
+    );
+  };
+
   const handleReviewSingleReceipt = (receipt: Receipt) => {
     setPreviewRotation(0);
     setPreviewReceipt(receipt);
@@ -789,13 +682,6 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const isPdfReceipt = (receipt: Receipt) => {
     const file = uploadedFilesMap[receipt.id];
     return file?.type === 'application/pdf' || receipt.filename.toLowerCase().endsWith('.pdf');
-  };
-
-  const goToReceiptPage = (page: number) => {
-    setReceiptPage(Math.min(Math.max(page, 1), receiptPageCount));
-    window.requestAnimationFrame(() => {
-      filesPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
   };
 
   if (loading) {
@@ -829,29 +715,21 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
         </div>
       )}
       <div className="workspace-grid">
-        <aside className="batch-sidebar">
-          <div className="batch-sidebar-header">
-            <h3 className="batch-sidebar-heading">
-              {showArchived ? 'Archived Batches' : 'Batches'}
-            </h3>
-            {!showArchived && (
-              <button className="btn btn-primary btn-sm sidebar-new-batch" onClick={handleCreateBatch}>
-                <FolderPlus size={15} />
-                New
-              </button>
-            )}
-          </div>
+        <div className="card batch-sidebar">
+          <h3 className="batch-sidebar-heading">
+            {showArchived ? 'Archived Batches' : 'Your Batches'}
+          </h3>
+          {!showArchived && (
+            <button className="btn btn-primary btn-block-lg" onClick={handleCreateBatch}>
+              <FolderPlus size={18} />
+              Create New Batch
+            </button>
+          )}
 
           {(archivedCount > 0 || showArchived) && (
             <button
               className="btn btn-secondary btn-sm btn-block"
-              onClick={() => {
-                setShowArchived(v => !v);
-                setActiveBatchId('');
-                setBatchPage(1);
-                setReceiptPage(1);
-                setOpenBatchMenuId(null);
-              }}
+              onClick={() => { setShowArchived(v => !v); setActiveBatchId(''); }}
             >
               {showArchived
                 ? <><ArchiveRestore size={14} /> Back to active batches</>
@@ -865,14 +743,19 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                 {showArchived ? 'Nothing archived yet.' : 'No active batches.'}
               </div>
             )}
-            {paginatedBatches.map(b => (
-              <div
-                key={b.id}
+            {visibleBatches.map(b => (
+              <div 
+                key={b.id} 
+                onClick={() => {
+                  setActiveBatchId(b.id);
+                  setOpenBatchMenuId(null);
+                  sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, b.id);
+                }}
                 ref={editingBatchId === b.id ? editingBatchRef : undefined}
                 className={`batch-item${b.id === activeBatchId ? ' batch-item-active' : ''}`}
               >
                 {editingBatchId === b.id ? (
-                  <div className="batch-rename-row">
+                  <div className="row-xs" onClick={e => e.stopPropagation()}>
                     <input
                       type="text"
                       className="form-input batch-rename-input"
@@ -886,31 +769,20 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                     />
                   </div>
                 ) : (
-                  <>
-                    <button
-                      type="button"
-                      className="batch-item-select"
-                      title={b.name}
-                      aria-current={b.id === activeBatchId ? 'true' : undefined}
-                      onClick={() => {
-                        setActiveBatchId(b.id);
-                        setOpenBatchMenuId(null);
-                        sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, b.id);
-                      }}
-                    >
-                      <span className="batch-item-name">{b.name}</span>
-                      <span className="batch-item-meta">
-                        <span>{b.receipts.length} {b.receipts.length === 1 ? 'receipt' : 'receipts'}</span>
-                        <span aria-hidden="true">·</span>
-                        <span>{formatBatchDate(b.created_at)}</span>
+                  <div className="batch-item-content">
+                    <div className="batch-item-details">
+                      <div className="batch-item-name">
+                        <span>{b.name}</span>
                         {b.id === activeBatchId && <span className="batch-current-badge">Current</span>}
-                      </span>
-                    </button>
+                      </div>
+                      <div className="batch-item-meta">
+                        <span>{b.receipts.length} {b.receipts.length === 1 ? 'receipt' : 'receipts'}</span>
+                        <span>•</span>
+                        <span>{formatBatchDate(b.created_at)}</span>
+                      </div>
+                    </div>
 
-                    <div
-                      className="batch-menu"
-                      ref={openBatchMenuId === b.id ? batchMenuRef : undefined}
-                    >
+                    <div className="batch-menu" onClick={e => e.stopPropagation()}>
                       <button
                         type="button"
                         className="batch-menu-trigger"
@@ -919,11 +791,12 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                         aria-expanded={openBatchMenuId === b.id}
                         onClick={() => setOpenBatchMenuId(current => current === b.id ? null : b.id)}
                       >
-                        <MoreHorizontal size={17} />
+                        <MoreHorizontal size={18} />
                       </button>
                       {openBatchMenuId === b.id && (
                         <div className="batch-menu-popover" role="menu">
                           <button
+                            type="button"
                             role="menuitem"
                             disabled={isProcessing && b.id === activeBatchId}
                             onClick={() => {
@@ -935,27 +808,26 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                             <Edit2 size={14} /> Rename
                           </button>
                           <button
+                            type="button"
                             role="menuitem"
                             disabled={batchIsProcessing(b)}
                             onClick={() => {
                               setOpenBatchMenuId(null);
-                              void handleToggleArchive(b);
+                              handleToggleArchive(b);
                             }}
                           >
                             {b.status === 'Archived' ? <ArchiveRestore size={14} /> : <Archive size={14} />}
                             {b.status === 'Archived' ? 'Restore' : 'Archive'}
                           </button>
                           <button
+                            type="button"
                             role="menuitem"
                             className="batch-menu-danger"
                             disabled={batchIsProcessing(b) || (startingExtraction && b.id === activeBatchId)}
                             onClick={() => {
                               setOpenBatchMenuId(null);
-                              if (b.receipts.length === 0) {
-                                void handleDeleteBatch(b.id);
-                              } else {
-                                setDeletingBatchId(b.id);
-                              }
+                              if (b.receipts.length === 0) handleDeleteBatch(b.id);
+                              else setDeletingBatchId(b.id);
                             }}
                           >
                             <Trash2 size={14} /> Delete
@@ -963,40 +835,12 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                         </div>
                       )}
                     </div>
-                  </>
+                  </div>
                 )}
               </div>
             ))}
           </div>
-          {visibleBatches.length > BATCHES_PER_PAGE && (
-            <nav className="batch-pagination" aria-label="Batch pages">
-              <span className="batch-pagination-range" aria-live="polite">
-                {batchPageStart + 1}–{Math.min(batchPageStart + BATCHES_PER_PAGE, visibleBatches.length)} of {visibleBatches.length}
-              </span>
-              <div className="batch-pagination-controls">
-                <button
-                  type="button"
-                  onClick={() => setBatchPage(page => Math.max(1, page - 1))}
-                  disabled={batchPage === 1}
-                  aria-label="Previous batch page"
-                  title="Previous page"
-                >
-                  <ChevronLeft size={15} />
-                </button>
-                <span>Page {batchPage} of {batchPageCount}</span>
-                <button
-                  type="button"
-                  onClick={() => setBatchPage(page => Math.min(batchPageCount, page + 1))}
-                  disabled={batchPage === batchPageCount}
-                  aria-label="Next batch page"
-                  title="Next page"
-                >
-                  <ChevronRight size={15} />
-                </button>
-              </div>
-            </nav>
-          )}
-        </aside>
+        </div>
 
         {!activeBatch ? (
           <div className="card empty-batches">
@@ -1076,18 +920,11 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
             }}
           >
             <input
-              ref={fileInputRef}
               type="file"
               className="dropzone-input"
               multiple
               accept="image/*,.pdf"
-              onChange={e => {
-                handleFileUpload(e);
-                // Clearing the value lets the same filename be picked again
-                // after it was removed — otherwise the browser sees no change
-                // and the second upload silently does nothing.
-                e.currentTarget.value = '';
-              }}
+              onChange={handleFileUpload}
               disabled={uploadsLocked}
             />
             <div className="dropzone-icon">
@@ -1109,79 +946,33 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                 <Camera size={14} /> Upload Photo / Browse Files
               </span>
             </div>
-            <span className="upload-hint">Supports JPG, PNG, WEBP, and PDF · Multiple files allowed</span>
           </div>
 
-          <section className="files-panel" ref={filesPanelRef}>
-            <div className="files-panel-header">
-              <div>
-                <h4 className="section-title">Receipt files</h4>
-                <p>Review extracted entries or preview the original upload.</p>
-              </div>
-              <div className="files-panel-actions">
-                <StatusFilter
-                  value={receiptStatusFilter}
-                  onChange={value => {
-                    setReceiptStatusFilter(value);
-                    setReceiptPage(1);
-                  }}
-                  ariaLabel="Filter receipt files by status"
-                  options={[
-                    { value: 'All', label: `All statuses (${activeReceipts.length})` },
-                    { value: 'Extracted', label: `Extracted (${activeReceipts.filter(receipt => receipt.status === 'Extracted').length})` },
-                    { value: 'Processing', label: `Processing (${activeReceipts.filter(receipt => receipt.status === 'Processing').length})` },
-                    { value: 'Pending', label: `Pending (${activeReceipts.filter(receipt => receipt.status === 'Pending').length})` },
-                    { value: 'Failed', label: `Failed (${activeReceipts.filter(receipt => receipt.status === 'Failed').length})` },
-                  ]}
-                />
-                <span className="files-count">
-                  {receiptStatusFilter === 'All'
-                    ? `${activeReceipts.length} ${activeReceipts.length === 1 ? 'file' : 'files'}`
-                    : `${filteredReceipts.length} of ${activeReceipts.length}`}
-                </span>
-              </div>
-            </div>
+          <div className="card">
+            <h4 className="section-title">
+              Files in {activeBatch.name} ({activeBatch.receipts.length})
+            </h4>
 
             {!activeBatch.receipts.length ? (
               <div className="table-empty text-sm" style={{ padding: '24px' }}>
                 No receipts uploaded in this batch yet. Use the upload box above to add paper receipt photos.
               </div>
-            ) : !filteredReceipts.length ? (
-              <div className="filtered-empty">
-                <span>No receipts match this status.</span>
-                <button
-                  className="btn btn-secondary btn-sm"
-                  onClick={() => {
-                    setReceiptStatusFilter('All');
-                    setReceiptPage(1);
-                  }}
-                >
-                  Show all receipts
-                </button>
-              </div>
             ) : (
-              <>
-                <div className="table-container files-table-container">
-                  <table className="custom-table files-table">
+              <div className="table-container">
+                <table className="custom-table">
                   <thead>
                     <tr>
-                      <th>File</th>
-                      <th className="file-status-column">Status</th>
-                      <th className="text-right">Lines</th>
-                      <th className="file-actions-column">Actions</th>
+                      <th>File Name</th>
+                      <th>Extraction Status</th>
+                      <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {paginatedReceipts.map(rcpt => {
-                      const receiptRows = receiptTransactionsMap[rcpt.id] || [];
-                      const statusClass = rcpt.status === 'Extracted' ? 'status-extracted' :
-                        rcpt.status === 'Processing' ? 'status-processing' :
-                        rcpt.status === 'Failed' ? 'status-failed' : 'status-pending';
-                      return (
+                    {activeBatch.receipts.map(rcpt => (
                       <tr key={rcpt.id}>
-                        <td className="file-name-cell">
+                        <td style={{ fontWeight: 500 }}>
                           <div className="file-cell">
-                            <FileText size={15} />
+                            <FileText size={16} color="var(--primary)" />
                             {rcpt.filename}
                           </div>
                           {isLowResolution(rcpt) && (
@@ -1197,11 +988,14 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                           )}
                         </td>
                         <td>
-                          <div className="stack-xs receipt-status">
-                            <span className={`status-pill ${statusClass}`}>
-                              {rcpt.status === 'Extracted' ? <CheckCircle2 size={11} /> :
-                               rcpt.status === 'Failed' ? <AlertCircle size={11} /> :
-                               rcpt.status === 'Processing' ? <span className="status-dot">●</span> : <span>○</span>}
+                          <div className="stack-xs">
+                            <span className={`status-pill ${
+                              rcpt.status === 'Extracted' ? 'status-extracted' :
+                              rcpt.status === 'Processing' ? 'status-processing' :
+                              rcpt.status === 'Failed' ? 'status-failed' : 'status-pending'
+                            }`}>
+                              {rcpt.status === 'Extracted' ? <CheckCircle2 size={12} /> :
+                               rcpt.status === 'Failed' ? <AlertCircle size={12} /> : <Clock size={12} />}
                               {rcpt.status}
                             </span>
                             {rcpt.status === 'Failed' && rcpt.error_message && (
@@ -1209,11 +1003,28 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                             )}
                           </div>
                         </td>
-                        <td className="text-right tx-lines-count">
-                          {rcpt.status === 'Extracted' ? receiptRows.length : '—'}
-                        </td>
                         <td>
                           <div className="row-actions">
+                            <button
+                              className="btn btn-secondary btn-sm"
+                              onClick={() => handleReviewSingleReceipt(rcpt)}
+                            >
+                              Preview Image
+                            </button>
+
+                            {/* The way back into extracted rows on a later
+                                visit — without this the reviewer is reachable
+                                only in the session that ran the extraction. */}
+                            {rcpt.status === 'Extracted' && (
+                              <button
+                                className="btn btn-primary btn-sm"
+                                onClick={() => handleOpenReviewer(rcpt)}
+                                title="Review and edit the extracted rows"
+                              >
+                                Review &amp; Edit
+                              </button>
+                            )}
+
                             {rcpt.status === 'Failed' && (
                               <button
                                 className="btn btn-secondary btn-sm"
@@ -1224,13 +1035,6 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                                 <RotateCw size={13} /> Retry
                               </button>
                             )}
-
-                            <button
-                              className="btn btn-sm receipt-preview-btn"
-                              onClick={() => handleReviewSingleReceipt(rcpt)}
-                            >
-                              Preview
-                            </button>
 
                             {rcpt.status !== 'Processing' && !isArchived && (
                               <button
@@ -1245,91 +1049,22 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                           </div>
                         </td>
                       </tr>
-                    );})}
+                    ))}
                   </tbody>
-                  </table>
-                </div>
-
-                {filteredReceipts.length > DEFAULT_RECEIPTS_PER_PAGE && (
-                  <div className="files-pagination">
-                    <span className="pagination-summary" aria-live="polite">
-                      Showing {receiptPageStart + 1}–{Math.min(receiptPageStart + receiptsPerPage, filteredReceipts.length)} of {filteredReceipts.length}
-                    </span>
-
-                    <label className="page-size-control">
-                      <span>Rows per page</span>
-                      <select
-                        value={receiptsPerPage}
-                        onChange={(event) => {
-                          setReceiptsPerPage(Number(event.target.value));
-                          setReceiptPage(1);
-                          window.requestAnimationFrame(() => {
-                            filesPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                          });
-                        }}
-                        aria-label="Receipt rows per page"
-                      >
-                        <option value={10}>10</option>
-                        <option value={25}>25</option>
-                        <option value={50}>50</option>
-                      </select>
-                    </label>
-
-                    <nav className="pagination-controls" aria-label="Receipt file pages">
-                      <button
-                        type="button"
-                        className="pagination-arrow"
-                        onClick={() => goToReceiptPage(receiptPage - 1)}
-                        disabled={receiptPage === 1}
-                        aria-label="Previous receipt page"
-                        title="Previous page"
-                      >
-                        <ChevronLeft size={15} />
-                      </button>
-
-                      {getPaginationItems(receiptPage, receiptPageCount).map(item => (
-                        typeof item === 'number' ? (
-                          <button
-                            type="button"
-                            key={item}
-                            className={`pagination-page${receiptPage === item ? ' pagination-page-active' : ''}`}
-                            onClick={() => goToReceiptPage(item)}
-                            aria-label={`Go to receipt page ${item}`}
-                            aria-current={receiptPage === item ? 'page' : undefined}
-                          >
-                            {item}
-                          </button>
-                        ) : (
-                          <span className="pagination-ellipsis" key={item} aria-hidden="true">…</span>
-                        )
-                      ))}
-
-                      <button
-                        type="button"
-                        className="pagination-arrow"
-                        onClick={() => goToReceiptPage(receiptPage + 1)}
-                        disabled={receiptPage === receiptPageCount}
-                        aria-label="Next receipt page"
-                        title="Next page"
-                      >
-                        <ChevronRight size={15} />
-                      </button>
-                    </nav>
-                  </div>
-                )}
-              </>
+                </table>
+              </div>
             )}
-          </section>
+          </div>
 
           {/* The spreadsheet is imported into Tally by hand, so this is the only
               record that it happened — and the only way to answer "has this
               already been posted?" before someone posts it twice. */}
           {exportHistory.length > 0 && (
-            <details className="card export-history">
-              <summary className="section-title export-history-summary">
+            <div className="card">
+              <h4 className="section-title">
                 <FileSpreadsheet size={17} color="var(--primary)" />
                 Tally exports from this batch ({exportHistory.length})
-              </summary>
+              </h4>
               <div className="table-container">
                 <table className="custom-table">
                   <thead>
@@ -1347,7 +1082,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                   </tbody>
                 </table>
               </div>
-            </details>
+            </div>
           )}
         </div>
         )}

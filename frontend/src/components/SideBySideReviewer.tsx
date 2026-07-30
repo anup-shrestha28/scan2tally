@@ -1,31 +1,18 @@
 import React, { useState, useEffect, useRef } from 'react';
-import {
-  ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2,
-  RotateCcw, RotateCw, ChevronLeft, ChevronRight, Loader2, HelpCircle, Camera,
-  Maximize2, Minimize2,
-} from 'lucide-react';
+import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2, RotateCcw, RotateCw, ChevronLeft, ChevronRight, Loader2, HelpCircle } from 'lucide-react';
 import { ScanBatch, Receipt, Transaction, User, Ledger } from '../types';
 import { saveTransactionsForReceipt, getReceiptImageUrl, deleteReceipt, fetchLedgers, resolveLedgerName } from '../lib/db';
 import { LEDGER_MATCHING } from '../lib/features';
 
 /** Ties the ledger inputs to the single datalist rendered at the bottom. */
 const LEDGER_OPTIONS_ID = 'chart-of-accounts';
+type ReceiptPageItem = number | 'start-ellipsis' | 'end-ellipsis';
 
-type ReviewerNavigationItem = number | 'start-ellipsis' | 'end-ellipsis';
-
-/** Shows nearby receipts without allowing a large batch to stretch the toolbar. */
-function getReviewerNavigationItems(currentIndex: number, receiptCount: number): ReviewerNavigationItem[] {
-  if (receiptCount <= 9) return Array.from({ length: receiptCount }, (_, index) => index);
-
-  const rangeStart = Math.max(1, currentIndex - 2);
-  const rangeEnd = Math.min(receiptCount - 2, currentIndex + 2);
-  const items: ReviewerNavigationItem[] = [0];
-
-  if (rangeStart > 1) items.push('start-ellipsis');
-  for (let index = rangeStart; index <= rangeEnd; index += 1) items.push(index);
-  if (rangeEnd < receiptCount - 2) items.push('end-ellipsis');
-  items.push(receiptCount - 1);
-  return items;
+function getReceiptPageItems(currentPage: number, pageCount: number): ReceiptPageItem[] {
+  if (pageCount <= 6) return Array.from({ length: pageCount }, (_, index) => index + 1);
+  if (currentPage <= 4) return [1, 2, 3, 4, 5, 6, 7, 'end-ellipsis', pageCount];
+  if (currentPage >= pageCount - 4) return [1, 'start-ellipsis', pageCount - 6, pageCount - 5, pageCount - 4, pageCount - 3, pageCount - 2, pageCount - 1, pageCount];
+  return [1, 'start-ellipsis', currentPage - 1, currentPage, currentPage + 1, currentPage + 2, currentPage + 3, 'end-ellipsis', pageCount];
 }
 
 interface SideBySideReviewerProps {
@@ -49,16 +36,12 @@ function AmountInput({
   value,
   tone,
   uncertain,
-  gridColumn,
-  onChange,
-  onConfirm,
+  onChange
 }: {
   value: number;
   tone: 'debit' | 'credit';
   uncertain?: boolean;
-  gridColumn: string;
   onChange: (amount: number) => void;
-  onConfirm: () => void;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
 
@@ -67,45 +50,24 @@ function AmountInput({
     : '';
 
   return (
-    <div className="amount-field">
-      <input
-        type="text"
-        inputMode="decimal"
-        // size=1 kills the ~20ch intrinsic width an <input> otherwise demands,
-        // which would override the table's column widths.
-        size={1}
-        className={`cell-input amount-input amount-${tone}${uncertain ? ' amount-uncertain' : ''}`}
-        data-grid-cell="true"
-        data-grid-column={gridColumn}
-        title={uncertain ? 'This amount may be inaccurate. Please verify it with the receipt.' : undefined}
-        placeholder="0.00"
-        value={draft !== null ? draft : formatted}
-        onFocus={() => setDraft(value ? String(value) : '')}
-        onBlur={() => setDraft(null)}
-        onKeyDown={(event) => {
-          if (uncertain && event.key === 'Enter') {
-            event.preventDefault();
-            onConfirm();
-          }
-        }}
-        onChange={(e) => {
-          const raw = e.target.value.replace(/[^0-9.]/g, '');
-          setDraft(raw);
-          onChange(parseFloat(raw) || 0);
-        }}
-      />
-      {uncertain && (
-        <button
-          type="button"
-          className="amount-confirm"
-          onClick={onConfirm}
-          title="Confirm this amount against the receipt"
-          aria-label="Confirm this amount"
-        >
-          ?
-        </button>
-      )}
-    </div>
+    <input
+      type="text"
+      inputMode="decimal"
+      // size=1 kills the ~20ch intrinsic width an <input> otherwise demands,
+      // which would override the table's column widths.
+      size={1}
+      className={`cell-input amount-input amount-${tone}${uncertain ? ' amount-uncertain' : ''}`}
+      title={uncertain ? 'This amount may be inaccurate. Please verify it with the receipt.' : undefined}
+      placeholder="0.00"
+      value={draft !== null ? draft : formatted}
+      onFocus={() => setDraft(value ? String(value) : '')}
+      onBlur={() => setDraft(null)}
+      onChange={(e) => {
+        const raw = e.target.value.replace(/[^0-9.]/g, '');
+        setDraft(raw);
+        onChange(parseFloat(raw) || 0);
+      }}
+    />
   );
 }
 
@@ -158,15 +120,11 @@ export default function SideBySideReviewer({
   const [imageUrl, setImageUrl] = useState<string>('');
   const dirtyRef = useRef(false);
   const changeVersionRef = useRef(0);
-  const reviewerTableRef = useRef<HTMLTableElement | null>(null);
-  const pendingFocusIdRef = useRef<string | null>(null);
   const [rotation, setRotation] = useState(0);
   const [showImbalanceModal, setShowImbalanceModal] = useState(false);
   const [pendingExportData, setPendingExportData] = useState<Transaction[] | null>(null);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const [deletingTransactionId, setDeletingTransactionId] = useState<string | null>(null);
   const [deletingReceipt, setDeletingReceipt] = useState(false);
-  const [imageExpanded, setImageExpanded] = useState(false);
   const [deletedReceiptIds, setDeletedReceiptIds] = useState<Set<string>>(new Set());
   // The organisation's real ledgers, so a name can be picked rather than typed
   // and so the reviewer is told when one will not survive the trip into Tally.
@@ -186,30 +144,8 @@ export default function SideBySideReviewer({
     getTxForReceipt(currentReceipt)
   );
 
-  // Persist before navigating. Merely copying rows into txMap would cancel the
-  // pending autosave when the receipt changes and could lose a fast edit.
-  const saveCurrentTx = async (nextIndex: number) => {
-    const changeVersion = changeVersionRef.current;
-    if (dirtyRef.current && currentReceipt && batch && currentUser.organization_id) {
-      setSaveState('saving');
-      try {
-        await saveTransactionsForReceipt(
-          currentReceipt.id,
-          { batchId: batch.id, organizationId: currentUser.organization_id, userId: currentUser.id },
-          transactions
-        );
-        // If a keystroke landed while the request was in flight, stay put so
-        // the newer value is not abandoned on the old receipt.
-        if (changeVersion !== changeVersionRef.current) return;
-        setSaveState('saved');
-        setSaveError(null);
-        window.setTimeout(() => setSaveState('idle'), 2500);
-      } catch (err: any) {
-        setSaveState('error');
-        setSaveError(err?.message || 'Changes could not be saved.');
-        return;
-      }
-    }
+  // Save current transactions into the map before navigating
+  const saveCurrentTx = (nextIndex: number) => {
     if (currentReceipt) {
       setTxMap(prev => ({ ...prev, [currentReceipt.id]: transactions }));
     }
@@ -217,6 +153,22 @@ export default function SideBySideReviewer({
     setCurrentIndex(nextIndex);
     setRotation(0);
   };
+
+  useEffect(() => {
+    const handleReceiptArrow = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.matches('input, textarea, select, [contenteditable="true"]')) return;
+      if (event.key === 'ArrowLeft' && currentIndex > 0) {
+        event.preventDefault();
+        saveCurrentTx(currentIndex - 1);
+      } else if (event.key === 'ArrowRight' && currentIndex < visibleReceipts.length - 1) {
+        event.preventDefault();
+        saveCurrentTx(currentIndex + 1);
+      }
+    };
+    window.addEventListener('keydown', handleReceiptArrow);
+    return () => window.removeEventListener('keydown', handleReceiptArrow);
+  }, [currentIndex, visibleReceipts.length, currentReceipt?.id, transactions]);
 
   // When currentIndex changes, load that receipt's transactions
   useEffect(() => {
@@ -370,50 +322,7 @@ export default function SideBySideReviewer({
       credit_amount: 0,
       narration: ''
     };
-    pendingFocusIdRef.current = newTx.id;
     setTransactions([...transactions, newTx]);
-  };
-
-  useEffect(() => {
-    const pendingId = pendingFocusIdRef.current;
-    if (!pendingId) return;
-    const input = reviewerTableRef.current?.querySelector<HTMLInputElement>(
-      `[data-transaction-id="${pendingId}"]`
-    );
-    if (input) {
-      input.focus();
-      pendingFocusIdRef.current = null;
-    }
-  }, [transactions.length]);
-
-  const handleGridKeyDown = (event: React.KeyboardEvent<HTMLTableElement>) => {
-    const target = event.target as HTMLInputElement;
-    if (target.dataset.gridCell !== 'true') return;
-
-    if (event.key === 'Tab') {
-      const cells = Array.from(
-        event.currentTarget.querySelectorAll<HTMLInputElement>('[data-grid-cell="true"]')
-      );
-      const current = cells.indexOf(target);
-      if (current < 0 || !cells.length) return;
-      event.preventDefault();
-      const direction = event.shiftKey ? -1 : 1;
-      cells[(current + direction + cells.length) % cells.length].focus();
-      return;
-    }
-
-    if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
-      const column = target.dataset.gridColumn;
-      if (!column) return;
-      const cells = Array.from(
-        event.currentTarget.querySelectorAll<HTMLInputElement>(`[data-grid-column="${column}"]`)
-      );
-      const current = cells.indexOf(target);
-      const next = current + (event.key === 'ArrowUp' ? -1 : 1);
-      if (current < 0 || next < 0 || next >= cells.length) return;
-      event.preventDefault();
-      cells[next].focus();
-    }
   };
 
   const handleDeleteTransaction = (id: string) => {
@@ -440,6 +349,7 @@ export default function SideBySideReviewer({
         setSaveState('saved');
         setSaveError(null);
         dirtyRef.current = false;
+        window.setTimeout(() => setSaveState('idle'), 2500);
         window.setTimeout(() => setSaveState('idle'), 2500);
       } catch (err: any) {
         setSaveState('error');
@@ -528,13 +438,7 @@ export default function SideBySideReviewer({
 
   const totalDebit = transactions.reduce((acc, curr) => acc + (Number(curr.debit_amount) || 0), 0);
   const totalCredit = transactions.reduce((acc, curr) => acc + (Number(curr.credit_amount) || 0), 0);
-  const balanceDifference = Math.round((totalDebit - totalCredit) * 100) / 100;
-  const isBalanced = Math.abs(balanceDifference) < 0.05;
-  const formattedDifference = `${balanceDifference > 0 ? '+' : balanceDifference < 0 ? '−' : ''}Rs. ${Math.abs(balanceDifference).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  const currentReceiptIsLowResolution = Boolean(
-    currentReceipt?.image_width && currentReceipt?.image_height &&
-    Math.min(currentReceipt.image_width, currentReceipt.image_height) < 1000
-  );
+  const isBalanced = Math.abs(totalDebit - totalCredit) < 0.05;
 
   // Rows whose ledger Tally would not recognise. Only meaningful once the
   // organisation actually has a chart of accounts to be measured against.
@@ -554,73 +458,35 @@ export default function SideBySideReviewer({
   const hasPrev = currentIndex > 0;
   const hasNext = currentIndex < visibleReceipts.length - 1;
 
-  // Alt+arrow follows the documented receipt-navigation model and avoids
-  // stealing plain arrow keys from table cells and assistive technology.
-  useEffect(() => {
-    const handlePaginationKey = (event: KeyboardEvent) => {
-      if (!event.altKey || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return;
-      if (showDeleteModal || showImbalanceModal || deletingTransactionId) return;
-
-      const nextIndex = event.key === 'ArrowLeft'
-        ? (hasPrev ? currentIndex - 1 : null)
-        : (hasNext ? currentIndex + 1 : null);
-      if (nextIndex === null) return;
-
-      event.preventDefault();
-      void saveCurrentTx(nextIndex);
-    };
-
-    window.addEventListener('keydown', handlePaginationKey);
-    return () => window.removeEventListener('keydown', handlePaginationKey);
-  }, [currentIndex, hasPrev, hasNext, showDeleteModal, showImbalanceModal, deletingTransactionId, transactions, currentReceipt?.id]);
-
-  // The high-value shortcuts do not require a new persistence model. They use
-  // the same add/save paths as the visible controls, so keyboard and mouse
-  // behavior cannot drift apart.
-  useEffect(() => {
-    const handleShortcut = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
-      if (showDeleteModal || showImbalanceModal || deletingTransactionId) return;
-      const key = event.key.toLowerCase();
-      if (key === 'd' || key === 'k') {
-        event.preventDefault();
-        handleAddTransaction(key === 'd' ? 'Dr' : 'Cr');
-      } else if (key === 's') {
-        event.preventDefault();
-        handleSaveProgress();
-      }
-    };
-    window.addEventListener('keydown', handleShortcut);
-    return () => window.removeEventListener('keydown', handleShortcut);
-  }, [transactions, currentReceipt?.id, batch?.id, showDeleteModal, showImbalanceModal, deletingTransactionId]);
-
   const stepClass = (active: boolean) => `nav-step${active ? ' nav-step-active' : ''}`;
 
   return (
     <div className="reviewer-page">
+      {/* Review header */}
       <div className="reviewer-header">
-        <div className="reviewer-toolbar">
-          <div className="reviewer-identity">
-            <button className="back-link" onClick={handleBack}>
-              <ArrowLeft size={16} /> Batches
-            </button>
-            <div>
-              <h1 className="reviewer-title">{batch?.name || 'Scan Batch Review'}</h1>
-              <p className="reviewer-file">{currentReceipt?.filename || 'No receipt selected'}</p>
-            </div>
+      <div className="row row-between row-wrap" style={{ gap: '16px' }}>
+        <div className="row" style={{ gap: '16px' }}>
+          <button className="btn btn-secondary" onClick={handleBack}>
+            <ArrowLeft size={16} /> Back to Batches
+          </button>
+          <div>
+            <h3 style={{ fontSize: '1.05rem', fontWeight: 700 }}>
+              {batch?.name || 'Scan Batch Review'}
+            </h3>
           </div>
+        </div>
 
-          <div className="reviewer-actions">
+        <div className="row-sm" style={{ gap: '10px' }}>
           {/* Reflects what has actually reached the database, so "Saved" is
               never claimed for work that only exists in the browser. */}
           {saveState === 'saving' && (
             <span className="save-state save-state-busy">
-              <Loader2 size={15} className="animate-spin" /> Saving…
+              <Loader2 size={15} className="animate-spin" /> Saving...
             </span>
           )}
           {saveState === 'saved' && !savedSuccess && (
             <span className="save-state save-state-ok">
-              <CheckCircle2 size={16} /> Saved
+              <CheckCircle2 size={16} /> All changes saved
             </span>
           )}
           {saveState === 'error' && (
@@ -634,102 +500,79 @@ export default function SideBySideReviewer({
             </span>
           )}
           <button className="btn btn-secondary" onClick={handleSaveProgress} disabled={saveState === 'saving'}>
-            <Save size={16} /> Save now
+            <Save size={16} /> Save Now
           </button>
           <button className="btn btn-primary" onClick={handleExportAll}>
-            <FileSpreadsheet size={16} /> Review Excel file
+            <FileSpreadsheet size={16} /> Review Excel File
           </button>
         </div>
-        </div>
+      </div>
 
+      {/* Receipt navigation */}
+      {visibleReceipts.length > 1 && (
         <div className="reviewer-nav">
-          <div className="reviewer-nav-controls">
-            <button
-              className={stepClass(hasPrev)}
-              disabled={!hasPrev}
-              onClick={() => { if (hasPrev) void saveCurrentTx(currentIndex - 1); }}
-            >
-              <ChevronLeft size={16} /> Prev
-            </button>
+          <button
+            className={stepClass(hasPrev)}
+            disabled={!hasPrev}
+            onClick={() => hasPrev && saveCurrentTx(currentIndex - 1)}
+            aria-label="Previous receipt"
+            title="Previous receipt"
+          >
+            <ChevronLeft size={18} />
+          </button>
 
-            <nav className="receipt-pagination" aria-label="Choose a receipt">
-              {getReviewerNavigationItems(currentIndex, visibleReceipts.length).map(item => {
-                if (typeof item !== 'number') {
-                  return <span className="receipt-pagination-ellipsis" key={item} aria-hidden="true">…</span>;
-                }
-
-                const receipt = visibleReceipts[item];
-                const rows = item === currentIndex
-                  ? transactions
-                  : (txMap[receipt.id] || []);
-                const debit = rows.reduce((sum, row) => sum + (Number(row.debit_amount) || 0), 0);
-                const credit = rows.reduce((sum, row) => sum + (Number(row.credit_amount) || 0), 0);
-                const unbalanced = rows.length > 0 && Math.abs(debit - credit) >= 0.05;
-                return (
-                  <button
-                    key={receipt.id}
-                    title={`${receipt.filename}${unbalanced ? ' — out of balance' : ''}`}
-                    aria-label={`Receipt ${item + 1}: ${receipt.filename}${unbalanced ? ', out of balance' : ''}`}
-                    aria-current={item === currentIndex ? 'page' : undefined}
-                    className={`receipt-dot${item === currentIndex ? ' receipt-dot-active' : ''}${unbalanced ? ' receipt-dot-warning' : ''}`}
-                    onClick={() => { if (item !== currentIndex) void saveCurrentTx(item); }}
-                  >
-                    {item + 1}
-                  </button>
-                );
-              })}
-            </nav>
-
-            <button
-              className={stepClass(hasNext)}
-              disabled={!hasNext}
-              onClick={() => { if (hasNext) void saveCurrentTx(currentIndex + 1); }}
-            >
-              Next <ChevronRight size={16} />
-            </button>
+          <div className="row-sm receipt-pagination" aria-label="Receipt pages">
+            {getReceiptPageItems(currentIndex + 1, visibleReceipts.length).map(item => (
+              typeof item === 'number' ? (
+                <button
+                  key={item}
+                  title={visibleReceipts[item - 1]?.filename}
+                  className={`receipt-dot${currentIndex + 1 === item ? ' receipt-dot-active' : ''}`}
+                  onClick={() => currentIndex + 1 !== item && saveCurrentTx(item - 1)}
+                  aria-label={`Go to receipt ${item}`}
+                  aria-current={currentIndex + 1 === item ? 'page' : undefined}
+                >
+                  {item}
+                </button>
+              ) : (
+                <span key={item} className="receipt-pagination-ellipsis" aria-hidden="true">…</span>
+              )
+            ))}
           </div>
 
-          <div className="reviewer-count" aria-live="polite">
-            Receipt {currentIndex + 1} of {visibleReceipts.length}
-          </div>
+          <button
+            className={stepClass(hasNext)}
+            disabled={!hasNext}
+            onClick={() => hasNext && saveCurrentTx(currentIndex + 1)}
+            aria-label="Next receipt"
+            title="Next receipt"
+          >
+            <ChevronRight size={18} />
+          </button>
         </div>
+      )}
       </div>
 
       {/* Split Reviewer Workspace */}
       <div className="split-reviewer">
         {/* Left Panel: Original Receipt Image */}
-        <div className={`image-panel${imageExpanded ? ' image-panel-expanded' : ''}`}>
-          <div className="panel-head">
-            <div className="panel-head-title">
-              <Camera size={15} />
-              <span>{currentReceipt?.filename || 'Handwritten voucher'}</span>
-              {currentReceiptIsLowResolution && (
-                <span className="image-quality-warning">
-                  Low res {Math.min(currentReceipt!.image_width!, currentReceipt!.image_height!)}px
-                </span>
-              )}
-            </div>
+        <div className="image-panel">
+          <div className="panel-header">
+            <span>📷 {currentReceipt?.filename || 'Handwritten Voucher'}</span>
             <div className="row-xs">
               <button
-                className="btn btn-danger btn-sm btn-icon"
+                className="btn btn-danger btn-sm"
                 onClick={() => setShowDeleteModal(true)}
                 title="Delete this receipt"
                 disabled={deletingReceipt}
               >
                 <Trash2 size={14} />
               </button>
-              <button className="btn btn-secondary btn-sm btn-icon" onClick={rotateLeft} title="Rotate left">
+              <button className="panel-rotate" onClick={rotateLeft} title="Rotate Left">
                 <RotateCcw size={14} />
               </button>
-              <button className="btn btn-secondary btn-sm btn-icon" onClick={rotateRight} title="Rotate right">
+              <button className="panel-rotate" onClick={rotateRight} title="Rotate Right">
                 <RotateCw size={14} />
-              </button>
-              <button
-                className="btn btn-secondary btn-sm btn-icon image-expand-toggle"
-                onClick={() => setImageExpanded(value => !value)}
-                title={imageExpanded ? 'Collapse image' : 'Expand image'}
-              >
-                {imageExpanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
               </button>
             </div>
           </div>
@@ -749,12 +592,11 @@ export default function SideBySideReviewer({
         </div>
 
         {/* Right Panel: Extracted Transaction Editor */}
-        <div className={`data-panel${isBalanced ? '' : ' data-panel-unbalanced'}`}>
-          <div className="panel-head">
-            <div className="panel-head-title">
-              <span className="classic-pencil" aria-hidden="true">✏️</span>
-              <span>Voucher entries</span>
-              <span className="panel-head-meta">
+        <div className="data-panel">
+          <div className="panel-header row-wrap" style={{ gap: '12px' }}>
+            <div className="row-sm" style={{ minWidth: 0 }}>
+              <span>✏️ Voucher entries</span>
+              <span className="text-muted" style={{ fontSize: '0.78rem', fontWeight: 500 }}>
                 {transactions.length} {transactions.length === 1 ? 'ledger line' : 'ledger lines'}
               </span>
               {unresolvedLedgers > 0 && (
@@ -766,34 +608,24 @@ export default function SideBySideReviewer({
                 </span>
               )}
             </div>
-            <div
-              className={`balance-pill ${isBalanced ? 'balance-ok' : 'balance-warn'}`}
-              title={isBalanced ? 'Debit and credit totals match' : `Out of balance by ${formattedDifference}`}
-            >
-              {isBalanced ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}
-              <span>{isBalanced ? 'Voucher balanced' : 'Out of balance'}</span>
-            </div>
+            <span className={`balance-pill ${isBalanced ? 'balance-ok' : 'balance-warn'}`}>
+              {isBalanced ? (
+                <><CheckCircle2 size={14} /> Voucher balanced</>
+              ) : (
+                <><AlertTriangle size={14} /> Voucher out of balance</>
+              )}
+            </span>
           </div>
 
           <div className="reviewer-body">
             <div className="voucher-meta">
-              <div><span>Date</span><strong>{transactions[0]?.voucher_date || '—'}</strong></div>
-              <div><span>Voucher no.</span><strong>{(transactions[0] as any)?.voucher_no || '—'}</strong></div>
+              <div><strong>Date:</strong> {transactions[0]?.voucher_date || ''}</div>
+              <div><strong>Voucher No:</strong> {(transactions[0] as any)?.voucher_no || '-'}</div>
             </div>
-            {!isBalanced && (
-              <div className="balance-banner" role="alert">
-                <AlertTriangle size={17} />
-                <div>
-                  <strong>Out of balance by {formattedDifference}</strong>
-                  <span>Debits Rs. {totalDebit.toLocaleString('en-IN', { minimumFractionDigits: 2 })} · Credits Rs. {totalCredit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}. Review the voucher before exporting.</span>
-                </div>
-              </div>
-            )}
-            <div className="table-container transaction-table-scroll">
-              <table className="custom-table tx-table" ref={reviewerTableRef} onKeyDown={handleGridKeyDown}>
+            <div className="table-container">
+              <table className="custom-table tx-table">
                 <thead>
                   <tr>
-                    <th className="tx-col-flag" aria-label="Flags"></th>
                     <th className="tx-col-type">Type</th>
                     <th>Particulars</th>
                     <th className="tx-col-amount">Debit (Rs.)</th>
@@ -806,23 +638,16 @@ export default function SideBySideReviewer({
                     <tr
                       key={tx.id}
                       className={
-                        `${tx.entry_type === 'Dr' ? 'tx-row-debit' : 'tx-row-credit'}` +
+                        `${tx.entry_type === 'Dr' ? 'tx-row-debit' : ''}` +
                         `${tx.needs_review ? ' row-needs-review' : ''}`
                       }
                     >
-                      <td className="tx-col-flag flag-gutter">
-                        {tx.needs_review ? (
-                          <span className="flag-uncertain" title="Low-confidence amount">▲</span>
-                        ) : tx.ledger_match === 'Unmatched' || tx.ledger_match === 'Suggested' ? (
-                          <span className="flag-unknown-ledger" title="Ledger is not confirmed in the chart of accounts">!</span>
-                        ) : null}
-                      </td>
                       <td>
-                        <span className={tx.entry_type === 'Dr' ? 'dr-badge' : 'cr-badge'}>
+                        <span className={`status-pill status-pill-strong ${tx.entry_type === 'Dr' ? 'status-processing' : 'status-extracted'}`}>
                           {tx.entry_type}
                         </span>
                       </td>
-                      <td className="tx-particulars">
+                      <td>
                         <input
                           type="text"
                           size={1}
@@ -831,18 +656,9 @@ export default function SideBySideReviewer({
                           // code that a redesign would have to throw away.
                           list={ledgers.length ? LEDGER_OPTIONS_ID : undefined}
                           className={`cell-input${tx.entry_type === 'Dr' ? ' cell-input-debit' : ''}`}
-                          data-grid-cell="true"
-                          data-grid-column="particulars"
-                          data-transaction-id={tx.id}
                           value={tx.ledger_name || tx.debit_ledger || tx.credit_ledger || ''}
                           title={tx.ledger_name || tx.debit_ledger || tx.credit_ledger || ''}
                           onChange={(e) => handleUpdateTransaction(tx.id, 'ledger_name', e.target.value)}
-                          onKeyDown={(event) => {
-                            if (event.key === 'Enter' && tx.ledger_match === 'Suggested' && ledgerById(tx.ledger_id)) {
-                              event.preventDefault();
-                              acceptLedgerSuggestion(tx);
-                            }
-                          }}
                         />
 
                         {/* Nothing is said when there is no chart of accounts to
@@ -861,7 +677,7 @@ export default function SideBySideReviewer({
                         )}
                         {tx.ledger_match === 'Unmatched' && (
                           <div
-                            className="ledger-hint ledger-hint-missing ledger-not-in-chart"
+                            className="ledger-hint ledger-hint-missing"
                             title="Tally will create a new account under this name on import"
                           >
                             <AlertTriangle size={11} />
@@ -873,34 +689,30 @@ export default function SideBySideReviewer({
                         {tx.entry_type === 'Dr' ? (
                           <AmountInput
                             tone="debit"
-                            gridColumn="amount"
                             uncertain={tx.needs_review}
                             value={tx.debit_amount || 0}
                             onChange={(amount) => handleUpdateTransaction(tx.id, 'debit_amount', amount)}
-                            onConfirm={() => handleUpdateTransaction(tx.id, 'needs_review', false)}
                           />
                         ) : (
-                          <span className="amount-empty">—</span>
+                          <span className="amount-empty">–</span>
                         )}
                       </td>
                       <td>
                         {tx.entry_type === 'Cr' ? (
                           <AmountInput
                             tone="credit"
-                            gridColumn="amount"
                             uncertain={tx.needs_review}
                             value={tx.credit_amount || 0}
                             onChange={(amount) => handleUpdateTransaction(tx.id, 'credit_amount', amount)}
-                            onConfirm={() => handleUpdateTransaction(tx.id, 'needs_review', false)}
                           />
                         ) : (
-                          <span className="amount-empty">—</span>
+                          <span className="amount-empty">–</span>
                         )}
                       </td>
                       <td>
                         <button
                           className="btn btn-danger btn-sm btn-icon"
-                          onClick={() => setDeletingTransactionId(tx.id)}
+                          onClick={() => handleDeleteTransaction(tx.id)}
                           title="Delete Row"
                         >
                           <Trash2 size={13} />
@@ -912,7 +724,7 @@ export default function SideBySideReviewer({
               </table>
             </div>
 
-            <div className="reviewer-table-actions">
+            <div className="row row-between">
               <div className="row-sm">
                 <button className="btn btn-secondary btn-sm" onClick={() => handleAddTransaction('Dr')}>
                   <Plus size={14} /> Add Debit
@@ -921,18 +733,19 @@ export default function SideBySideReviewer({
                   <Plus size={14} /> Add Credit
                 </button>
               </div>
+
               <div className={`totals-panel ${isBalanced ? 'totals-ok' : 'totals-warn'}`}>
                 <div>
-                  <span className="total-label">Total debit</span>
-                  <strong className="total-value total-debit">
+                  <span className="total-label">Total Debit:</span>
+                  <span className="total-value total-debit">
                     Rs. {totalDebit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                  </strong>
+                  </span>
                 </div>
                 <div className="total-divider">
-                  <span className="total-label">Total credit</span>
-                  <strong className="total-value total-credit">
+                  <span className="total-label">Total Credit:</span>
+                  <span className="total-value total-credit">
                     Rs. {totalCredit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                  </strong>
+                  </span>
                 </div>
               </div>
             </div>
@@ -966,14 +779,16 @@ export default function SideBySideReviewer({
       {showImbalanceModal && (
         <div className="modal-overlay modal-overlay-top">
           <div className="modal modal-prompt">
-            <div className="modal-head modal-head-warning">
+            <div className="row tone-amber">
               <AlertTriangle size={24} />
-              <h3 className="modal-title">Imbalance Detected</h3>
+              <h3 className="modal-title" style={{ marginBottom: 0, color: 'var(--text-main)' }}>
+                Imbalance Detected
+              </h3>
             </div>
-            <p className="modal-text">
+            <p className="modal-text" style={{ marginBottom: 0, fontSize: '0.95rem' }}>
               Debit / Credit Imbalance Detected in one or more receipts. Are you sure you want to continue with the export?
             </p>
-            <div className="modal-actions">
+            <div className="row row-end" style={{ marginTop: '8px' }}>
               <button className="btn btn-secondary" onClick={cancelExport}>
                 Cancel
               </button>
@@ -985,49 +800,28 @@ export default function SideBySideReviewer({
         </div>
       )}
 
-      {deletingTransactionId && (
-        <div className="modal-overlay modal-overlay-top">
-          <div className="modal modal-confirm">
-            <div className="modal-icon modal-icon-danger">
-              <Trash2 size={24} />
-            </div>
-            <h3 className="modal-title">Delete voucher line?</h3>
-            <p className="modal-text">
-              This removes the ledger and amount from this receipt. The change is saved with the rest of the voucher.
-            </p>
-            <div className="modal-actions">
-              <button className="btn btn-secondary" onClick={() => setDeletingTransactionId(null)}>
-                Cancel
-              </button>
-              <button
-                className="btn btn-danger btn-danger-solid"
-                onClick={() => {
-                  handleDeleteTransaction(deletingTransactionId);
-                  setDeletingTransactionId(null);
-                }}
-              >
-                <Trash2 size={15} /> Delete line
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {showDeleteModal && currentReceipt && (
-        <div className="modal-overlay modal-overlay-top">
-          <div className="modal modal-prompt">
-            <div className="modal-head modal-head-danger">
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          backgroundColor: 'rgba(0, 0, 0, 0.68)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: '20px', backdropFilter: 'blur(4px)'
+        }}>
+          <div className="card" style={{ width: '100%', maxWidth: '430px', padding: '24px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: '#f43f5e', marginBottom: '12px' }}>
               <Trash2 size={22} />
-              <h3 className="modal-title">Delete receipt?</h3>
+              <h3 style={{ fontSize: '1.15rem', fontWeight: 700, color: 'var(--text-main)' }}>
+                Delete receipt?
+              </h3>
             </div>
-            <p className="modal-text">
-              This will permanently delete <strong>{currentReceipt.filename}</strong> and its extracted data. This action cannot be undone.
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', lineHeight: 1.5 }}>
+              This will permanently delete <strong style={{ color: 'var(--text-main)' }}>{currentReceipt.filename}</strong> and its extracted data. This action cannot be undone.
             </p>
-            <div className="modal-actions">
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '22px' }}>
               <button className="btn btn-secondary" onClick={() => setShowDeleteModal(false)} disabled={deletingReceipt}>
                 Cancel
               </button>
-              <button className="btn btn-danger btn-danger-solid" onClick={handleDeleteCurrentReceipt} disabled={deletingReceipt}>
+              <button className="btn btn-danger" onClick={handleDeleteCurrentReceipt} disabled={deletingReceipt}>
                 {deletingReceipt ? <><Loader2 size={15} className="animate-spin" /> Deleting...</> : <><Trash2 size={15} /> Delete Receipt</>}
               </button>
             </div>
