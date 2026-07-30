@@ -170,6 +170,38 @@ export async function createUserAccount(input: {
   };
 }
 
+async function callUserApi(userId: string, method: 'PATCH' | 'DELETE', body?: object): Promise<any> {
+  const { data: sessionData } = await supabase.auth.getSession();
+  const token = sessionData.session?.access_token;
+  if (!token) throw new Error('Your session has expired. Please sign in again.');
+  const base = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:8000';
+  const res = await fetch(`${base}/api/users/${userId}`, {
+    method,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  const responseBody = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(responseBody?.detail || 'Could not update the account.');
+  return responseBody;
+}
+
+export async function updateUserAccount(userId: string, input: {
+  name: string; email: string; role: UserRole; designation?: string; phone?: string; password?: string;
+  organizationId?: string | null;
+}): Promise<User> {
+  const body = await callUserApi(userId, 'PATCH', {
+    name: input.name, email: input.email, role: input.role, designation: input.designation || '',
+    phone: input.phone || '', password: input.password || '', organization_id: input.organizationId ?? null,
+  });
+  return { id: body.id, organization_id: body.organization_id, orgId: body.organization_id,
+    name: body.name, email: body.email, phone: body.phone || undefined, designation: body.designation || undefined,
+    role: body.role as UserRole, status: body.status };
+}
+
+export async function deleteUserAccount(userId: string): Promise<void> {
+  await callUserApi(userId, 'DELETE');
+}
+
 /** Deactivating blocks sign-in while keeping the person's history intact. */
 export async function setUserStatus(userId: string, status: 'Active' | 'Inactive'): Promise<void> {
   const { error } = await supabase.from('users').update({ status }).eq('id', userId);

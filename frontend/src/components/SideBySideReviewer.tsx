@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2,
   RotateCcw, RotateCw, ChevronLeft, ChevronRight, Loader2, HelpCircle, Camera,
-  Pencil, Maximize2, Minimize2,
+  Maximize2, Minimize2,
 } from 'lucide-react';
 import { ScanBatch, Receipt, Transaction, User, Ledger } from '../types';
 import { saveTransactionsForReceipt, getReceiptImageUrl, deleteReceipt, fetchLedgers, resolveLedgerName } from '../lib/db';
@@ -752,7 +752,7 @@ export default function SideBySideReviewer({
         <div className={`data-panel${isBalanced ? '' : ' data-panel-unbalanced'}`}>
           <div className="panel-head">
             <div className="panel-head-title">
-              <Pencil size={15} />
+              <span className="classic-pencil" aria-hidden="true">✏️</span>
               <span>Voucher entries</span>
               <span className="panel-head-meta">
                 {transactions.length} {transactions.length === 1 ? 'ledger line' : 'ledger lines'}
@@ -915,10 +915,10 @@ export default function SideBySideReviewer({
             <div className="reviewer-table-actions">
               <div className="row-sm">
                 <button className="btn btn-secondary btn-sm" onClick={() => handleAddTransaction('Dr')}>
-                  <Plus size={14} /> Add debit line <span className="kbd-hint">⌘D</span>
+                  <Plus size={14} /> Add Debit
                 </button>
                 <button className="btn btn-secondary btn-sm" onClick={() => handleAddTransaction('Cr')}>
-                  <Plus size={14} /> Add credit line <span className="kbd-hint">⌘K</span>
+                  <Plus size={14} /> Add Credit
                 </button>
               </div>
               <div className={`totals-panel ${isBalanced ? 'totals-ok' : 'totals-warn'}`}>

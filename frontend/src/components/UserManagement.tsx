@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import {
-  UserPlus, Users, Loader2,
+  UserPlus, Users, Loader2, Pencil, Trash2, UserRound, Mail, Phone, Briefcase,
   AlertCircle, CheckCircle2, XCircle, ArrowLeft, Eye, EyeOff
 } from 'lucide-react';
 import { User, UserRole, UserStatus } from '../types';
-import { fetchOrgUsers, createUserAccount, setUserStatus, fetchOrganizations } from '../lib/db';
+import { fetchOrgUsers, createUserAccount, updateUserAccount, deleteUserAccount, setUserStatus, fetchOrganizations } from '../lib/db';
 import StatusFilter from './StatusFilter';
 
 interface UserManagementProps {
@@ -36,8 +36,11 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
   const [statusFilter, setStatusFilter] = useState<UserStatusFilter>('All');
 
   const [showForm, setShowForm] = useState(false);
+  const [editingUser, setEditingUser] = useState<User | null>(null);
+  const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [designation, setDesignation] = useState('');
@@ -82,8 +85,15 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
     : displayedUsers.filter(user => user.status === statusFilter);
 
   const resetForm = () => {
-    setName(''); setEmail(''); setPassword(''); setDesignation('');
+    setName(''); setEmail(''); setPhone(''); setPassword(''); setDesignation('');
     setRole('Operator'); setOrgId(''); setFormError(null); setShowPassword(false);
+    setEditingUser(null);
+  };
+
+  const beginEdit = (user: User) => {
+    setEditingUser(user); setSelectedUser(null); setShowForm(true); setFormError(null);
+    setName(user.name); setEmail(user.email); setPhone(user.phone || ''); setPassword('');
+    setDesignation(user.designation || ''); setRole(user.role); setOrgId(user.organization_id || '');
   };
 
   const handleCreate = async (e: React.FormEvent) => {
@@ -93,23 +103,44 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
     try {
       const normalizedName = toTitleCase(name);
       const normalizedDesignation = toTitleCase(designation);
-      const created = await createUserAccount({
+      const input = {
         name: normalizedName,
         email,
+        phone,
         password,
         role,
         designation: normalizedDesignation,
         // Ignored by the server for an Admin, who is always confined to their
         // own organisation regardless of what is sent.
         organizationId: isSuperAdmin ? (role === 'Super Admin' ? null : orgId) : undefined,
-      });
-      setNotice(`${created.name} can now sign in with ${created.email}.`);
+      };
+      const saved = editingUser
+        ? await updateUserAccount(editingUser.id, input)
+        : await createUserAccount(input);
+      setNotice(editingUser ? `${saved.name}'s details were updated.` : `${saved.name} can now sign in with ${saved.email}.`);
       setShowForm(false);
       resetForm();
       await load();
       setTimeout(() => setNotice(null), 8000);
     } catch (err: any) {
       setFormError(err?.message || 'Could not create the account.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeUser = async (user: User) => {
+    if (user.id === currentUser.id) return;
+    if (!window.confirm(`Delete ${user.name}'s account permanently? This cannot be undone.`)) return;
+    setBusy(true);
+    try {
+      await deleteUserAccount(user.id);
+      setUsers(prev => prev.filter(u => u.id !== user.id));
+      setSelectedUser(null);
+      setNotice(`${user.name}'s account was deleted.`);
+      setTimeout(() => setNotice(null), 5000);
+    } catch (err: any) {
+      setLoadError(err?.message || 'Could not delete that user.');
     } finally {
       setBusy(false);
     }
@@ -137,6 +168,39 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
     return (
       <div className="loading-state">
         <Loader2 size={18} className="animate-spin" /> Loading users...
+      </div>
+    );
+  }
+
+  if (selectedUser) {
+    const detailOrg = isSuperAdmin
+      ? (orgs.find(o => o.id === selectedUser.organization_id)?.name || 'Platform')
+      : (currentUser.orgName || 'Your organization');
+    return (
+      <div className="page page-compact">
+        <div className="page-header page-header-center"><div className="row">
+          <button className="back-link" onClick={() => setSelectedUser(null)}><ArrowLeft size={16} /> Team Members</button>
+          <div><h2 className="page-title page-title-icon"><UserRound size={22} color="var(--primary)" /> Member details</h2>
+            <p className="page-subtitle">View account information and management options</p></div>
+        </div></div>
+        <div className="card" style={{ maxWidth: '720px' }}>
+          <div className="row" style={{ justifyContent: 'space-between', marginBottom: '24px' }}>
+            <div><h3 className="section-title">{selectedUser.name}</h3><span className={`role-tag ${ROLE_STYLES[selectedUser.role]}`}>{selectedUser.role}</span></div>
+            <span className={`status-pill ${selectedUser.status === 'Active' ? 'status-extracted' : 'status-failed'}`}>
+              {selectedUser.status === 'Active' ? <CheckCircle2 size={12} /> : <XCircle size={12} />} {selectedUser.status}
+            </span>
+          </div>
+          <div className="grid-2">
+            <div className="detail-item"><span className="text-dim text-xs"><Mail size={13} /> Email</span><strong>{selectedUser.email}</strong></div>
+            <div className="detail-item"><span className="text-dim text-xs"><Phone size={13} /> Phone</span><strong>{selectedUser.phone || 'Not provided'}</strong></div>
+            <div className="detail-item"><span className="text-dim text-xs"><Briefcase size={13} /> Designation</span><strong>{selectedUser.designation || 'Not provided'}</strong></div>
+            <div className="detail-item"><span className="text-dim text-xs">Organization</span><strong>{detailOrg}</strong></div>
+          </div>
+          {selectedUser.id !== currentUser.id && selectedUser.role !== 'Super Admin' && <div className="form-actions" style={{ marginTop: '28px' }}>
+            <button className="btn btn-primary" onClick={() => beginEdit(selectedUser)}><Pencil size={15} /> Edit member</button>
+            <button className="btn btn-danger" onClick={() => removeUser(selectedUser)} disabled={busy}><Trash2 size={15} /> Delete account</button>
+          </div>}
+        </div>
       </div>
     );
   }
@@ -196,7 +260,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
       {showForm && (
         <div className="card">
           <h3 className="section-title" style={{ marginBottom: '4px', fontSize: '1.05rem', fontWeight: 700 }}>
-            Add a team member
+            {editingUser ? 'Edit team member' : 'Add a team member'}
           </h3>
           <p className="text-muted text-xs" style={{ marginBottom: '18px' }}>
             Set their login details and share the password securely. It will not be emailed.
@@ -214,6 +278,10 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
                 <input type="email" className="form-input" value={email} onChange={e => setEmail(e.target.value)}
                        placeholder="ram@company.com" autoComplete="off" disabled={busy} required />
               </div>
+              <div className="form-group">
+                <label className="form-label">Phone <span className="text-dim">(optional)</span></label>
+                <input className="form-input" value={phone} onChange={e => setPhone(e.target.value)} placeholder="98XXXXXXXX" disabled={busy} />
+              </div>
             </div>
 
             <div className="grid-2">
@@ -225,11 +293,11 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
                     className="form-input"
                     value={password}
                     onChange={e => setPassword(e.target.value)}
-                    placeholder="At least 8 characters"
+                    placeholder={editingUser ? 'Leave blank to keep current password' : 'At least 8 characters'}
                     autoComplete="new-password"
                     minLength={8}
                     disabled={busy}
-                    required
+                    required={!editingUser}
                   />
                   <button
                     type="button"
@@ -285,7 +353,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
 
             <div className="form-actions">
               <button type="submit" className="btn btn-primary" disabled={busy}>
-                {busy ? <><Loader2 size={16} className="animate-spin" /> Creating...</> : <><UserPlus size={16} /> Create account</>}
+                {busy ? <><Loader2 size={16} className="animate-spin" /> Saving...</> : editingUser ? <><Pencil size={16} /> Save changes</> : <><UserPlus size={16} /> Create account</>}
               </button>
               <button type="button" className="btn btn-secondary" disabled={busy}
                       onClick={() => { setShowForm(false); resetForm(); }}>
@@ -353,18 +421,16 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
                       </span>
                     </td>
                     <td>
-                      {/* Locking yourself out would need another admin to undo. */}
-                      {isSelf ? (
-                        <span className="text-dim" style={{ fontSize: '0.78rem' }}>—</span>
-                      ) : (
-                        <button
-                          className={`btn btn-sm ${u.status === 'Active' ? 'btn-danger' : 'btn-secondary'}`}
-                          onClick={() => toggleStatus(u)}
-                          title={u.status === 'Active' ? 'Block this person from signing in' : 'Allow this person to sign in again'}
-                        >
-                          {u.status === 'Active' ? 'Deactivate' : 'Reactivate'}
-                        </button>
-                      )}
+                      <div className="table-actions">
+                        <button className="btn btn-sm btn-secondary" onClick={() => setSelectedUser(u)} title="View member details"><Eye size={14} /> View</button>
+                        {!isSelf && u.role !== 'Super Admin' && <>
+                          <button className="btn btn-sm btn-secondary" onClick={() => beginEdit(u)} title="Edit member"><Pencil size={14} /></button>
+                          <button className="btn btn-sm btn-danger" onClick={() => removeUser(u)} title="Delete account"><Trash2 size={14} /></button>
+                          <button className={`btn btn-sm ${u.status === 'Active' ? 'btn-danger' : 'btn-secondary'}`} onClick={() => toggleStatus(u)} title={u.status === 'Active' ? 'Block this person from signing in' : 'Allow this person to sign in again'}>
+                            {u.status === 'Active' ? 'Deactivate' : 'Reactivate'}
+                          </button>
+                        </>}
+                      </div>
                     </td>
                   </tr>
                 );

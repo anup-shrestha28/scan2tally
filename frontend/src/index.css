@@ -165,6 +165,10 @@ body.light {
   font-variant-numeric: tabular-nums;
 }
 
+.table-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.detail-item { display: flex; flex-direction: column; gap: 5px; padding: 12px 0; }
+.detail-item .text-xs { display: flex; align-items: center; gap: 5px; }
+
 body.light .navbar {
   background: rgba(255, 255, 255, 0.95);
   backdrop-filter: blur(8px);
@@ -2659,6 +2663,180 @@ input[type='number']::-webkit-inner-spin-button {
   min-width: 70px;
 }
 .narration-input { flex: 1; min-height: 34px; font-size: var(--fs-md); font-style: normal; }
+
+/* Classic voucher-entry treatment: compact rows, readable metadata and a
+   totals/narration footer that matches the original journal workflow. */
+.reviewer-body {
+  gap: var(--sp-4);
+}
+
+.voucher-meta {
+  padding: 0 var(--sp-1);
+  font-size: var(--fs-md);
+}
+
+.voucher-meta div {
+  gap: var(--sp-2);
+}
+
+.voucher-meta span {
+  color: var(--text-1);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-head);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.voucher-meta strong {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-normal);
+}
+
+.transaction-table-scroll {
+  border: var(--bw-hair) solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.tx-table th,
+.tx-table td {
+  padding: 10px;
+}
+
+.tx-table th {
+  font-size: var(--fs-sm);
+}
+
+.tx-table td {
+  min-height: 42px;
+  font-size: var(--fs-sm);
+}
+
+.tx-col-flag,
+.flag-gutter {
+  display: none;
+}
+
+.tx-table .dr-badge,
+.tx-table .cr-badge {
+  min-width: 29px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: var(--fs-xs);
+}
+
+.tx-table .cell-input {
+  min-height: 28px;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-head);
+}
+
+.reviewer-table-actions {
+  align-items: center;
+}
+
+.totals-panel {
+  min-width: 268px;
+  padding: 10px 16px;
+}
+
+.total-label {
+  font-size: var(--fs-xs);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.total-value {
+  font-size: var(--fs-lg);
+}
+
+.narration-row {
+  padding: 8px 4px 0;
+}
+
+.narration-label {
+  font-size: var(--fs-sm);
+}
+
+.narration-input {
+  min-height: 34px;
+  font-size: var(--fs-sm);
+  font-style: italic;
+}
+
+/* Match the original compact journal editor proportions. */
+.data-panel .reviewer-body {
+  flex: 1;
+  min-height: 0;
+  padding: 16px;
+  overflow-y: auto;
+  gap: 16px;
+}
+
+.classic-pencil {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.data-panel .panel-head {
+  min-height: 60px;
+  padding: 12px 16px;
+}
+
+.data-panel .panel-head-title {
+  gap: 8px;
+  font-size: 1rem;
+}
+
+.data-panel .panel-head-meta {
+  font-size: 0.78rem;
+}
+
+.data-panel .transaction-table-scroll {
+  max-height: none;
+  overflow-y: auto;
+}
+
+.data-panel .tx-table th {
+  padding: 8px 10px;
+  font-size: 0.875rem;
+}
+
+.data-panel .tx-table td {
+  padding: 10px;
+}
+
+.data-panel .reviewer-table-actions {
+  gap: 16px;
+}
+
+.data-panel .totals-panel {
+  min-width: 268px;
+  padding: 10px 16px;
+  gap: 20px;
+}
+
+.data-panel .total-label {
+  font-size: 0.75rem;
+}
+
+.data-panel .total-value {
+  font-size: 0.95rem;
+}
+
+.data-panel .narration-row {
+  gap: 10px;
+  padding: 8px 4px 0;
+}
+
+.data-panel .narration-label {
+  min-width: 70px;
+  font-size: 0.8rem;
+}
+
+.data-panel .narration-input {
+  padding: 6px 10px;
+  font-size: 0.85rem;
+}
 
 /* Ledger match feedback under a Particulars cell. */
 .ledger-hint {

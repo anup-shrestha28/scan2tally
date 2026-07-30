@@ -608,6 +608,16 @@ class CreateUserRequest(BaseModel):
     organization_id: Optional[str] = None
 
 
+class UpdateUserRequest(BaseModel):
+    name: str
+    email: str
+    role: str
+    designation: Optional[str] = ""
+    phone: Optional[str] = ""
+    password: Optional[str] = ""
+    organization_id: Optional[str] = None
+
+
 def _svc_headers() -> dict:
     return {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
@@ -750,6 +760,101 @@ async def create_user(payload: CreateUserRequest, authorization: Optional[str] =
 
     return {"id": new_id, "name": name, "email": email, "role": payload.role,
             "organization_id": organization_id, "status": "Active"}
+
+
+async def _load_target_user(client: httpx.AsyncClient, user_id: str, caller: dict) -> dict:
+    response = await client.get(
+        f"{SUPABASE_URL}/rest/v1/users",
+        headers=_svc_headers(),
+        params={"select": "id,organization_id,role,status", "id": f"eq.{user_id}"},
+    )
+    rows = response.json() if response.status_code == 200 else []
+    if not rows:
+        raise HTTPException(status_code=404, detail="That team member was not found.")
+    target = rows[0]
+    if caller.get("role") != "Super Admin" and (
+        target.get("organization_id") != caller.get("organization_id")
+        or target.get("id") == caller.get("id")
+    ):
+        raise HTTPException(status_code=403, detail="You cannot manage that team member.")
+    return target
+
+
+@app.patch("/api/users/{user_id}")
+async def update_user(user_id: str, payload: UpdateUserRequest, authorization: Optional[str] = Header(None)):
+    if not supabase_admin_available:
+        raise HTTPException(status_code=503, detail="User management is not configured on this server.")
+
+    caller = await resolve_caller(authorization)
+    name = (payload.name or "").strip().lower().title()
+    email = (payload.email or "").strip().lower()
+    designation = (payload.designation or "").strip().lower().title()
+    phone = (payload.phone or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Please enter the person's name.")
+    if "@" not in email or "." not in email.split("@")[-1]:
+        raise HTTPException(status_code=400, detail="Please enter a valid email address.")
+    if payload.role not in ("Admin", "Operator"):
+        raise HTTPException(status_code=400, detail="Team members can only be Admin or Operator accounts.")
+    if payload.password and len(payload.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        target = await _load_target_user(client, user_id, caller)
+        if target.get("role") == "Super Admin":
+            raise HTTPException(status_code=403, detail="Super Admin accounts cannot be managed here.")
+        organization_id = payload.organization_id if caller.get("role") == "Super Admin" else caller.get("organization_id")
+        if not organization_id:
+            raise HTTPException(status_code=400, detail="Choose an organisation for this user.")
+
+        existing = await client.get(
+            f"{SUPABASE_URL}/rest/v1/users", headers=_svc_headers(),
+            params={"select": "id", "email": f"eq.{email}", "id": f"neq.{user_id}"},
+        )
+        if existing.status_code == 200 and existing.json():
+            raise HTTPException(status_code=409, detail="An account with that email already exists.")
+
+        auth_update = {"email": email, "email_confirm": True}
+        if payload.password:
+            auth_update["password"] = payload.password
+        auth_response = await client.put(
+            f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}", headers=_svc_headers(), json=auth_update
+        )
+        if auth_response.status_code not in (200, 201):
+            detail = auth_response.json().get("message") or "Could not update the login."
+            raise HTTPException(status_code=400, detail=detail)
+
+        profile = await client.patch(
+            f"{SUPABASE_URL}/rest/v1/users", headers={**_svc_headers(), "Prefer": "return=representation"},
+            params={"id": f"eq.{user_id}"},
+            json={"name": name, "email": email, "phone": phone or None, "designation": designation or None,
+                  "role": payload.role, "organization_id": organization_id},
+        )
+        if profile.status_code not in (200, 204):
+            raise HTTPException(status_code=400, detail="The login changed, but the user profile could not be updated.")
+
+    return {"id": user_id, "name": name, "email": email, "phone": phone or None,
+            "designation": designation or None, "role": payload.role,
+            "organization_id": organization_id, "status": target.get("status", "Active")}
+
+
+@app.delete("/api/users/{user_id}")
+async def delete_user(user_id: str, authorization: Optional[str] = Header(None)):
+    if not supabase_admin_available:
+        raise HTTPException(status_code=503, detail="User management is not configured on this server.")
+
+    caller = await resolve_caller(authorization)
+    async with httpx.AsyncClient(timeout=30) as client:
+        target = await _load_target_user(client, user_id, caller)
+        if target.get("role") == "Super Admin":
+            raise HTTPException(status_code=403, detail="Super Admin accounts cannot be deleted here.")
+        deleted = await client.delete(
+            f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}", headers=_svc_headers()
+        )
+        if deleted.status_code not in (200, 204):
+            detail = deleted.json().get("message") or "Could not delete the login."
+            raise HTTPException(status_code=400, detail=detail)
+    return {"id": user_id}
 
 
 # ---------------------------------------------------------------- background extraction
