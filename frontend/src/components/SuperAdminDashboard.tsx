@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Building2, Plus, CheckCircle2, XCircle, Loader2, AlertCircle } from 'lucide-react';
-import { Organization, OrgStatus } from '../types';
+import { Building2, Plus, CheckCircle2, XCircle, Loader2, AlertCircle, Database, HardDrive } from 'lucide-react';
+import { CapacityMetric, Organization, OrgStatus, PlatformUsage } from '../types';
 import StatusFilter from './StatusFilter';
 import { usePolling } from '../lib/usePolling';
 import {
@@ -12,7 +12,67 @@ import {
 
 type OrganizationStatusFilter = 'All' | OrgStatus;
 
-export default function SuperAdminDashboard() {
+interface SuperAdminDashboardProps {
+  usage: PlatformUsage | null;
+  usageError?: string | null;
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const unitIndex = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / (1024 ** unitIndex);
+  return `${value.toLocaleString(undefined, { maximumFractionDigits: unitIndex < 2 ? 0 : 2 })} ${units[unitIndex]}`;
+}
+
+function CapacityMeter({
+  label, icon, metric, warningAt, criticalAt, note,
+}: {
+  label: string;
+  icon: React.ReactNode;
+  metric: CapacityMetric;
+  warningAt: number;
+  criticalAt: number;
+  note: string;
+}) {
+  const tone = metric.percent >= 100
+    ? 'full'
+    : metric.percent >= criticalAt
+      ? 'critical'
+      : metric.percent >= warningAt
+        ? 'warning'
+        : 'healthy';
+
+  return (
+    <div className={`capacity-meter capacity-meter-${tone}`}>
+      <div className="capacity-meter-head">
+        <div className="row-sm">
+          {icon}
+          <div>
+            <div className="capacity-meter-label">{label}</div>
+            <div className="capacity-meter-value">
+              {formatBytes(metric.usedBytes)} <span>of {formatBytes(metric.quotaBytes)}</span>
+            </div>
+          </div>
+        </div>
+        <strong>{metric.percent.toFixed(1)}%</strong>
+      </div>
+      <div
+        className="capacity-progress"
+        role="progressbar"
+        aria-label={`${label} capacity used`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.min(100, Math.round(metric.percent))}
+      >
+        <span style={{ width: `${Math.min(100, metric.percent)}%` }} />
+      </div>
+      <div className="capacity-meter-note">{note}</div>
+    </div>
+  );
+}
+
+export default function SuperAdminDashboard({ usage, usageError }: SuperAdminDashboardProps) {
   const [orgs, setOrgs] = useState<Organization[]>([]);
   const [stats, setStats] = useState({ activeUsers: 0, receipts: 0, batches: 0 });
   const [loading, setLoading] = useState(true);
@@ -143,6 +203,61 @@ export default function SuperAdminDashboard() {
           </div>
         </div>
       </div>
+
+      {usage?.storage && usage.database ? (
+        <section className="card capacity-card" aria-labelledby="capacity-heading">
+          <div className="capacity-card-head">
+            <div>
+              <h3 id="capacity-heading" className="section-title section-title-lg">
+                <HardDrive size={20} color="var(--primary)" /> Supabase Capacity
+              </h3>
+              <p className="text-muted text-xs">
+                Live project usage · warning at {usage.warningThresholdPercent}% · critical at {usage.criticalThresholdPercent}%
+              </p>
+            </div>
+            <span className="capacity-checked">
+              Updated {new Date(usage.checkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </span>
+          </div>
+
+          <div className="capacity-grid">
+            <CapacityMeter
+              label="File storage"
+              icon={<HardDrive size={18} />}
+              metric={usage.storage}
+              warningAt={usage.warningThresholdPercent}
+              criticalAt={usage.criticalThresholdPercent}
+              note={`${usage.storage.objectCount || 0} stored ${usage.storage.objectCount === 1 ? 'file' : 'files'}`}
+            />
+            <CapacityMeter
+              label="Database"
+              icon={<Database size={18} />}
+              metric={usage.database}
+              warningAt={usage.warningThresholdPercent}
+              criticalAt={usage.criticalThresholdPercent}
+              note="Tables, indexes and Supabase-managed schemas"
+            />
+          </div>
+
+          {Object.keys(usage.storage.byBucket || {}).length > 0 && (
+            <div className="capacity-breakdown" aria-label="Storage by bucket">
+              {Object.entries(usage.storage.byBucket || {})
+                .sort(([, first], [, second]) => second - first)
+                .map(([bucket, bytes]) => (
+                  <span key={bucket}><strong>{bucket}</strong> {formatBytes(bytes)}</span>
+                ))}
+            </div>
+          )}
+        </section>
+      ) : usageError ? (
+        <div className="alert alert-warning alert-top">
+          <AlertCircle size={16} className="alert-icon" />
+          <div className="alert-body">
+            <div className="alert-title">Capacity monitoring needs setup</div>
+            <div className="alert-detail">{usageError}</div>
+          </div>
+        </div>
+      ) : null}
 
       {showAddModal && (
         <div className="card" style={{ borderColor: 'var(--primary)' }}>

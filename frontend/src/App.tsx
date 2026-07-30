@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Loader2 } from 'lucide-react';
+import { AlertTriangle, Loader2 } from 'lucide-react';
 import Navbar from './components/Navbar';
 import LoginModal from './components/LoginModal';
 import SuperAdminDashboard from './components/SuperAdminDashboard';
@@ -9,10 +9,11 @@ import UserManagement from './components/UserManagement';
 import BatchWorkspace from './components/BatchWorkspace';
 import SideBySideReviewer from './components/SideBySideReviewer';
 import ExcelExporter from './components/ExcelExporter';
-import { User, ScanBatch, Receipt, Transaction } from './types';
+import { User, ScanBatch, Receipt, Transaction, PlatformUsage } from './types';
 import { supabase } from './lib/supabase';
-import { fetchCurrentUser, signOut } from './lib/db';
+import { fetchCurrentUser, fetchPlatformUsage, signOut } from './lib/db';
 import { LEDGER_MATCHING } from './lib/features';
+import { usePolling } from './lib/usePolling';
 
 type AppView = 'batches' | 'reviewer' | 'exporter' | 'users' | 'overview' | 'ledgers';
 const APP_VIEW_STORAGE_KEY = 'scan2tally-current-view';
@@ -55,6 +56,8 @@ export default function App() {
   const [activeTransactions, setActiveTransactions] = useState<Transaction[]>(savedState.activeTransactions || []);
   const [allReceiptTransactions, setAllReceiptTransactions] = useState<Record<string, Transaction[]>>(savedState.receiptTransactions || {});
   const [isDark, setIsDark] = useState<boolean>(true);
+  const [platformUsage, setPlatformUsage] = useState<PlatformUsage | null>(null);
+  const [platformUsageError, setPlatformUsageError] = useState<string | null>(null);
 
   useEffect(() => {
     document.body.classList.toggle('light', !isDark);
@@ -121,6 +124,45 @@ export default function App() {
       sub.subscription.unsubscribe();
     };
   }, []);
+
+  const refreshPlatformUsage = async (signal: AbortSignal) => {
+    try {
+      const usage = await fetchPlatformUsage();
+      if (signal.aborted) return;
+      setPlatformUsage(usage);
+      setPlatformUsageError(null);
+    } catch (err: any) {
+      if (signal.aborted) return;
+      setPlatformUsageError(err?.message || 'Could not load Supabase capacity.');
+      throw err;
+    }
+  };
+
+  // Load once after authentication. Detailed numbers are returned only for a
+  // Super Admin; every role receives enough state to display a capacity alert.
+  useEffect(() => {
+    if (!currentUser) {
+      setPlatformUsage(null);
+      setPlatformUsageError(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    refreshPlatformUsage(controller.signal).catch(() => {
+      // The Super Admin dashboard surfaces setup errors. Other roles should not
+      // see an alarming banner merely because monitoring itself is unavailable.
+    });
+    return () => controller.abort();
+  }, [currentUser?.id]);
+
+  // Capacity changes much more slowly than extraction status. One minute keeps
+  // warnings timely without turning a simple aggregate into noisy traffic.
+  usePolling(async ({ signal }) => refreshPlatformUsage(signal), {
+    enabled: Boolean(currentUser),
+    intervalMs: 60000,
+    maxIntervalMs: 300000,
+    resetKey: currentUser?.id || '',
+  });
 
   const handleAuthenticated = () => {
     setAuthError(null);
@@ -190,6 +232,26 @@ export default function App() {
       />
 
       <main className="main-content">
+        {currentUser && platformUsage && platformUsage.level !== 'healthy' && (
+          <div
+            className={`capacity-alert capacity-alert-${platformUsage.level}`}
+            role={platformUsage.level === 'warning' ? 'status' : 'alert'}
+            aria-live={platformUsage.level === 'warning' ? 'polite' : 'assertive'}
+          >
+            <AlertTriangle size={18} />
+            <div className="capacity-alert-copy">
+              <strong>
+                {platformUsage.level === 'full'
+                  ? 'Supabase capacity reached'
+                  : platformUsage.level === 'critical'
+                    ? 'Supabase capacity critical'
+                    : 'Supabase capacity warning'}
+              </strong>
+              <span>{platformUsage.message}</span>
+            </div>
+            <span className="capacity-alert-percent">{platformUsage.percent.toFixed(1)}%</span>
+          </div>
+        )}
         {authLoading ? (
           <div className="loading-state loading-state-page">
             <Loader2 size={18} className="animate-spin" />
@@ -210,7 +272,7 @@ export default function App() {
             onBack={() => setCurrentView('batches')}
           />
         ) : currentUser.role === 'Super Admin' ? (
-          <SuperAdminDashboard />
+          <SuperAdminDashboard usage={platformUsage} usageError={platformUsageError} />
         ) : currentView === 'ledgers' && LEDGER_MATCHING ? (
           <LedgerManager
             currentUser={currentUser}

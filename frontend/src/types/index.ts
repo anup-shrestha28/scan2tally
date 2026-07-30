@@ -45,6 +45,32 @@ export interface User {
   orgName?: string;
 }
 
+export type CapacityLevel = 'healthy' | 'warning' | 'critical' | 'full';
+export type CapacityResource = 'storage' | 'database';
+
+export interface CapacityMetric {
+  usedBytes: number;
+  quotaBytes: number;
+  percent: number;
+  /** Super Admin only. */
+  objectCount?: number;
+  /** Super Admin only; keyed by Supabase bucket id. */
+  byBucket?: Record<string, number>;
+}
+
+export interface PlatformUsage {
+  level: CapacityLevel;
+  resource: CapacityResource;
+  percent: number;
+  message: string;
+  warningThresholdPercent: number;
+  criticalThresholdPercent: number;
+  checkedAt: string;
+  /** Exact metrics are omitted by the API for Admin and Operator callers. */
+  storage?: CapacityMetric;
+  database?: CapacityMetric;
+}
+
 export interface Receipt {
   id: string;
   filename: string;

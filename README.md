@@ -180,9 +180,14 @@ Editor. They are additive and safe to run more than once.
 | :--- | :--- |
 | `001_restrict_user_directory.sql` | limits the organisation-wide user directory to Admins |
 | `002_ledgers_claiming_audit.sql` | the `ledgers` chart of accounts, job claiming, and a stored copy of what the model returned |
+| `003_export_file_storage.sql` | private storage and policies for generated Excel files |
+| `004_platform_capacity_usage.sql` | service-role-only Storage and database capacity metrics |
 
 **Run `002` before deploying this version of the web app** — it reads the ledger columns the
 migration adds, and will show a load error without them.
+
+**Run `004` before enabling capacity monitoring.** Until it is applied, the Super Admin dashboard
+shows a setup notice and Admin/Operator screens continue normally without a capacity banner.
 
 The *backend* is deliberately tolerant of the gap: it detects the missing columns at start-up,
 prints a warning, and carries on extracting vouchers with ledger matching switched off, so an
@@ -192,6 +197,15 @@ in that state, because job claiming is one of the things `002` adds.
 The bucket is deliberately **private**: receipt images are served through
 short-lived signed URLs, so one organization cannot read another's scans by
 guessing a path.
+
+Capacity monitoring compares this project's live usage with the operational
+limits configured on the backend. The defaults in `backend/.env.example` match
+the Supabase Free plan. For Pro, Team, Enterprise, or a deliberately smaller
+project budget, set `SUPABASE_STORAGE_QUOTA_GB` and
+`SUPABASE_DATABASE_QUOTA_MB` to the limits you want the app to warn against.
+Storage billing quotas are organisation-wide in Supabase, so an organisation
+with several Supabase projects should assign this project an appropriate share
+rather than assuming the entire organisation quota belongs to it.
 
 ---
 

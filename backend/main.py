@@ -42,6 +42,127 @@ if supabase_admin_available:
 else:
     print("⚠️ Supabase admin API not configured — user creation endpoint disabled")
 
+BYTES_PER_MIB = 1024 ** 2
+BYTES_PER_GIB = 1024 ** 3
+
+
+def _positive_env_number(name: str, default: float) -> float:
+    """Reads a positive numeric setting without making a bad deploy unbootable."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+        if value > 0:
+            return value
+    except (TypeError, ValueError):
+        pass
+    print(f"⚠️ {name} must be a positive number; using {default} instead")
+    return default
+
+
+def _percent_env(name: str, default: float) -> float:
+    return min(100.0, _positive_env_number(name, default))
+
+
+# These are operational limits, deliberately configurable rather than inferred
+# from a plan name. Supabase storage quotas are organisation-wide, while the
+# live values below come from this project; deployments with multiple projects
+# can therefore assign this app the capacity budget they actually want it to use.
+STORAGE_QUOTA_BYTES = int(
+    _positive_env_number("SUPABASE_STORAGE_QUOTA_GB", 1.0) * BYTES_PER_GIB
+)
+DATABASE_QUOTA_BYTES = int(
+    _positive_env_number("SUPABASE_DATABASE_QUOTA_MB", 500.0) * BYTES_PER_MIB
+)
+USAGE_WARNING_PERCENT = min(99.0, _percent_env("SUPABASE_USAGE_WARNING_PERCENT", 80.0))
+USAGE_CRITICAL_PERCENT = max(
+    USAGE_WARNING_PERCENT,
+    _percent_env("SUPABASE_USAGE_CRITICAL_PERCENT", 95.0),
+)
+
+
+def _usage_metric(used_bytes: int, quota_bytes: int) -> dict:
+    used = max(0, int(used_bytes or 0))
+    quota = max(1, int(quota_bytes))
+    return {
+        "usedBytes": used,
+        "quotaBytes": quota,
+        "percent": round((used / quota) * 100, 1),
+    }
+
+
+def build_capacity_status(storage_bytes: int, database_bytes: int) -> dict:
+    """Builds the role-independent warning state from live byte counts."""
+    storage = _usage_metric(storage_bytes, STORAGE_QUOTA_BYTES)
+    database = _usage_metric(database_bytes, DATABASE_QUOTA_BYTES)
+    resource, limiting = max(
+        (("storage", storage), ("database", database)),
+        key=lambda item: item[1]["percent"],
+    )
+    percent = limiting["percent"]
+
+    if percent >= 100:
+        level = "full"
+        lead = "has reached its configured capacity"
+    elif percent >= USAGE_CRITICAL_PERCENT:
+        level = "critical"
+        lead = "is critically close to capacity"
+    elif percent >= USAGE_WARNING_PERCENT:
+        level = "warning"
+        lead = "is approaching capacity"
+    else:
+        level = "healthy"
+        lead = "is within its configured capacity"
+
+    label = "File storage" if resource == "storage" else "Database storage"
+    if level == "healthy":
+        message = "Supabase project capacity is within the configured limits."
+    else:
+        message = (
+            f"{label} {lead} ({percent:.1f}% used). "
+            "Contact the Super Admin to free space or increase the configured quota."
+        )
+
+    return {
+        "level": level,
+        "resource": resource,
+        "percent": percent,
+        "message": message,
+        "warningThresholdPercent": USAGE_WARNING_PERCENT,
+        "criticalThresholdPercent": USAGE_CRITICAL_PERCENT,
+        "storage": storage,
+        "database": database,
+    }
+
+
+def build_platform_usage_response(snapshot: dict, caller_role: str) -> dict:
+    """Filters a raw service-role snapshot to the caller's permitted detail."""
+    status = build_capacity_status(
+        storage_bytes=snapshot.get("storage_bytes") or 0,
+        database_bytes=snapshot.get("database_bytes") or 0,
+    )
+    response = {
+        key: status[key]
+        for key in (
+            "level", "resource", "percent", "message",
+            "warningThresholdPercent", "criticalThresholdPercent",
+        )
+    }
+    response["checkedAt"] = datetime.now(timezone.utc).isoformat()
+
+    if caller_role == "Super Admin":
+        bucket_values = snapshot.get("storage_by_bucket") or {}
+        status["storage"]["objectCount"] = max(0, int(snapshot.get("storage_objects") or 0))
+        status["storage"]["byBucket"] = {
+            str(bucket): max(0, int(value or 0))
+            for bucket, value in bucket_values.items()
+        } if isinstance(bucket_values, dict) else {}
+        response["storage"] = status["storage"]
+        response["database"] = status["database"]
+
+    return response
+
 # Vision model, overridable without a code change. gpt-5.5 reads marginal /
 # low-resolution vouchers noticeably better than gpt-4o in side-by-side tests.
 OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5.5")
@@ -663,6 +784,40 @@ async def resolve_caller(authorization: Optional[str]) -> dict:
     if caller.get("status") == "Inactive":
         raise HTTPException(status_code=403, detail="This account has been deactivated.")
     return caller
+
+
+@app.get("/api/platform-usage")
+async def get_platform_usage(authorization: Optional[str] = Header(None)):
+    """Returns project capacity details, filtered to the caller's role.
+
+    All signed-in roles need the warning state. Exact byte counts and the bucket
+    breakdown are operational platform information and are returned only to the
+    Super Admin. The service key remains on this server in both cases.
+    """
+    if not supabase_admin_available:
+        raise HTTPException(status_code=503, detail="Capacity monitoring is not configured on this server.")
+
+    caller = await resolve_caller(authorization)
+    async with httpx.AsyncClient(timeout=20) as client:
+        result = await client.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/get_platform_usage",
+            headers=_svc_headers(),
+            json={},
+        )
+
+    if result.status_code != 200:
+        # Do not return PostgREST internals or SQL details to a browser. The
+        # actionable deployment fix is the migration, regardless of its code.
+        raise HTTPException(
+            status_code=503,
+            detail="Capacity metrics are unavailable. Apply database migration 004_platform_capacity_usage.sql.",
+        )
+
+    rows = result.json() or []
+    if not rows:
+        raise HTTPException(status_code=503, detail="Supabase returned no capacity metrics.")
+
+    return build_platform_usage_response(rows[0], caller.get("role") or "")
 
 
 @app.post("/api/users")

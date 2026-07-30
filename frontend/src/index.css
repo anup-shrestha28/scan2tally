@@ -1462,6 +1462,35 @@ input[type='number']::-webkit-inner-spin-button {
   padding: 0;
 }
 
+/* Project-wide Supabase warning, visible to every signed-in role before the
+   current page content. It is intentionally compact because it can persist. */
+.capacity-alert {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 20px;
+  padding: 11px 14px;
+  border: 1px solid;
+  border-radius: var(--radius-md);
+  font-size: 0.82rem;
+}
+.capacity-alert > svg { flex: 0 0 auto; }
+.capacity-alert-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 1px; }
+.capacity-alert-copy strong { color: var(--text-main); font-size: 0.86rem; }
+.capacity-alert-copy span { color: var(--text-muted); }
+.capacity-alert-percent { flex: 0 0 auto; font-weight: 750; font-variant-numeric: tabular-nums; }
+.capacity-alert-warning {
+  color: var(--accent-amber);
+  background: color-mix(in srgb, var(--accent-amber) 9%, var(--bg-card));
+  border-color: color-mix(in srgb, var(--accent-amber) 42%, var(--border-color));
+}
+.capacity-alert-critical,
+.capacity-alert-full {
+  color: var(--accent-rose);
+  background: color-mix(in srgb, var(--accent-rose) 9%, var(--bg-card));
+  border-color: color-mix(in srgb, var(--accent-rose) 44%, var(--border-color));
+}
+
 /* A card that behaves as a prompt rather than a container. */
 .notice-card {
   display: flex;
@@ -1567,6 +1596,63 @@ input[type='number']::-webkit-inner-spin-button {
 .stat-label { color: var(--text-muted); font-size: 0.875rem; }
 .stat-value { font-size: 2rem; font-weight: 700; margin-top: 4px; }
 .stat-note { color: var(--text-dim); font-size: 0.75rem; margin-top: 2px; }
+
+/* Super Admin's exact project-capacity view. */
+.capacity-card { display: flex; flex-direction: column; gap: 18px; }
+.capacity-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.capacity-card-head .section-title { margin-bottom: 3px; }
+.capacity-checked { color: var(--text-dim); font-size: 0.72rem; white-space: nowrap; }
+.capacity-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.capacity-meter {
+  --capacity-tone: var(--accent-emerald);
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--capacity-tone) 25%, var(--border-color));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--capacity-tone) 4%, var(--bg-card));
+}
+.capacity-meter-warning { --capacity-tone: var(--accent-amber); }
+.capacity-meter-critical,
+.capacity-meter-full { --capacity-tone: var(--accent-rose); }
+.capacity-meter-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.capacity-meter-head svg { color: var(--capacity-tone); }
+.capacity-meter-head > strong {
+  color: var(--capacity-tone);
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+.capacity-meter-label { color: var(--text-muted); font-size: 0.74rem; font-weight: 650; text-transform: uppercase; letter-spacing: 0.04em; }
+.capacity-meter-value { margin-top: 2px; color: var(--text-main); font-size: 1.05rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.capacity-meter-value span { color: var(--text-muted); font-size: 0.78rem; font-weight: 500; }
+.capacity-progress {
+  height: 7px;
+  margin-top: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border-color) 70%, transparent);
+}
+.capacity-progress > span { display: block; height: 100%; border-radius: inherit; background: var(--capacity-tone); transition: width 240ms ease; }
+.capacity-meter-note { margin-top: 8px; color: var(--text-dim); font-size: 0.72rem; }
+.capacity-breakdown { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.capacity-breakdown span {
+  padding: 4px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+.capacity-breakdown strong { margin-right: 3px; color: var(--text-main); font-weight: 650; }
+
+@media (max-width: 720px) {
+  .capacity-alert { align-items: flex-start; }
+  .capacity-alert-percent { margin-left: auto; }
+  .capacity-card-head { flex-direction: column; gap: 4px; }
+  .capacity-grid { grid-template-columns: 1fr; }
+}
 
 /* ============================================================
    Upload dropzone

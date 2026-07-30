@@ -1,7 +1,7 @@
 import { supabase } from './supabase';
 import {
   ScanBatch, Receipt, ReceiptStatus, Transaction, User, UserRole, Organization,
-  BatchStatus, Ledger, LedgerMatchState,
+  BatchStatus, Ledger, LedgerMatchState, PlatformUsage,
 } from '../types';
 import { ledgerMatchKey } from './ledgers';
 import { LEDGER_MATCHING } from './features';
@@ -280,6 +280,28 @@ export async function fetchPlatformStats(): Promise<{ activeUsers: number; recei
     receipts: receipts.count ?? 0,
     batches: batches.count ?? 0,
   };
+}
+
+/**
+ * Live Supabase capacity as calculated by the backend.
+ *
+ * The backend keeps the service-role key private and returns exact byte counts
+ * only to a Super Admin. Admins and Operators receive just the warning state.
+ */
+export async function fetchPlatformUsage(): Promise<PlatformUsage> {
+  const { data: sessionData } = await supabase.auth.getSession();
+  const token = sessionData.session?.access_token;
+  if (!token) throw new Error('Your session has expired. Please sign in again.');
+
+  const base = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:8000';
+  const res = await fetch(`${base}/api/platform-usage`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new Error(body?.detail || 'Could not load Supabase capacity.');
+  }
+  return body as PlatformUsage;
 }
 
 // ---------------------------------------------------------------- batches
