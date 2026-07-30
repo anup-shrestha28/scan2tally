@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import {
-  UserPlus, Users, Loader2, Pencil, Trash2, UserRound, Mail, Phone, Briefcase,
+  UserPlus, Users, Loader2, Pencil, Trash2, UserRound, Mail, Phone, Briefcase, LockKeyhole,
   AlertCircle, CheckCircle2, XCircle, ArrowLeft, Eye, EyeOff
 } from 'lucide-react';
 import { User, UserRole, UserStatus } from '../types';
-import { fetchOrgUsers, createUserAccount, updateUserAccount, deleteUserAccount, setUserStatus, fetchOrganizations } from '../lib/db';
+import { fetchOrgUsers, createUserAccount, updateUserAccount, changeUserPassword, deleteUserAccount, setUserStatus, fetchOrganizations } from '../lib/db';
 import StatusFilter from './StatusFilter';
 
 interface UserManagementProps {
@@ -43,6 +43,13 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [showPasswordChange, setShowPasswordChange] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordBusy, setPasswordBusy] = useState(false);
   const [designation, setDesignation] = useState('');
   // A Super Admin creating staff must say which company; an Admin cannot choose.
   const [role, setRole] = useState<UserRole>('Operator');
@@ -94,6 +101,41 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
     setEditingUser(user); setSelectedUser(null); setShowForm(true); setFormError(null);
     setName(user.name); setEmail(user.email); setPhone(user.phone || ''); setPassword('');
     setDesignation(user.designation || ''); setRole(user.role); setOrgId(user.organization_id || '');
+  };
+
+  const openPasswordChange = () => {
+    setNewPassword('');
+    setConfirmPassword('');
+    setPasswordError(null);
+    setShowNewPassword(false);
+    setShowConfirmPassword(false);
+    setShowPasswordChange(true);
+  };
+
+  const handlePasswordChange = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedUser) return;
+    setPasswordError(null);
+    if (newPassword.length < 8) {
+      setPasswordError('Password must be at least 8 characters.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordError('Passwords do not match.');
+      return;
+    }
+
+    setPasswordBusy(true);
+    try {
+      await changeUserPassword(selectedUser.id, newPassword);
+      setShowPasswordChange(false);
+      setNotice(`${selectedUser.name}'s password was changed successfully.`);
+      setTimeout(() => setNotice(null), 5000);
+    } catch (err: any) {
+      setPasswordError(err?.message || 'Could not change the password.');
+    } finally {
+      setPasswordBusy(false);
+    }
   };
 
   const handleCreate = async (e: React.FormEvent) => {
@@ -178,13 +220,23 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
       : (currentUser.orgName || 'Your organization');
     return (
       <div className="page page-compact">
-        <div className="page-header page-header-center"><div className="row">
+        <div className="page-header page-header-center member-detail-header"><div className="row">
           <button className="back-link" onClick={() => setSelectedUser(null)}><ArrowLeft size={16} /> Team Members</button>
           <div><h2 className="page-title page-title-icon"><UserRound size={22} color="var(--primary)" /> Member details</h2>
             <p className="page-subtitle">View account information and management options</p></div>
         </div></div>
-        <div className="card" style={{ maxWidth: '720px' }}>
-          <div className="row" style={{ justifyContent: 'space-between', marginBottom: '24px' }}>
+        {notice && (
+          <div className="alert alert-success">
+            <CheckCircle2 size={16} className="alert-icon" /> {notice}
+          </div>
+        )}
+        {loadError && (
+          <div className="alert alert-error">
+            <AlertCircle size={16} className="alert-icon" /> {loadError}
+          </div>
+        )}
+        <div className="card member-detail-card">
+          <div className="row member-detail-summary" style={{ justifyContent: 'space-between' }}>
             <div><h3 className="section-title">{selectedUser.name}</h3><span className={`role-tag ${ROLE_STYLES[selectedUser.role]}`}>{selectedUser.role}</span></div>
             <span className={`status-pill ${selectedUser.status === 'Active' ? 'status-extracted' : 'status-failed'}`}>
               {selectedUser.status === 'Active' ? <CheckCircle2 size={12} /> : <XCircle size={12} />} {selectedUser.status}
@@ -196,11 +248,53 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
             <div className="detail-item"><span className="text-dim text-xs"><Briefcase size={13} /> Designation</span><strong>{selectedUser.designation || 'Not provided'}</strong></div>
             <div className="detail-item"><span className="text-dim text-xs">Organization</span><strong>{detailOrg}</strong></div>
           </div>
-          {selectedUser.id !== currentUser.id && selectedUser.role !== 'Super Admin' && <div className="form-actions" style={{ marginTop: '28px' }}>
+          {selectedUser.id !== currentUser.id && selectedUser.role !== 'Super Admin' && <div className="form-actions member-detail-actions">
             <button className="btn btn-primary" onClick={() => beginEdit(selectedUser)}><Pencil size={15} /> Edit member</button>
+            <button className="btn btn-secondary" onClick={openPasswordChange}><LockKeyhole size={15} /> Change password</button>
             <button className="btn btn-danger" onClick={() => removeUser(selectedUser)} disabled={busy}><Trash2 size={15} /> Delete account</button>
           </div>}
         </div>
+        {showPasswordChange && (
+          <div className="modal-overlay" onClick={() => !passwordBusy && setShowPasswordChange(false)}>
+            <div className="modal modal-prompt" role="dialog" aria-modal="true" aria-labelledby="change-password-title" onClick={e => e.stopPropagation()}>
+              <div>
+                <h3 className="modal-title" id="change-password-title">Change password</h3>
+                <p className="modal-text" style={{ marginBottom: 0 }}>
+                  Set a new sign-in password for <strong>{selectedUser.name}</strong>.
+                </p>
+              </div>
+              <form onSubmit={handlePasswordChange}>
+                <div className="form-group">
+                  <label className="form-label">New password</label>
+                  <div className="input-affix">
+                    <input type={showNewPassword ? 'text' : 'password'} className="form-input" value={newPassword}
+                      onChange={e => setNewPassword(e.target.value)} placeholder="At least 8 characters" autoComplete="new-password" minLength={8} disabled={passwordBusy} required />
+                    <button type="button" className="input-affix-btn" onClick={() => setShowNewPassword(v => !v)} title={showNewPassword ? 'Hide password' : 'Show password'}>
+                      {showNewPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                    </button>
+                  </div>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Confirm new password</label>
+                  <div className="input-affix">
+                    <input type={showConfirmPassword ? 'text' : 'password'} className="form-input" value={confirmPassword}
+                      onChange={e => setConfirmPassword(e.target.value)} placeholder="Re-enter the new password" autoComplete="new-password" minLength={8} disabled={passwordBusy} required />
+                    <button type="button" className="input-affix-btn" onClick={() => setShowConfirmPassword(v => !v)} title={showConfirmPassword ? 'Hide password' : 'Show password'}>
+                      {showConfirmPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                    </button>
+                  </div>
+                </div>
+                {passwordError && <div className="alert alert-error alert-top"><AlertCircle size={15} className="alert-icon" /><span>{passwordError}</span></div>}
+                <div className="modal-actions" style={{ justifyContent: 'flex-end', marginTop: '18px' }}>
+                  <button type="button" className="btn btn-secondary" disabled={passwordBusy} onClick={() => setShowPasswordChange(false)}>Cancel</button>
+                  <button type="submit" className="btn btn-primary" disabled={passwordBusy}>
+                    {passwordBusy ? <><Loader2 size={16} className="animate-spin" /> Saving...</> : <><LockKeyhole size={16} /> Save password</>}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -258,12 +352,14 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
       )}
 
       {showForm && (
-        <div className="card">
+        <div className={`card user-form-card ${editingUser ? 'user-form-edit' : ''}`}>
           <h3 className="section-title" style={{ marginBottom: '4px', fontSize: '1.05rem', fontWeight: 700 }}>
             {editingUser ? 'Edit team member' : 'Add a team member'}
           </h3>
           <p className="text-muted text-xs" style={{ marginBottom: '18px' }}>
-            Set their login details and share the password securely. It will not be emailed.
+            {editingUser
+              ? 'Update this team member’s profile and access details.'
+              : 'Set their login details and share the password securely. It will not be emailed.'}
           </p>
 
           <form onSubmit={handleCreate}>
@@ -282,9 +378,17 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
                 <label className="form-label">Phone <span className="text-dim">(optional)</span></label>
                 <input className="form-input" value={phone} onChange={e => setPhone(e.target.value)} placeholder="98XXXXXXXX" disabled={busy} />
               </div>
+              <div className="form-group">
+                <label className="form-label">Role</label>
+                <select className="form-select" value={role} disabled={busy}
+                        onChange={e => setRole(e.target.value as UserRole)}>
+                  <option value="Operator">Operator — uploads and reviews vouchers</option>
+                  <option value="Admin">Admin — also manages team members</option>
+                </select>
+              </div>
             </div>
 
-            <div className="grid-2">
+            {!editingUser && <div className="grid-2">
               <div className="form-group">
                 <label className="form-label">Password</label>
                 <div className="input-affix">
@@ -309,18 +413,9 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
                   </button>
                 </div>
               </div>
+            </div>}
 
-              <div className="form-group">
-                <label className="form-label">Role</label>
-                <select className="form-select" value={role} disabled={busy}
-                        onChange={e => setRole(e.target.value as UserRole)}>
-                  <option value="Operator">Operator — uploads and reviews vouchers</option>
-                  <option value="Admin">Admin — also manages team members</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="grid-2">
+            <div className="grid-2 user-form-profile-grid">
               <div className="form-group">
                 <label className="form-label">Designation <span className="text-dim">(optional)</span></label>
                 <input className="form-input" value={designation} onChange={e => setDesignation(e.target.value)}
@@ -355,6 +450,22 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
               <button type="submit" className="btn btn-primary" disabled={busy}>
                 {busy ? <><Loader2 size={16} className="animate-spin" /> Saving...</> : editingUser ? <><Pencil size={16} /> Save changes</> : <><UserPlus size={16} /> Create account</>}
               </button>
+              {editingUser && editingUser.id !== currentUser.id && editingUser.role !== 'Super Admin' && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={busy}
+                  onClick={() => {
+                    const member = editingUser;
+                    setShowForm(false);
+                    resetForm();
+                    setSelectedUser(member);
+                    openPasswordChange();
+                  }}
+                >
+                  <LockKeyhole size={16} /> Change password
+                </button>
+              )}
               <button type="button" className="btn btn-secondary" disabled={busy}
                       onClick={() => { setShowForm(false); resetForm(); }}>
                 Cancel

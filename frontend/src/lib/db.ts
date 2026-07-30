@@ -170,12 +170,12 @@ export async function createUserAccount(input: {
   };
 }
 
-async function callUserApi(userId: string, method: 'PATCH' | 'DELETE', body?: object): Promise<any> {
+async function callUserApi(userId: string, method: 'PATCH' | 'DELETE', body?: object, path = ''): Promise<any> {
   const { data: sessionData } = await supabase.auth.getSession();
   const token = sessionData.session?.access_token;
   if (!token) throw new Error('Your session has expired. Please sign in again.');
   const base = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:8000';
-  const res = await fetch(`${base}/api/users/${userId}`, {
+  const res = await fetch(`${base}/api/users/${userId}${path}`, {
     method,
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     ...(body ? { body: JSON.stringify(body) } : {}),
@@ -196,6 +196,10 @@ export async function updateUserAccount(userId: string, input: {
   return { id: body.id, organization_id: body.organization_id, orgId: body.organization_id,
     name: body.name, email: body.email, phone: body.phone || undefined, designation: body.designation || undefined,
     role: body.role as UserRole, status: body.status };
+}
+
+export async function changeUserPassword(userId: string, password: string): Promise<void> {
+  await callUserApi(userId, 'PATCH', { password }, '/password');
 }
 
 export async function deleteUserAccount(userId: string): Promise<void> {

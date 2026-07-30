@@ -618,6 +618,10 @@ class UpdateUserRequest(BaseModel):
     organization_id: Optional[str] = None
 
 
+class ChangePasswordRequest(BaseModel):
+    password: str
+
+
 def _svc_headers() -> dict:
     return {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
@@ -836,6 +840,32 @@ async def update_user(user_id: str, payload: UpdateUserRequest, authorization: O
     return {"id": user_id, "name": name, "email": email, "phone": phone or None,
             "designation": designation or None, "role": payload.role,
             "organization_id": organization_id, "status": target.get("status", "Active")}
+
+
+@app.patch("/api/users/{user_id}/password")
+async def change_user_password(user_id: str, payload: ChangePasswordRequest,
+                               authorization: Optional[str] = Header(None)):
+    """Changes only the Supabase login password; the profile is untouched."""
+    if not supabase_admin_available:
+        raise HTTPException(status_code=503, detail="User management is not configured on this server.")
+    if len(payload.password or "") < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+
+    caller = await resolve_caller(authorization)
+    async with httpx.AsyncClient(timeout=30) as client:
+        target = await _load_target_user(client, user_id, caller)
+        if target.get("role") == "Super Admin":
+            raise HTTPException(status_code=403, detail="Super Admin accounts cannot be managed here.")
+        response = await client.put(
+            f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}",
+            headers=_svc_headers(),
+            json={"password": payload.password},
+        )
+        if response.status_code not in (200, 201):
+            detail = response.json().get("message") or "Could not change the password."
+            raise HTTPException(status_code=400, detail=detail)
+
+    return {"id": user_id}
 
 
 @app.delete("/api/users/{user_id}")
