@@ -374,7 +374,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
                 <th>Organization</th>
                 <th style={{ width: '150px' }}>Role</th>
                 <th style={{ width: '110px' }}>Status</th>
-                <th style={{ width: '130px' }}>Actions</th>
+                <th style={{ width: '260px' }}>Actions</th>
               </tr>
             </thead>
             <tbody>

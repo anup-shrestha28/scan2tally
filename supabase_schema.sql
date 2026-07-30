@@ -173,6 +173,7 @@ CREATE TABLE IF NOT EXISTS public.exports (
     generated_by UUID NOT NULL REFERENCES public.users(id),
     file_name TEXT NOT NULL,
     record_count INTEGER NOT NULL,
+    file_path TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -367,6 +368,12 @@ INSERT INTO storage.buckets (id, name, public)
 VALUES ('receipts', 'receipts', FALSE)
 ON CONFLICT (id) DO NOTHING;
 
+-- Private copies of generated Excel files, so an export can be downloaded again
+-- from the batch history without rebuilding it in the browser.
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('exports', 'exports', FALSE)
+ON CONFLICT (id) DO NOTHING;
+
 -- Objects are stored under <organization_id>/<batch_id>/<receipt_id>, so the
 -- first path segment is what scopes access to an organization.
 CREATE POLICY "Org members read own receipt images" ON storage.objects
@@ -386,6 +393,28 @@ CREATE POLICY "Org members upload receipt images" ON storage.objects
 CREATE POLICY "Org members delete own receipt images" ON storage.objects
     FOR DELETE USING (
         bucket_id = 'receipts' AND (
+            public.get_auth_user_role() = 'Super Admin' OR
+            (storage.foldername(name))[1] = public.get_auth_user_org_id()::text
+        )
+    );
+
+CREATE POLICY "Org members read own exports" ON storage.objects
+    FOR SELECT USING (
+        bucket_id = 'exports' AND (
+            public.get_auth_user_role() = 'Super Admin' OR
+            (storage.foldername(name))[1] = public.get_auth_user_org_id()::text
+        )
+    );
+
+CREATE POLICY "Org members upload own exports" ON storage.objects
+    FOR INSERT WITH CHECK (
+        bucket_id = 'exports' AND
+        (storage.foldername(name))[1] = public.get_auth_user_org_id()::text
+    );
+
+CREATE POLICY "Org members delete own exports" ON storage.objects
+    FOR DELETE USING (
+        bucket_id = 'exports' AND (
             public.get_auth_user_role() = 'Super Admin' OR
             (storage.foldername(name))[1] = public.get_auth_user_org_id()::text
         )

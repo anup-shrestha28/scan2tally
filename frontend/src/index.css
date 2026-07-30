@@ -313,6 +313,23 @@ body {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: calc(100vh - 260px);
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+}
+
+.batch-list::-webkit-scrollbar { width: 5px; }
+.batch-list::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 999px;
+}
+.batch-list-menu-open { overflow: hidden; }
+
+@media (max-width: 900px) {
+  .batch-list { max-height: 420px; }
 }
 
 /** Batch Workspace Page - Batch Cards **/
@@ -368,13 +385,71 @@ body {
   color: var(--text-main);
 }
 
-.batch-menu-popover {
-  position: absolute;
-  z-index: 20;
-  top: calc(100% + 4px);
-  right: 0;
+/** Batch Workspace - Receipt File Pagination **/
+.files-pagination {
   display: flex;
-  min-width: 130px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-input);
+}
+
+.pagination-summary {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pagination-page,
+.pagination-arrow {
+  min-width: 30px;
+  height: 30px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.pagination-page:hover,
+.pagination-arrow:hover:not(:disabled) {
+  border-color: var(--primary);
+  color: var(--text-main);
+}
+
+.pagination-page-active {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+}
+
+.pagination-arrow:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.batch-menu-popover {
+  position: fixed;
+  z-index: 1000;
+  top: 0;
+  left: 0;
+  display: flex;
+  min-width: 156px;
+  overflow: visible;
   flex-direction: column;
   padding: 4px;
   border: 1px solid var(--border-color);
@@ -397,11 +472,19 @@ body {
   font: inherit;
   font-size: var(--fs-sm);
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .batch-menu-popover button:hover { background: var(--bg-card-hover); }
 .batch-menu-popover button:disabled { opacity: 0.5; cursor: not-allowed; }
 .batch-menu-popover .batch-menu-danger { color: var(--danger-text); }
+
+@media (max-width: 900px) {
+  .batch-menu-popover {
+    transform: none;
+    margin-left: 0;
+  }
+}
 
 .batch-sidebar-heading {
   font-size: 1rem;
@@ -458,6 +541,8 @@ body {
 }
 
 .batch-current-badge {
+  display: inline-flex;
+  align-items: center;
   padding: 2px 7px;
   border-radius: 999px;
   background: rgba(99, 102, 241, 0.18);
@@ -638,6 +723,12 @@ body {
   max-width: 1400px;
   width: 100%;
   margin: 0 auto;
+}
+
+@media (min-width: 1600px) {
+  .main-content {
+    max-width: 1680px;
+  }
 }
 
 /* Login page */
@@ -1126,6 +1217,65 @@ input[type='number']::-webkit-inner-spin-button {
 .page-subtitle { color: var(--text-muted); font-size: 0.875rem; }
 .page-subtitle-wide { max-width: 620px; }
 .page-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.page-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.status-filter {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 190px;
+}
+
+.status-filter::after {
+  content: '⌄';
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-55%);
+  color: var(--text-muted);
+  font-size: 15px;
+  pointer-events: none;
+}
+
+.status-filter > svg {
+  position: absolute;
+  left: 10px;
+  z-index: 1;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.status-filter select {
+  width: 100%;
+  height: 36px;
+  padding: 0 30px 0 32px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.status-filter select:hover,
+.status-filter select:focus-visible {
+  border-color: var(--primary);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--primary-glow);
+}
+
+@media (max-width: 640px) {
+  .page-header-actions { width: 100%; }
+  .page-header-actions .status-filter { flex: 1; }
+}
 
 /* Heading inside a card. */
 .section-title {
@@ -1397,6 +1547,7 @@ input[type='number']::-webkit-inner-spin-button {
   display: grid;
   grid-template-columns: 320px 1fr;
   gap: 24px;
+  align-items: start;
 }
 
 /* Follows the operator down a long receipt list rather than scrolling away. */
@@ -1408,6 +1559,21 @@ input[type='number']::-webkit-inner-spin-button {
   position: sticky;
   top: 24px;
   align-self: start;
+  height: auto;
+  overflow: visible;
+}
+
+.batch-sidebar-heading,
+.batch-sidebar > .btn {
+  flex: 0 0 auto;
+}
+
+.batch-sidebar-heading {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 4px 0 8px;
+  background: var(--bg-card);
 }
 
 .batch-panel { display: flex; flex-direction: column; gap: 20px; }
@@ -1438,7 +1604,7 @@ input[type='number']::-webkit-inner-spin-button {
 
 @media (max-width: 900px) {
   .workspace-grid { grid-template-columns: 1fr; }
-  .batch-sidebar { position: static; min-height: 0; }
+  .batch-sidebar { position: static; min-height: 0; height: auto; }
 }
 
 /* ============================================================
@@ -1461,6 +1627,20 @@ input[type='number']::-webkit-inner-spin-button {
   max-width: 260px;
 }
 .row-actions { display: flex; gap: 8px; }
+.table-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 240px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+.table-actions .btn { flex: 0 0 auto; }
+.table-actions .btn:not(:first-child):not(:last-child) {
+  min-width: 32px;
+  padding-left: 8px;
+  padding-right: 8px;
+}
 
 /* ============================================================
    Image preview

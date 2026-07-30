@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, MoreHorizontal } from 'lucide-react';
+import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, MoreHorizontal, ChevronLeft, ChevronRight } from 'lucide-react';
 import { ScanBatch, Receipt, User, Transaction } from '../types';
 import {
   newId,
@@ -17,6 +17,7 @@ import {
   fetchReceiptStates,
   fetchTransactionsForBatch,
   fetchExportsForBatch,
+  downloadExportFile,
   ExportRecord,
 } from '../lib/db';
 
@@ -49,6 +50,7 @@ const ACTIVE_BATCH_STORAGE_KEY = 'scan2tally-active-batch';
  * consistently and had to flag.
  */
 const MIN_IMAGE_SHORT_EDGE = 1000;
+const RECEIPTS_PER_PAGE = 10;
 
 function isLowResolution(receipt: Receipt): boolean {
   if (!receipt.image_width || !receipt.image_height) return false;
@@ -88,6 +90,8 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const [editedBatchName, setEditedBatchName] = useState<string>('');
   const [deletingBatchId, setDeletingBatchId] = useState<string | null>(null);
   const [openBatchMenuId, setOpenBatchMenuId] = useState<string | null>(null);
+  const [batchMenuPosition, setBatchMenuPosition] = useState<{ top: number; left: number } | null>(null);
+  const [receiptPage, setReceiptPage] = useState(1);
   const [previewReceipt, setPreviewReceipt] = useState<Receipt | null>(null);
   const [previewRotation, setPreviewRotation] = useState(0);
   const [dragOver, setDragOver] = useState<boolean>(false);
@@ -95,6 +99,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   // they are accepted the receipts' own Processing status takes over, so this
   // covers just the brief gap before that shows up.
   const [startingExtraction, setStartingExtraction] = useState<boolean>(false);
+  const [openingReview, setOpeningReview] = useState<boolean>(false);
 
   // Archived batches are hidden rather than deleted: last quarter's work is
   // still needed for its records, it just should not sit between an operator and
@@ -104,6 +109,30 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const [uploadedFilesMap, setUploadedFilesMap] = useState<Record<string, File>>({});
   const [receiptTransactionsMap, setReceiptTransactionsMap] = useState<Record<string, Transaction[]>>({});
   const [exportHistory, setExportHistory] = useState<ExportRecord[]>([]);
+  const [downloadingExportId, setDownloadingExportId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!openBatchMenuId) return;
+
+    const previousBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    const closeMenu = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target?.closest('.batch-menu')) setOpenBatchMenuId(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpenBatchMenuId(null);
+    };
+
+    document.addEventListener('mousedown', closeMenu);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousBodyOverflow;
+      document.removeEventListener('mousedown', closeMenu);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [openBatchMenuId]);
 
   // The server reads the image out of storage, so an extraction must not be
   // requested until that upload has actually landed.
@@ -127,6 +156,11 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const activeBatch: ScanBatch | undefined =
     visibleBatches.find(b => b.id === activeBatchId) || visibleBatches[0];
   const activeReceipts = activeBatch?.receipts ?? [];
+  const receiptPageCount = Math.max(1, Math.ceil(activeReceipts.length / RECEIPTS_PER_PAGE));
+  const paginatedReceipts = activeReceipts.slice(
+    (receiptPage - 1) * RECEIPTS_PER_PAGE,
+    receiptPage * RECEIPTS_PER_PAGE
+  );
   // An archived batch is a record, not a workspace. It stays fully readable and
   // exportable; what stops is adding to it.
   const isArchived = activeBatch?.status === 'Archived';
@@ -143,6 +177,10 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const lowResPendingCount = activeReceipts.filter(
     r => (r.status === 'Pending' || r.status === 'Failed') && isLowResolution(r)
   ).length;
+
+  useEffect(() => {
+    setReceiptPage(page => Math.min(page, receiptPageCount));
+  }, [receiptPageCount]);
 
   // Load everything this user is allowed to see. Row-level security decides
   // that server-side, so there is no organisation filter here.
@@ -472,10 +510,11 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     });
 
     setUploadedFilesMap(newFilesMap);
+    setReceiptPage(1);
 
     setBatches(prev => prev.map(b => {
       if (b.id === batchId) {
-        return { ...b, receipts: [...b.receipts, ...newReceipts] };
+        return { ...b, receipts: [...newReceipts, ...b.receipts] };
       }
       return b;
     }));
@@ -661,7 +700,8 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   };
 
   const handleContinueReview = async () => {
-    if (!activeBatch) return;
+    if (!activeBatch || openingReview) return;
+    setOpeningReview(true);
     try {
       const transactionMap = await fetchTransactionsForBatch(activeBatch.id);
       setReceiptTransactionsMap(transactionMap);
@@ -676,6 +716,23 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
       }
     } catch (err: any) {
       setSaveError(err?.message || 'Could not load the extracted data for review.');
+    } finally {
+      setOpeningReview(false);
+    }
+  };
+
+  const handleDownloadExport = async (record: ExportRecord) => {
+    if (!record.file_path) {
+      setSaveError('This older export has no stored file. Use Review & Edit to generate a new downloadable copy.');
+      return;
+    }
+    setDownloadingExportId(record.id);
+    try {
+      await downloadExportFile(record.file_path, record.file_name);
+    } catch (err: any) {
+      setSaveError(err?.message || 'Could not download that Excel file.');
+    } finally {
+      setDownloadingExportId(null);
     }
   };
 
@@ -737,7 +794,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
             </button>
           )}
 
-          <div className="batch-list">
+          <div className={`batch-list${openBatchMenuId ? ' batch-list-menu-open' : ''}`}>
             {!visibleBatches.length && (
               <div className="batch-list-empty">
                 {showArchived ? 'Nothing archived yet.' : 'No active batches.'}
@@ -748,6 +805,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                 key={b.id} 
                 onClick={() => {
                   setActiveBatchId(b.id);
+                  setReceiptPage(1);
                   setOpenBatchMenuId(null);
                   sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, b.id);
                 }}
@@ -773,12 +831,12 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                     <div className="batch-item-details">
                       <div className="batch-item-name">
                         <span>{b.name}</span>
-                        {b.id === activeBatchId && <span className="batch-current-badge">Current</span>}
                       </div>
                       <div className="batch-item-meta">
                         <span>{b.receipts.length} {b.receipts.length === 1 ? 'receipt' : 'receipts'}</span>
                         <span>•</span>
                         <span>{formatBatchDate(b.created_at)}</span>
+                        {b.id === activeBatchId && <span className="batch-current-badge">Current</span>}
                       </div>
                     </div>
 
@@ -789,12 +847,25 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                         aria-label={`Actions for ${b.name}`}
                         aria-haspopup="menu"
                         aria-expanded={openBatchMenuId === b.id}
-                        onClick={() => setOpenBatchMenuId(current => current === b.id ? null : b.id)}
+                        onClick={(event) => {
+                          if (openBatchMenuId === b.id) {
+                            setOpenBatchMenuId(null);
+                            setBatchMenuPosition(null);
+                            return;
+                          }
+                          const rect = event.currentTarget.getBoundingClientRect();
+                          setBatchMenuPosition({ top: rect.top, left: Math.max(8, rect.left - 164) });
+                          setOpenBatchMenuId(b.id);
+                        }}
                       >
                         <MoreHorizontal size={18} />
                       </button>
                       {openBatchMenuId === b.id && (
-                        <div className="batch-menu-popover" role="menu">
+                        <div
+                          className="batch-menu-popover"
+                          role="menu"
+                          style={batchMenuPosition ? { top: batchMenuPosition.top, left: batchMenuPosition.left } : undefined}
+                        >
                           <button
                             type="button"
                             role="menuitem"
@@ -884,6 +955,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
               // the archive guard applies to extraction only.
               disabled={
                 isProcessing ||
+                openingReview ||
                 hasFailedExtraction ||
                 (!allReceiptsExtracted && (!extractableCount || isArchived))
               }
@@ -891,7 +963,12 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                 ? 'This batch is archived. Restore it to extract more receipts.'
                 : undefined}
             >
-              {isProcessing ? (
+              {openingReview ? (
+                <>
+                  <Loader2 size={16} className="animate-spin" />
+                  Opening review...
+                </>
+              ) : isProcessing ? (
                 <>
                   <Loader2 size={16} className="animate-spin" />
                   Extracting details...
@@ -949,9 +1026,23 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
           </div>
 
           <div className="card">
-            <h4 className="section-title">
-              Files in {activeBatch.name} ({activeBatch.receipts.length})
-            </h4>
+            <div className="row row-between row-wrap">
+              <h4 className="section-title">
+                Files in {activeBatch.name} ({activeBatch.receipts.length})
+              </h4>
+              {exportHistory[0]?.file_path && (
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => handleDownloadExport(exportHistory[0])}
+                  disabled={downloadingExportId === exportHistory[0].id}
+                  title="Download the latest Excel export for this batch"
+                >
+                  {downloadingExportId === exportHistory[0].id
+                    ? <Loader2 size={13} className="animate-spin" />
+                    : <FileSpreadsheet size={13} />} Download latest Excel
+                </button>
+              )}
+            </div>
 
             {!activeBatch.receipts.length ? (
               <div className="table-empty text-sm" style={{ padding: '24px' }}>
@@ -968,7 +1059,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                     </tr>
                   </thead>
                   <tbody>
-                    {activeBatch.receipts.map(rcpt => (
+                    {paginatedReceipts.map(rcpt => (
                       <tr key={rcpt.id}>
                         <td style={{ fontWeight: 500 }}>
                           <div className="file-cell">
@@ -1052,6 +1143,44 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                     ))}
                   </tbody>
                 </table>
+                {receiptPageCount > 1 && (
+                  <div className="files-pagination" aria-label="Receipt file pages">
+                    <span className="pagination-summary">
+                      Showing {(receiptPage - 1) * RECEIPTS_PER_PAGE + 1}–{Math.min(receiptPage * RECEIPTS_PER_PAGE, activeReceipts.length)} of {activeReceipts.length}
+                    </span>
+                    <div className="pagination-controls">
+                      <button
+                        type="button"
+                        className="pagination-arrow"
+                        onClick={() => setReceiptPage(page => Math.max(1, page - 1))}
+                        disabled={receiptPage === 1}
+                        aria-label="Previous receipt page"
+                      >
+                        <ChevronLeft size={15} />
+                      </button>
+                      {Array.from({ length: receiptPageCount }, (_, index) => index + 1).map(page => (
+                        <button
+                          type="button"
+                          key={page}
+                          className={`pagination-page${receiptPage === page ? ' pagination-page-active' : ''}`}
+                          onClick={() => setReceiptPage(page)}
+                          aria-current={receiptPage === page ? 'page' : undefined}
+                        >
+                          {page}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        className="pagination-arrow"
+                        onClick={() => setReceiptPage(page => Math.min(receiptPageCount, page + 1))}
+                        disabled={receiptPage === receiptPageCount}
+                        aria-label="Next receipt page"
+                      >
+                        <ChevronRight size={15} />
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -1068,7 +1197,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
               <div className="table-container">
                 <table className="custom-table">
                   <thead>
-                    <tr><th>File Name</th><th>Rows</th><th>Generated By</th><th>When</th></tr>
+                    <tr><th>File Name</th><th>Rows</th><th>Generated By</th><th>When</th><th>Actions</th></tr>
                   </thead>
                   <tbody>
                     {exportHistory.map(record => (
@@ -1077,6 +1206,21 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                         <td>{record.record_count}</td>
                         <td className="text-muted">{record.generated_by_name || '—'}</td>
                         <td className="text-muted text-xs">{record.created_at}</td>
+                        <td>
+                          {record.file_path ? (
+                            <button
+                              className="btn btn-secondary btn-sm"
+                              onClick={() => handleDownloadExport(record)}
+                              disabled={downloadingExportId === record.id}
+                            >
+                              {downloadingExportId === record.id
+                                ? <Loader2 size={13} className="animate-spin" />
+                                : <FileSpreadsheet size={13} />} Download
+                            </button>
+                          ) : (
+                            <span className="text-muted text-xs">Older export</span>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

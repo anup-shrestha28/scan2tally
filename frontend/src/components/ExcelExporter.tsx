@@ -204,8 +204,10 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
         await recordExport({
           batchId: batch.id,
           userId: currentUser.id,
+          organizationId: currentUser.organization_id || '',
           fileName,
           recordCount: transactions.length,
+          file: blob,
         });
         setRecordError(null);
       } catch (err: any) {

@@ -302,7 +302,8 @@ export async function fetchBatches(): Promise<ScanBatch[]> {
     created_at: new Date(b.created_at).toLocaleString(),
     receipts: (b.receipts || [])
       .slice()
-      .sort((x: any, y: any) => String(x.created_at).localeCompare(String(y.created_at)))
+      // Newest uploads appear first in the Files list.
+      .sort((x: any, y: any) => String(y.created_at).localeCompare(String(x.created_at)))
       .map(
         (r: any): Receipt => ({
           id: r.id,
@@ -732,20 +733,34 @@ export async function importLedgers(
 export async function recordExport(input: {
   batchId: string;
   userId: string;
+  organizationId: string;
   fileName: string;
   recordCount: number;
+  file: Blob;
 }): Promise<void> {
+  const filePath = `${input.organizationId}/${input.batchId}/${newId()}-${input.fileName}`;
+  const { error: uploadError } = await supabase.storage.from('exports').upload(filePath, input.file, {
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    upsert: false,
+  });
+  if (uploadError) throw new Error(uploadError.message);
+
   const { error } = await supabase.from('exports').insert({
     batch_id: input.batchId,
     generated_by: input.userId,
     file_name: input.fileName,
     record_count: input.recordCount,
+    file_path: filePath,
   });
-  if (error) throw new Error(error.message);
+  if (error) {
+    await supabase.storage.from('exports').remove([filePath]);
+    throw new Error(error.message);
+  }
 }
 
 export interface ExportRecord {
   id: string;
+  file_path?: string | null;
   file_name: string;
   record_count: number;
   created_at: string;
@@ -755,7 +770,7 @@ export interface ExportRecord {
 export async function fetchExportsForBatch(batchId: string): Promise<ExportRecord[]> {
   const { data, error } = await supabase
     .from('exports')
-    .select('id, file_name, record_count, created_at, generated_by')
+    .select('id, file_name, file_path, record_count, created_at, generated_by')
     .eq('batch_id', batchId)
     .order('created_at', { ascending: false });
 
@@ -772,11 +787,25 @@ export async function fetchExportsForBatch(batchId: string): Promise<ExportRecor
 
   return (data || []).map((r: any) => ({
     id: r.id,
+    file_path: r.file_path || null,
     file_name: r.file_name,
     record_count: r.record_count,
     created_at: new Date(r.created_at).toLocaleString(),
     generated_by_name: names.get(r.generated_by),
   }));
+}
+
+export async function downloadExportFile(filePath: string, fileName: string): Promise<void> {
+  const { data, error } = await supabase.storage.from('exports').download(filePath);
+  if (error) throw new Error(error.message);
+  const url = URL.createObjectURL(data);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 }
 
 // ---------------------------------------------------------------- organisation overview
