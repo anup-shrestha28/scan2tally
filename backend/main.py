@@ -1194,7 +1194,22 @@ async def delete_user(user_id: str, authorization: Optional[str] = Header(None))
             f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}", headers=_svc_headers()
         )
         if deleted.status_code not in (200, 204):
-            detail = deleted.json().get("message") or "Could not delete the login."
+            try:
+                error_body = deleted.json()
+            except Exception:
+                error_body = {}
+            raw_detail = " ".join(
+                str(error_body.get(key) or "") for key in ("message", "details", "hint", "code")
+            )
+            if "foreign key" in raw_detail.lower() or "scan_batches_created_by_fkey" in raw_detail:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "This account cannot be deleted because it has batches or other records "
+                        "linked to it. Deactivate the account instead to keep its history safe."
+                    ),
+                )
+            detail = error_body.get("message") or "Could not delete the login."
             raise HTTPException(status_code=400, detail=detail)
     return {"id": user_id}
 
