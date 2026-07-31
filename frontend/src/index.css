@@ -2182,6 +2182,25 @@ input[type='number']::-webkit-inner-spin-button {
   cursor: pointer;
 }
 
+.password-help-link {
+  display: block;
+  margin: -2px 0 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--primary-light, #a5b4fc);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: help;
+  text-align: left;
+}
+
+.password-help-link:hover,
+.password-help-link:focus-visible {
+  color: var(--text-main);
+  text-decoration: underline;
+}
+
 .inline-form {
   display: flex;
   gap: 12px;
