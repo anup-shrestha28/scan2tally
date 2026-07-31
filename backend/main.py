@@ -14,7 +14,7 @@ from typing import List, Optional
 from urllib.parse import quote
 import httpx
 import ledger_matching
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from PIL import Image
@@ -89,6 +89,14 @@ CAPACITY_CACHE_SECONDS = max(
     5.0,
     _positive_env_number("SUPABASE_CAPACITY_CACHE_SECONDS", 25.0),
 )
+# The browser receives capacity transitions from Supabase Realtime. This server
+# owns the producer, so warnings are refreshed even when no Admin or Operator is
+# currently looking at a page. Keep the interval independent of the exact-metric
+# cache used by the Super Admin dashboard.
+CAPACITY_ALERT_INTERVAL_SECONDS = max(
+    10.0,
+    _positive_env_number("SUPABASE_CAPACITY_ALERT_INTERVAL_SECONDS", 30.0),
+)
 _capacity_snapshot_cache: Optional[dict] = None
 _capacity_snapshot_expires_at = 0.0
 _capacity_snapshot_lock = asyncio.Lock()
@@ -157,7 +165,7 @@ def build_capacity_status(storage_bytes: int, database_bytes: Optional[int]) -> 
 
 
 def build_platform_usage_response(snapshot: dict, caller_role: str) -> dict:
-    """Filters a raw service-role snapshot to the caller's permitted detail."""
+    """Filters a raw service-role snapshot as a defense-in-depth role check."""
     database_bytes = snapshot.get("database_bytes")
     status = build_capacity_status(
         storage_bytes=snapshot.get("storage_bytes") or 0,
@@ -190,6 +198,19 @@ def build_platform_usage_response(snapshot: dict, caller_role: str) -> dict:
 # low-resolution vouchers noticeably better than gpt-4o in side-by-side tests.
 OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5.5")
 
+# The outer extraction deadline owns the whole receipt. Provider requests need
+# their own shorter finite deadline as well: cancelling asyncio.to_thread does
+# not stop the underlying SDK call, so an unbounded request could otherwise
+# keep using provider capacity after the queue moved to the next receipt.
+EXTRACTION_TIMEOUT_SECONDS = max(
+    60,
+    int(_positive_env_number("EXTRACTION_TIMEOUT_SECONDS", 600.0)),
+)
+VISION_PROVIDER_TIMEOUT_SECONDS = min(
+    float(EXTRACTION_TIMEOUT_SECONDS),
+    max(10.0, _positive_env_number("VISION_PROVIDER_TIMEOUT_SECONDS", 300.0)),
+)
+
 # Independent transcription passes per receipt. Handwriting the model cannot
 # resolve comes back differently on each pass, so comparing runs is what turns a
 # silently-invented amount into a flagged one. Runs are issued concurrently, so
@@ -215,10 +236,21 @@ def openai_sampling_params(model: str) -> dict:
 
 # Check OpenAI Availability
 openai_available = False
+
+
+def _create_openai_client(client_class):
+    """Builds the synchronous SDK client with one bounded, non-retried call."""
+    return client_class(
+        api_key=OPENAI_API_KEY,
+        timeout=VISION_PROVIDER_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
+
+
 if OPENAI_API_KEY and OPENAI_API_KEY != "placeholder-openai-api-key":
     try:
         from openai import OpenAI
-        openai_client = OpenAI(api_key=OPENAI_API_KEY)
+        openai_client = _create_openai_client(OpenAI)
         openai_available = True
         print(f"✅ OpenAI Vision AI engine activated! (model: {OPENAI_VISION_MODEL})")
     except Exception as e:
@@ -242,19 +274,30 @@ async def lifespan(app: FastAPI):
     # anything tries to write one.
     await detect_schema_features()
 
-    # An extraction that was running when this process last stopped left its
-    # receipt sitting on "Processing" with nobody to finish it. Pick those up
-    # now, so a server restart is a pause rather than a dead end.
-    await resume_interrupted_extractions()
+    # Migration 007 backfills interrupted legacy work into PGMQ. Older schemas
+    # retain the previous receipt-claim recovery path, now constrained to one
+    # local extraction and swept periodically rather than only once at boot.
+    if extraction_queue_ready is False:
+        await resume_interrupted_extractions()
 
-    # Claims go stale on purpose, so that a process which dies does not hold its
-    # work hostage. This is what keeps the claims of a process that is still
-    # alive from going stale underneath it.
-    heartbeat = asyncio.create_task(refresh_extraction_claims())
+    extraction_worker = asyncio.create_task(
+        consume_extraction_queue()
+        if extraction_queue_ready is True
+        else run_legacy_extraction_maintenance()
+        if extraction_queue_ready is False
+        else wait_for_extraction_queue_schema()
+    )
+    capacity_alert_publisher = asyncio.create_task(publish_capacity_alerts())
     try:
         yield
     finally:
-        heartbeat.cancel()
+        extraction_worker.cancel()
+        capacity_alert_publisher.cancel()
+        await asyncio.gather(
+            extraction_worker,
+            capacity_alert_publisher,
+            return_exceptions=True,
+        )
 
 
 app = FastAPI(
@@ -386,6 +429,42 @@ def openai_transcribe(base64_image: str, media_type: str) -> List[dict]:
 
 def openai_read_totals(base64_image: str, media_type: str) -> dict:
     return read_stated_totals(_openai_vision_json(TOTALS_PROMPT, base64_image, media_type))
+
+
+async def _run_blocking_provider_calls(calls) -> list:
+    """Runs SDK calls in threads and waits for those threads if cancelled.
+
+    asyncio can cancel the awaitable returned by ``to_thread``, but Python
+    cannot terminate the thread that is already inside an SDK request. Shield
+    each worker and, on cancellation, wait for every finite provider request to
+    settle before propagating cancellation to the queue worker.
+    """
+    workers = [
+        asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+        for function, args, kwargs in calls
+    ]
+    try:
+        return await asyncio.gather(
+            *(asyncio.shield(worker) for worker in workers),
+            return_exceptions=True,
+        )
+    except asyncio.CancelledError:
+        await asyncio.gather(*workers, return_exceptions=True)
+        raise
+
+
+async def _gemini_generate_content(model, prompt: str, image):
+    results = await _run_blocking_provider_calls([
+        (
+            model.generate_content,
+            ([prompt, image],),
+            {"request_options": {"timeout": VISION_PROVIDER_TIMEOUT_SECONDS}},
+        )
+    ])
+    response = results[0]
+    if isinstance(response, BaseException):
+        raise response
+    return response
 
 
 def _row_amount(row: dict) -> float:
@@ -621,12 +700,12 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
             # invented numbers on every run that all sum to the stated total.
             # Several independent transcriptions then let us see which individual
             # cells the model cannot read consistently.
-            runs = await asyncio.gather(
-                *[asyncio.to_thread(openai_transcribe, base64_image, media_type)
-                  for _ in range(OCR_CONSENSUS_RUNS)],
-                asyncio.to_thread(openai_read_totals, base64_image, media_type),
-                return_exceptions=True
-            )
+            calls = [
+                (openai_transcribe, (base64_image, media_type), {})
+                for _ in range(OCR_CONSENSUS_RUNS)
+            ]
+            calls.append((openai_read_totals, (base64_image, media_type), {}))
+            runs = await _run_blocking_provider_calls(calls)
             transcripts = [r for r in runs[:-1] if not isinstance(r, Exception) and r]
             totals_result = runs[-1]
 
@@ -662,7 +741,7 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
             import google.generativeai as genai
             pil_img = Image.open(io.BytesIO(raw_bytes))
             model = genai.GenerativeModel('gemini-1.5-flash')
-            response = model.generate_content([prompt, pil_img])
+            response = await _gemini_generate_content(model, prompt, pil_img)
             if not response.text or not response.text.strip():
                 error_msg = INVALID_JOURNAL_IMAGE_ERROR
                 print(f"❌ Gemini returned no readable journal entry content")
@@ -728,17 +807,15 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
 
 
 @app.post("/api/extract-receipt")
-async def extract_receipt(file: UploadFile = File(...)):
-    """Extracts a voucher the caller uploads directly, and waits for the result.
-
-    Kept for one-off use; the app itself goes through /api/receipts/{id}/extract
-    so that closing the tab cannot abandon the work.
-    """
-    if not file.content_type.startswith("image/") and file.content_type != "application/pdf":
-        raise HTTPException(status_code=400, detail="Only image files (JPG, PNG, WEBP) and PDFs are supported.")
-
-    raw_bytes = await file.read()
-    return await run_extraction(raw_bytes, file.content_type, file.filename)
+async def extract_receipt():
+    """Closes the legacy upload-and-wait path that bypassed the global queue."""
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "Direct extraction has been retired. Upload the receipt to a batch "
+            "and start its durable queued extraction instead."
+        ),
+    )
 
 class CreateUserRequest(BaseModel):
     name: str
@@ -878,7 +955,7 @@ async def fetch_storage_usage_via_api(client: httpx.AsyncClient) -> dict:
 
 
 async def fetch_platform_usage_snapshot() -> dict:
-    """Returns one shared, short-lived snapshot for every signed-in role."""
+    """Returns a shared, short-lived snapshot for the Super Admin dashboard."""
     global _capacity_snapshot_cache, _capacity_snapshot_expires_at
 
     loop = asyncio.get_running_loop()
@@ -919,6 +996,69 @@ async def fetch_platform_usage_snapshot() -> dict:
         return snapshot
 
 
+async def publish_capacity_alerts_once(client: httpx.AsyncClient) -> int:
+    """Atomically refreshes the Realtime alert rows through a protected RPC.
+
+    The database function calculates both metrics in one transaction and only
+    writes when a resource changes severity. That makes repeated calls cheap
+    for subscribers and safe when several backend processes tick together.
+    """
+    result = await client.post(
+        f"{SUPABASE_URL}/rest/v1/rpc/refresh_platform_capacity_alerts",
+        headers=_svc_headers(),
+        json={
+            "p_storage_quota_bytes": STORAGE_QUOTA_BYTES,
+            "p_database_quota_bytes": DATABASE_QUOTA_BYTES,
+            "p_warning_percent": USAGE_WARNING_PERCENT,
+            "p_critical_percent": USAGE_CRITICAL_PERCENT,
+        },
+    )
+    if result.status_code != 200:
+        raise RuntimeError(
+            f"Supabase capacity alert refresh failed with status {result.status_code}."
+        )
+
+    try:
+        transitions = result.json()
+    except ValueError as err:
+        raise RuntimeError("Supabase returned an invalid capacity alert response.") from err
+    try:
+        return max(0, int(transitions or 0))
+    except (TypeError, ValueError) as err:
+        raise RuntimeError("Supabase returned an invalid capacity transition count.") from err
+
+
+async def publish_capacity_alerts() -> None:
+    """Publishes current warning states for the lifetime of this server.
+
+    Admins and Operators subscribe to the persisted rows through Supabase
+    Realtime. They never need the exact-metric endpoint, and a warning that was
+    raised before they signed in remains available for their initial table read.
+    """
+    if not supabase_admin_available:
+        return
+
+    previous_error = None
+    async with httpx.AsyncClient(timeout=20) as client:
+        while True:
+            try:
+                await publish_capacity_alerts_once(client)
+                if previous_error is not None:
+                    print("✅ Supabase capacity alert publisher reconnected")
+                previous_error = None
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                # Monitoring is advisory and must never take the API down. The
+                # previous persisted warning remains visible while this retries.
+                # Log only when the failure changes, rather than every interval.
+                error_text = str(err)
+                if error_text != previous_error:
+                    print(f"⚠️ Could not refresh capacity alerts: {error_text}")
+                previous_error = error_text
+            await asyncio.sleep(CAPACITY_ALERT_INTERVAL_SECONDS)
+
+
 async def resolve_caller(authorization: Optional[str]) -> dict:
     """Identify who is making the request, from their own session token.
 
@@ -956,16 +1096,20 @@ async def resolve_caller(authorization: Optional[str]) -> dict:
 
 @app.get("/api/platform-usage")
 async def get_platform_usage(authorization: Optional[str] = Header(None)):
-    """Returns project capacity details, filtered to the caller's role.
+    """Returns exact project capacity details to the Super Admin only.
 
-    All signed-in roles need the warning state. Exact byte counts and the bucket
-    breakdown are operational platform information and are returned only to the
-    Super Admin. The service key remains on this server in both cases.
+    Admins and Operators receive their warning states from the protected
+    Realtime alert table instead of polling this endpoint.
     """
     if not supabase_admin_available:
         raise HTTPException(status_code=503, detail="Capacity monitoring is not configured on this server.")
 
     caller = await resolve_caller(authorization)
+    if caller.get("role") != "Super Admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Only the Super Admin can view exact platform capacity metrics.",
+        )
     try:
         snapshot = await fetch_platform_usage_snapshot()
     except (RuntimeError, httpx.HTTPError, ValueError):
@@ -1228,14 +1372,35 @@ async def delete_user(user_id: str, authorization: Optional[str] = Header(None))
 
 STORAGE_BUCKET = "receipts"
 
-# How many vouchers may be read at once. Each job issues OCR_CONSENSUS_RUNS + 1
-# vision requests, so extracting a large batch unthrottled would fire dozens of
-# concurrent calls at the API and start collecting rate-limit errors.
-EXTRACTION_CONCURRENCY = max(1, int(os.getenv("EXTRACTION_CONCURRENCY", "2")))
+# The durable queue enforces one extraction across the whole deployment. The
+# semaphore remains for databases that have not applied migration 007, where it
+# deliberately forces the backwards-compatible path to one job per process.
+EXTRACTION_CONCURRENCY = 1
 
-# Nothing may sit on "Processing" forever. If a job wedges, this is what turns
-# it into an honest, retryable failure instead of a permanent spinner.
-EXTRACTION_TIMEOUT_SECONDS = max(60, int(os.getenv("EXTRACTION_TIMEOUT_SECONDS", "600")))
+# PGMQ polling and visibility are controlled by the backend worker, while the
+# database owns the singleton lease and fencing token. The initial lease must
+# cover the full extraction plus enough time to persist a terminal result even
+# before its first refresh; heartbeats then keep extending that same window.
+EXTRACTION_FINALIZATION_MARGIN_SECONDS = max(
+    60,
+    int(_positive_env_number("EXTRACTION_FINALIZATION_MARGIN_SECONDS", 300.0)),
+)
+EXTRACTION_QUEUE_POLL_SECONDS = max(
+    0.5,
+    _positive_env_number("EXTRACTION_QUEUE_POLL_SECONDS", 2.0),
+)
+EXTRACTION_QUEUE_VISIBILITY_SECONDS = max(
+    EXTRACTION_TIMEOUT_SECONDS + EXTRACTION_FINALIZATION_MARGIN_SECONDS,
+    int(_positive_env_number("EXTRACTION_QUEUE_VISIBILITY_SECONDS", 900.0)),
+)
+EXTRACTION_QUEUE_HEARTBEAT_SECONDS = min(
+    EXTRACTION_QUEUE_VISIBILITY_SECONDS / 3,
+    max(5.0, _positive_env_number("EXTRACTION_QUEUE_HEARTBEAT_SECONDS", 30.0)),
+)
+EXTRACTION_QUEUE_MAX_ATTEMPTS = max(
+    1,
+    int(_positive_env_number("EXTRACTION_QUEUE_MAX_ATTEMPTS", 3.0)),
+)
 
 DEFAULT_EXTRACTION_ERROR = "No transaction data could be extracted from this receipt."
 INTERRUPTED_NO_IMAGE_ERROR = (
@@ -1278,6 +1443,11 @@ def receipt_job_select() -> str:
 # applied must not be sent rows or patches that carry them.
 ledger_matching_ready = False
 job_claiming_ready = False
+# True means migration 007 is healthy, False means its health RPC is confirmed
+# absent, and None means Supabase could not yet answer. The unknown state must
+# never fail open into the legacy worker because that could bypass a queue that
+# is merely temporarily unreachable.
+extraction_queue_ready: Optional[bool] = None if supabase_admin_available else False
 
 _extraction_semaphore: Optional[asyncio.Semaphore] = None
 # Receipts this process is already extracting, so a double-click or an impatient
@@ -1315,6 +1485,15 @@ async def _column_exists(client: httpx.AsyncClient, table: str, column: str) -> 
     return res.status_code == 200
 
 
+def _first_rpc_row(payload) -> Optional[dict]:
+    """Normalises PostgREST's table-returning RPC shape to zero/one row."""
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        return payload[0]
+    return None
+
+
 async def detect_schema_features() -> None:
     """Works out which optional features this database can support.
 
@@ -1324,7 +1503,10 @@ async def detect_schema_features() -> None:
     every job on a missing column. What it must not do is fail quietly, hence
     the warning.
     """
-    global ledger_matching_ready, job_claiming_ready
+    global ledger_matching_ready, job_claiming_ready, extraction_queue_ready
+    # A second probe can run in tests or after a transient database failure.
+    # Never carry a previous successful queue probe into a failed one.
+    extraction_queue_ready = None if supabase_admin_available else False
     if not supabase_admin_available:
         return
 
@@ -1332,6 +1514,22 @@ async def detect_schema_features() -> None:
         async with httpx.AsyncClient(timeout=20) as client:
             ledger_matching_ready = await _column_exists(client, "ledgers", "id")
             job_claiming_ready = await _column_exists(client, "receipts", "extraction_worker")
+            queue_health = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/extraction_queue_health",
+                headers=_svc_headers(),
+                json={},
+            )
+            if queue_health.status_code == 200:
+                try:
+                    health = _first_rpc_row(queue_health.json())
+                except ValueError:
+                    health = None
+                if health and health.get("ready") is True:
+                    extraction_queue_ready = True
+            elif queue_health.status_code == 404:
+                # PostgREST uses 404/PGRST202 when a function is absent. Only
+                # that confirmed state may activate the compatibility worker.
+                extraction_queue_ready = False
     except Exception as err:
         print(f"⚠️ Could not check the database schema: {err}")
         return
@@ -1349,11 +1547,101 @@ async def detect_schema_features() -> None:
             "nothing stops two instances extracting the same receipt twice."
         )
 
+    if extraction_queue_ready is True:
+        print("✅ Durable global sequential extraction queue enabled")
+    elif extraction_queue_ready is False:
+        print(
+            "ℹ️ Durable extraction queue unavailable (migration 007 not applied). "
+            "Using the concurrency-one compatibility worker."
+        )
+    else:
+        print(
+            "⚠️ Durable extraction queue availability could not be confirmed. "
+            "Extraction is paused until Supabase answers the health probe."
+        )
+
 
 def _spawn(coro) -> None:
     task = asyncio.create_task(coro)
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
+
+
+async def _queue_rpc(client: httpx.AsyncClient, function: str, payload: dict):
+    """Calls one service-role-only extraction queue function."""
+    res = await client.post(
+        f"{SUPABASE_URL}/rest/v1/rpc/{function}",
+        headers=_svc_headers(),
+        json=payload,
+    )
+    if res.status_code != 200:
+        raise RuntimeError(f"Extraction queue RPC {function} failed with status {res.status_code}.")
+    try:
+        return res.json()
+    except ValueError as err:
+        raise RuntimeError(f"Extraction queue RPC {function} returned invalid JSON.") from err
+
+
+async def enqueue_extraction_job(
+    client: httpx.AsyncClient, receipt_id: str, requested_by: str
+) -> dict:
+    row = _first_rpc_row(await _queue_rpc(client, "enqueue_receipt_extraction", {
+        "p_receipt_id": receipt_id,
+        "p_requested_by": requested_by,
+    }))
+    if not row or not row.get("queue_message_id"):
+        raise RuntimeError("Supabase did not return the queued extraction job.")
+    return row
+
+
+async def claim_next_extraction_job(client: httpx.AsyncClient) -> Optional[dict]:
+    return _first_rpc_row(await _queue_rpc(client, "claim_next_receipt_extraction", {
+        "p_worker_id": WORKER_ID,
+        "p_visibility_seconds": EXTRACTION_QUEUE_VISIBILITY_SECONDS,
+        "p_max_attempts": EXTRACTION_QUEUE_MAX_ATTEMPTS,
+    }))
+
+
+async def heartbeat_extraction_job(client: httpx.AsyncClient, job: dict) -> bool:
+    result = await _queue_rpc(client, "heartbeat_receipt_extraction", {
+        "p_worker_id": WORKER_ID,
+        "p_lease_token": job["lease_token"],
+        "p_queue_message_id": job["queue_message_id"],
+        "p_visibility_seconds": EXTRACTION_QUEUE_VISIBILITY_SECONDS,
+    })
+    return result is True
+
+
+async def complete_extraction_job(
+    client: httpx.AsyncClient, job: dict, prepared: dict
+) -> bool:
+    result = await _queue_rpc(client, "complete_receipt_extraction", {
+        "p_worker_id": WORKER_ID,
+        "p_lease_token": job["lease_token"],
+        "p_queue_message_id": job["queue_message_id"],
+        "p_receipt_id": job["receipt_id"],
+        "p_transactions": prepared["rows"],
+        "p_verification_warnings": prepared["warnings"],
+        "p_raw_extraction": prepared.get("raw_extraction"),
+    })
+    return result is True
+
+
+async def fail_extraction_job(
+    client: httpx.AsyncClient,
+    job: dict,
+    message: str,
+    raw_extraction: Optional[dict] = None,
+) -> bool:
+    result = await _queue_rpc(client, "fail_receipt_extraction", {
+        "p_worker_id": WORKER_ID,
+        "p_lease_token": job["lease_token"],
+        "p_queue_message_id": job["queue_message_id"],
+        "p_receipt_id": job["receipt_id"],
+        "p_error_message": message,
+        "p_raw_extraction": raw_extraction,
+    })
+    return result is True
 
 
 async def _patch_receipt(client: httpx.AsyncClient, receipt_id: str, patch: dict) -> None:
@@ -1398,9 +1686,12 @@ async def _claim_receipt(
     if job_claiming_ready:
         patch["extraction_worker"] = WORKER_ID
         patch["extraction_claimed_at"] = _now()
+        cutoff = _timestamp(datetime.now(timezone.utc) - timedelta(seconds=CLAIM_STALE_SECONDS))
+        params["or"] = f"(extraction_claimed_at.is.null,extraction_claimed_at.lt.{cutoff})"
         if only_if_stale:
-            cutoff = _timestamp(datetime.now(timezone.utc) - timedelta(seconds=CLAIM_STALE_SECONDS))
-            params["or"] = f"(extraction_claimed_at.is.null,extraction_claimed_at.lt.{cutoff})"
+            params["status"] = "eq.Processing"
+        else:
+            params["status"] = "in.(Pending,Failed,Processing)"
 
     res = await client.patch(
         f"{SUPABASE_URL}/rest/v1/receipts",
@@ -1527,15 +1818,41 @@ def normalize_transaction_rows(
     return rows
 
 
-async def _extract_and_store(receipt: dict, user_id: Optional[str]) -> None:
+_RECEIPT_STORAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp", "pdf"}
+
+
+def _validated_receipt_storage_path(receipt: dict) -> str:
+    """Returns the canonical object path only when it belongs to this receipt.
+
+    Storage reads use the service role, so RLS cannot protect this request. The
+    path stored on the row must therefore be tied to the row's own tenant,
+    batch, and receipt identifiers before any privileged download is attempted.
+    """
+    organization_id = str(receipt.get("organization_id") or "")
+    batch_id = str(receipt.get("batch_id") or "")
+    receipt_id = str(receipt.get("id") or "")
+    file_path = receipt.get("file_path")
+    if not all((organization_id, batch_id, receipt_id, isinstance(file_path, str))):
+        raise RuntimeError("The stored receipt image path is invalid.")
+
+    expected_prefix = f"{organization_id}/{batch_id}/{receipt_id}."
+    extension = file_path[len(expected_prefix):].lower() if file_path.startswith(expected_prefix) else ""
+    if extension not in _RECEIPT_STORAGE_EXTENSIONS:
+        raise RuntimeError("The stored receipt image path does not belong to this receipt.")
+    return file_path
+
+
+async def _prepare_extraction(receipt: dict, user_id: Optional[str]) -> dict:
+    """Reads one stored receipt and prepares the complete fenced-write payload."""
     receipt_id = receipt["id"]
     filename = receipt.get("filename") or "receipt"
+    file_path = _validated_receipt_storage_path(receipt)
 
     # The image comes from storage, never from the request — by the time this
     # runs the browser that uploaded it may be long gone.
     async with httpx.AsyncClient(timeout=60) as client:
         obj = await client.get(
-            f"{SUPABASE_URL}/storage/v1/object/{STORAGE_BUCKET}/{receipt['file_path']}",
+            f"{SUPABASE_URL}/storage/v1/object/{STORAGE_BUCKET}/{quote(file_path, safe='/')}",
             headers={
                 "apikey": SUPABASE_SERVICE_ROLE_KEY,
                 "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
@@ -1555,37 +1872,64 @@ async def _extract_and_store(receipt: dict, user_id: Optional[str]) -> None:
     transactions = result.get("transactions") or []
     warnings = (result.get("verification") or {}).get("warnings") or []
 
+    if error_msg or not transactions:
+        return {
+            "error": error_msg or DEFAULT_EXTRACTION_ERROR,
+            "rows": [],
+            "warnings": [],
+            "raw_extraction": result,
+        }
+
+    rows = normalize_transaction_rows(
+        transactions,
+        receipt_id=receipt_id,
+        batch_id=receipt["batch_id"],
+        organization_id=receipt["organization_id"],
+        updated_by=user_id or receipt.get("uploaded_by"),
+    )
+
+    # Resolve each name against the organisation's real chart of accounts.
+    # Only certain matches rewrite the extracted name; suggestions remain for a
+    # person to confirm.
+    if ledger_matching_ready:
+        async with httpx.AsyncClient(timeout=30) as client:
+            ledgers = await _load_org_ledgers(client, receipt["organization_id"])
+        warnings = warnings + ledger_matching.apply_to_rows(rows, ledgers)
+
+    return {
+        "error": None,
+        "rows": rows,
+        "warnings": warnings,
+        "raw_extraction": result,
+    }
+
+
+async def _extract_and_store(receipt: dict, user_id: Optional[str]) -> None:
+    """Compatibility persistence path for databases before migration 007."""
+    receipt_id = receipt["id"]
+    filename = receipt.get("filename") or "receipt"
+    prepared = await _prepare_extraction(receipt, user_id)
+
     async with httpx.AsyncClient(timeout=60) as client:
         # Kept whatever happens: a failed reading is precisely the one worth
         # being able to look at afterwards. Gated on the same probe as claiming
         # because raw_extraction is the other receipts column migration 002 adds.
-        audit = {"raw_extraction": result} if job_claiming_ready else {}
+        audit = (
+            {"raw_extraction": prepared["raw_extraction"]}
+            if job_claiming_ready else {}
+        )
 
-        if error_msg or not transactions:
+        if prepared["error"]:
             await _patch_receipt(client, receipt_id, _finished({
                 "status": "Failed",
-                "error_message": error_msg or DEFAULT_EXTRACTION_ERROR,
+                "error_message": prepared["error"],
                 "verification_warnings": [],
                 **audit,
             }))
-            print(f"❌ Extraction failed for {filename}: {error_msg or DEFAULT_EXTRACTION_ERROR}")
+            print(f"❌ Extraction failed for {filename}: {prepared['error']}")
             return
 
-        rows = normalize_transaction_rows(
-            transactions,
-            receipt_id=receipt_id,
-            batch_id=receipt["batch_id"],
-            organization_id=receipt["organization_id"],
-            updated_by=user_id or receipt.get("uploaded_by"),
-        )
-
-        # Resolve each name against the organisation's real chart of accounts.
-        # Until this happens a row carries whatever was written on the paper,
-        # which Tally will not recognise. Only a certain match rewrites the name;
-        # anything less is reported for a person to confirm.
-        if ledger_matching_ready:
-            ledgers = await _load_org_ledgers(client, receipt["organization_id"])
-            warnings = warnings + ledger_matching.apply_to_rows(rows, ledgers)
+        rows = prepared["rows"]
 
         # Replace rather than append, so a retry cannot leave the voucher with
         # the rows from a previous attempt still attached to it.
@@ -1608,7 +1952,7 @@ async def _extract_and_store(receipt: dict, user_id: Optional[str]) -> None:
         await _patch_receipt(client, receipt_id, _finished({
             "status": "Extracted",
             "error_message": None,
-            "verification_warnings": warnings,
+            "verification_warnings": prepared["warnings"],
             **audit,
         }))
 
@@ -1633,6 +1977,192 @@ async def _load_org_ledgers(client: httpx.AsyncClient, organization_id: str) -> 
         print(f"⚠️ Could not load the chart of accounts: {res.text}")
         return []
     return res.json() or []
+
+
+async def _heartbeat_queued_extraction(job: dict, lease_lost: asyncio.Event) -> None:
+    """Extends both the singleton lease and PGMQ visibility while OCR runs."""
+    async with httpx.AsyncClient(timeout=20) as client:
+        while True:
+            await asyncio.sleep(EXTRACTION_QUEUE_HEARTBEAT_SECONDS)
+            try:
+                if not await heartbeat_extraction_job(client, job):
+                    lease_lost.set()
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                # A transport failure is not proof that the lease was lost. A
+                # later heartbeat or the fenced final RPC settles ownership.
+                print(f"⚠️ Could not heartbeat queued extraction: {err}")
+
+
+async def _record_queued_failure(
+    job: dict, message: str, raw_extraction: Optional[dict] = None
+) -> None:
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            accepted = await fail_extraction_job(client, job, message, raw_extraction)
+        if not accepted:
+            print(
+                f"ℹ️ Ignored stale failure for receipt {job.get('receipt_id')}; "
+                "its extraction lease is now owned elsewhere."
+            )
+    except Exception as err:
+        # Do not issue an unfenced receipt patch here. If the RPC outcome is
+        # unknown, PGMQ visibility expiry safely makes the job available again.
+        print(f"⚠️ Could not persist queued extraction failure: {err}")
+
+
+async def _run_queued_extraction_job(job: dict) -> None:
+    """Runs one globally leased job and finalizes it only through its fence."""
+    receipt_id = str(job.get("receipt_id") or "")
+    filename = str(job.get("filename") or "receipt")
+    required = (
+        "receipt_id", "queue_message_id", "lease_token", "batch_id",
+        "organization_id", "file_path",
+    )
+    if any(job.get(field) in (None, "") for field in required):
+        print("⚠️ Supabase returned an incomplete queued extraction job; leaving it for retry.")
+        return
+
+    receipt = {
+        "id": receipt_id,
+        "batch_id": job["batch_id"],
+        "organization_id": job["organization_id"],
+        "filename": filename,
+        "file_path": job["file_path"],
+        "uploaded_by": job.get("uploaded_by"),
+    }
+    user_id = job.get("requested_by") or job.get("uploaded_by")
+    lease_lost = asyncio.Event()
+    heartbeat = asyncio.create_task(_heartbeat_queued_extraction(job, lease_lost))
+    extraction = asyncio.create_task(_prepare_extraction(receipt, user_id))
+    lost_waiter = asyncio.create_task(lease_lost.wait())
+    _jobs_in_flight.add(receipt_id)
+
+    try:
+        done, _pending = await asyncio.wait(
+            {extraction, lost_waiter},
+            timeout=EXTRACTION_TIMEOUT_SECONDS,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        if lost_waiter in done and lease_lost.is_set():
+            extraction.cancel()
+            await asyncio.gather(extraction, return_exceptions=True)
+            print(f"ℹ️ Stopped stale extraction for receipt {receipt_id} after losing its lease.")
+            return
+
+        if extraction not in done:
+            # Cancellation reaches _run_blocking_provider_calls, which keeps
+            # awaiting every already-started SDK thread. Do not fence-fail and
+            # release the singleton until that cleanup is complete, otherwise
+            # the next receipt could overlap the timed-out provider request.
+            extraction.cancel()
+            await asyncio.gather(extraction, return_exceptions=True)
+            await _record_queued_failure(
+                job,
+                "Extraction took too long and was stopped. Please try again.",
+            )
+            return
+
+        try:
+            prepared = extraction.result()
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            await _record_queued_failure(
+                job,
+                extraction_error_message("Extraction", err),
+            )
+            print(f"❌ Queued extraction for receipt {receipt_id} failed: {err}")
+            return
+
+        if lease_lost.is_set():
+            return
+
+        if prepared["error"]:
+            await _record_queued_failure(
+                job,
+                prepared["error"],
+                prepared.get("raw_extraction"),
+            )
+            print(f"❌ Extraction failed for {filename}: {prepared['error']}")
+            return
+
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                accepted = await complete_extraction_job(client, job, prepared)
+        except Exception as err:
+            # Completion may have committed even if its response was lost. Never
+            # turn that ambiguity into an unfenced failure; redelivery is safe.
+            print(f"⚠️ Could not confirm queued extraction completion: {err}")
+            return
+
+        if accepted:
+            print(
+                f"✅ Stored {len(prepared['rows'])} transactions for {filename} "
+                f"(receipt {receipt_id})"
+            )
+        else:
+            print(
+                f"ℹ️ Discarded stale result for receipt {receipt_id}; "
+                "its extraction lease is now owned elsewhere."
+            )
+    except asyncio.CancelledError:
+        extraction.cancel()
+        await asyncio.gather(extraction, return_exceptions=True)
+        raise
+    finally:
+        heartbeat.cancel()
+        lost_waiter.cancel()
+        await asyncio.gather(heartbeat, lost_waiter, return_exceptions=True)
+        _jobs_in_flight.discard(receipt_id)
+
+
+async def consume_extraction_queue() -> None:
+    """Claims and processes one durable job at a time for this process.
+
+    Every backend replica runs a consumer, but the database singleton lease in
+    migration 007 permits only one of them to receive a job at any moment.
+    """
+    if extraction_queue_ready is not True:
+        return
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        while True:
+            try:
+                job = await claim_next_extraction_job(client)
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                print(f"⚠️ Could not claim the next queued extraction: {err}")
+                await asyncio.sleep(EXTRACTION_QUEUE_POLL_SECONDS)
+                continue
+
+            if not job:
+                await asyncio.sleep(EXTRACTION_QUEUE_POLL_SECONDS)
+                continue
+            await _run_queued_extraction_job(job)
+
+
+async def wait_for_extraction_queue_schema() -> None:
+    """Retries an indeterminate startup probe without failing open.
+
+    A transient Supabase/network error must not select the legacy path on a
+    database that already has the global queue. Once absence is positively
+    confirmed, the old concurrency-one worker remains available for rollout.
+    """
+    while extraction_queue_ready is None:
+        await asyncio.sleep(max(2.0, EXTRACTION_QUEUE_POLL_SECONDS))
+        await detect_schema_features()
+
+    if extraction_queue_ready is True:
+        await consume_extraction_queue()
+        return
+
+    await resume_interrupted_extractions()
+    await run_legacy_extraction_maintenance()
 
 
 async def _run_extraction_job(receipt: dict, user_id: Optional[str]) -> None:
@@ -1693,12 +2223,62 @@ async def start_receipt_extraction(receipt_id: str, authorization: Optional[str]
     caller = await resolve_caller(authorization)
     receipt = await _load_receipt_for_caller(receipt_id, caller)
 
+    # A completed receipt is already the desired outcome. Treat a repeated
+    # request as idempotent instead of paying to read the same voucher again.
+    if receipt.get("status") == "Extracted":
+        return {"receipt_id": receipt_id, "status": "Extracted"}
+
+    if extraction_queue_ready is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Extraction is temporarily paused while the durable queue reconnects.",
+        )
+
+    if extraction_queue_ready is True:
+        if not receipt.get("file_path"):
+            raise HTTPException(
+                status_code=409,
+                detail="The image is still uploading. Please try again in a moment.",
+            )
+        if not receipt.get("organization_id"):
+            raise HTTPException(
+                status_code=400,
+                detail="That receipt's batch is not linked to an organisation.",
+            )
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                queued = await enqueue_extraction_job(client, receipt_id, caller["id"])
+        except (RuntimeError, httpx.HTTPError) as err:
+            print(f"⚠️ Could not enqueue receipt {receipt_id}: {err}")
+            raise HTTPException(
+                status_code=503,
+                detail="The extraction queue is temporarily unavailable. Please try again.",
+            )
+
+        effective_status = (
+            "Processing" if queued.get("status") == "Processing" else "Queued"
+        )
+        response = {
+            "receipt_id": receipt_id,
+            "status": effective_status,
+            "detail": (
+                "Already being extracted."
+                if effective_status == "Processing"
+                else "Already queued."
+                if queued.get("already_queued") is True
+                else "Queued for extraction."
+            ),
+        }
+        if queued.get("queue_message_id") is not None:
+            response["extraction_queue_message_id"] = queued["queue_message_id"]
+        if queued.get("queued_at") is not None:
+            response["extraction_queued_at"] = queued["queued_at"]
+        return response
+
     # Already running here, or already running in another process whose claim is
     # still being refreshed. Either way the work is under way and starting it a
     # second time would only duplicate the vision-API bill.
-    if receipt_id in _jobs_in_flight or (
-        receipt.get("status") == "Processing" and _claim_is_live(receipt)
-    ):
+    if receipt_id in _jobs_in_flight or _claim_is_live(receipt):
         return {"receipt_id": receipt_id, "status": "Processing", "detail": "Already being extracted."}
 
     if not receipt.get("file_path"):
@@ -1770,6 +2350,18 @@ async def resume_interrupted_extractions() -> None:
                 print(f"↻ Resuming {resumed} extraction(s) interrupted by a restart")
     except Exception as err:
         print(f"⚠️ Could not check for interrupted extractions: {err}")
+
+
+async def run_legacy_extraction_maintenance() -> None:
+    """Keeps compatibility claims alive and periodically recovers stale work."""
+    heartbeat = asyncio.create_task(refresh_extraction_claims())
+    try:
+        while True:
+            await asyncio.sleep(CLAIM_HEARTBEAT_SECONDS)
+            await resume_interrupted_extractions()
+    finally:
+        heartbeat.cancel()
+        await asyncio.gather(heartbeat, return_exceptions=True)
 
 
 if __name__ == "__main__":

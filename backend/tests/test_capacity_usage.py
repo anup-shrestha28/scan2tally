@@ -63,7 +63,7 @@ def test_usage_percent_can_exceed_one_hundred_without_corrupting_bytes():
 
 
 @pytest.mark.parametrize("role", ["Admin", "Operator"])
-def test_non_super_admin_receives_warning_but_not_global_usage_details(role):
+def test_response_builder_withholds_exact_details_as_defense_in_depth(role):
     response = main.build_platform_usage_response({
         "storage_bytes": 850,
         "database_bytes": 400,
@@ -143,3 +143,73 @@ def test_storage_api_fallback_traverses_folders_and_sums_object_metadata(monkeyp
         "storage_objects": 4,
         "storage_by_bucket": {"receipts": 35, "exports": 7},
     }
+
+
+def test_capacity_alert_publisher_calls_protected_rpc_with_configured_limits(monkeypatch):
+    monkeypatch.setattr(main, "SUPABASE_URL", "https://project.supabase.co")
+    monkeypatch.setattr(main, "SUPABASE_SERVICE_ROLE_KEY", "service-role-test-key")
+
+    captured = {}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["path"] = request.url.path
+        captured["apikey"] = request.headers.get("apikey")
+        captured["authorization"] = request.headers.get("authorization")
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, json=2)
+
+    async def publish():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await main.publish_capacity_alerts_once(client)
+
+    transitions = asyncio.run(publish())
+
+    assert transitions == 2
+    assert captured == {
+        "method": "POST",
+        "path": "/rest/v1/rpc/refresh_platform_capacity_alerts",
+        "apikey": "service-role-test-key",
+        "authorization": "Bearer service-role-test-key",
+        "payload": {
+            "p_storage_quota_bytes": 1_000,
+            "p_database_quota_bytes": 1_000,
+            "p_warning_percent": 80.0,
+            "p_critical_percent": 95.0,
+        },
+    }
+
+
+def test_capacity_alert_publisher_rejects_failed_rpc(monkeypatch):
+    monkeypatch.setattr(main, "SUPABASE_URL", "https://project.supabase.co")
+    monkeypatch.setattr(main, "SUPABASE_SERVICE_ROLE_KEY", "service-role-test-key")
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"message": "function not found"})
+
+    async def publish():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await main.publish_capacity_alerts_once(client)
+
+    with pytest.raises(RuntimeError, match="status 404"):
+        asyncio.run(publish())
+
+
+@pytest.mark.parametrize("role", ["Admin", "Operator"])
+def test_staff_cannot_call_exact_platform_usage_endpoint(monkeypatch, role):
+    monkeypatch.setattr(main, "supabase_admin_available", True)
+
+    async def resolve(_authorization):
+        return {"id": "staff-id", "role": role}
+
+    async def exact_snapshot_must_not_be_loaded():
+        raise AssertionError("Staff must not load exact platform metrics")
+
+    monkeypatch.setattr(main, "resolve_caller", resolve)
+    monkeypatch.setattr(main, "fetch_platform_usage_snapshot", exact_snapshot_must_not_be_loaded)
+
+    with pytest.raises(main.HTTPException) as error:
+        asyncio.run(main.get_platform_usage("Bearer valid-session"))
+
+    assert error.value.status_code == 403
+    assert "Super Admin" in error.value.detail

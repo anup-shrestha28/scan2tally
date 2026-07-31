@@ -1107,6 +1107,7 @@ input[type='number']::-webkit-inner-spin-button {
   font-weight: 600;
 }
 .status-pending { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+.status-queued { background: rgba(14, 165, 233, 0.14); color: #38bdf8; }
 .status-processing { background: rgba(99, 102, 241, 0.15); color: #818cf8; }
 .status-extracted { background: rgba(16, 185, 129, 0.15); color: #34d399; }
 .status-failed { background: rgba(244, 63, 94, 0.15); color: #f43f5e; }
@@ -1464,6 +1465,14 @@ input[type='number']::-webkit-inner-spin-button {
 
 /* Project-wide Supabase warning, visible to every signed-in role before the
    current page content. It is intentionally compact because it can persist. */
+.capacity-alert-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+.capacity-alert-stack:empty { display: none; }
+.capacity-alert-stack .capacity-alert { margin-bottom: 0; }
 .capacity-alert {
   display: flex;
   align-items: center;

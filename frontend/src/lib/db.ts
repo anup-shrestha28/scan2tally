@@ -1,7 +1,7 @@
 import { supabase } from './supabase';
 import {
-  ScanBatch, Receipt, ReceiptStatus, Transaction, User, UserRole, Organization,
-  BatchStatus, Ledger, LedgerMatchState, PlatformUsage,
+  ScanBatch, Receipt, ReceiptStatus, ReceiptDisplayStatus, Transaction, User, UserRole, Organization,
+  BatchStatus, Ledger, LedgerMatchState, PlatformUsage, CapacityAlert,
 } from '../types';
 import { ledgerMatchKey } from './ledgers';
 import { LEDGER_MATCHING } from './features';
@@ -295,10 +295,11 @@ export async function fetchPlatformStats(): Promise<{ activeUsers: number; recei
 }
 
 /**
- * Live Supabase capacity as calculated by the backend.
+ * Exact live Supabase capacity as calculated by the backend.
  *
- * The backend keeps the service-role key private and returns exact byte counts
- * only to a Super Admin. Admins and Operators receive just the warning state.
+ * This is only used by the Super Admin dashboard. Admins and Operators receive
+ * sanitized warning rows directly from Supabase below instead of calling this
+ * backend endpoint.
  */
 export async function fetchPlatformUsage(): Promise<PlatformUsage> {
   const { data: sessionData } = await supabase.auth.getSession();
@@ -317,20 +318,103 @@ export async function fetchPlatformUsage(): Promise<PlatformUsage> {
   return body as PlatformUsage;
 }
 
+const CAPACITY_RESOURCES = new Set(['storage', 'database']);
+const CAPACITY_LEVELS = new Set(['healthy', 'warning', 'critical', 'full']);
+
+/** Convert a PostgREST/Realtime row into the app's deliberately narrow shape. */
+export function parseCapacityAlertRow(value: unknown): CapacityAlert | null {
+  if (!value || typeof value !== 'object') return null;
+  const row = value as Record<string, unknown>;
+  const resource = String(row.resource || '');
+  const level = String(row.level || '');
+  const percent = Number(row.percent);
+  const revision = Number(row.revision);
+  const title = typeof row.title === 'string' ? row.title.trim() : '';
+  const message = typeof row.message === 'string' ? row.message.trim() : '';
+  const changedAt = typeof row.changed_at === 'string' ? row.changed_at : '';
+
+  if (
+    !CAPACITY_RESOURCES.has(resource) ||
+    !CAPACITY_LEVELS.has(level) ||
+    !Number.isFinite(percent) || percent < 0 ||
+    !Number.isSafeInteger(revision) || revision < 1 ||
+    !title || !message || !changedAt
+  ) {
+    return null;
+  }
+
+  return {
+    resource: resource as CapacityAlert['resource'],
+    level: level as CapacityAlert['level'],
+    percent,
+    title,
+    message,
+    revision,
+    changedAt,
+  };
+}
+
+/**
+ * Current persisted states for both capacity resources.
+ *
+ * RLS exposes only these sanitized rows to active staff. This bootstrap read is
+ * important: Realtime delivers future transitions, while this read also covers
+ * a warning that was raised before the user signed in or while they were away.
+ */
+export async function fetchCapacityAlerts(): Promise<CapacityAlert[]> {
+  const { data, error } = await supabase
+    .from('platform_capacity_alerts')
+    .select('resource, level, percent, title, message, revision, changed_at');
+
+  if (error) throw new Error(error.message);
+  return (data || [])
+    .map(parseCapacityAlertRow)
+    .filter((alert): alert is CapacityAlert => alert !== null);
+}
+
 // ---------------------------------------------------------------- batches
+
+// Migration 007 adds durable queue markers. Deployments can briefly run a new
+// frontend against the old schema during a rolling release, so reads retry once
+// without those columns instead of making the whole workspace unavailable.
+const RECEIPT_QUEUE_COLUMNS = 'extraction_queue_message_id, extraction_queued_at, extraction_generation';
+let receiptQueueColumnsAvailable: boolean | null = null;
+
+function queueColumnsMissing(error: { message?: string; details?: string; hint?: string; code?: string } | null): boolean {
+  if (!error) return false;
+  const text = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`.toLowerCase();
+  return (
+    text.includes('extraction_queue_message_id') ||
+    text.includes('extraction_queued_at') ||
+    text.includes('extraction_generation') ||
+    error.code === '42703' ||
+    error.code === 'PGRST204'
+  );
+}
 
 /** Loads batches with their receipts in one round trip. */
 export async function fetchBatches(): Promise<ScanBatch[]> {
-  const { data, error } = await supabase
-    .from('scan_batches')
-    .select(`
-      id, name, status, created_at,
-      receipts (
-        id, filename, file_path, status, error_message,
-        image_width, image_height, verification_warnings, created_at
-      )
-    `)
-    .order('created_at', { ascending: false });
+  const query = (includeQueue: boolean) => supabase
+      .from('scan_batches')
+      .select(`
+        id, name, status, created_at,
+        receipts (
+          id, filename, file_path, status, error_message,
+          image_width, image_height, verification_warnings, created_at, updated_at
+          ${includeQueue ? `, ${RECEIPT_QUEUE_COLUMNS}` : ''}
+        )
+      `)
+      .order('created_at', { ascending: false });
+
+  const includeQueue = receiptQueueColumnsAvailable !== false;
+  let result = await query(includeQueue);
+  if (includeQueue && result.error && queueColumnsMissing(result.error)) {
+    receiptQueueColumnsAvailable = false;
+    result = await query(false);
+  } else if (includeQueue && !result.error) {
+    receiptQueueColumnsAvailable = true;
+  }
+  const { data, error } = result;
 
   if (error) throw new Error(error.message);
 
@@ -348,9 +432,22 @@ export async function fetchBatches(): Promise<ScanBatch[]> {
           id: r.id,
           filename: r.filename,
           status: r.status,
+          created_at: r.created_at || undefined,
+          updated_at: r.updated_at || undefined,
           // Resolved lazily via a signed URL; the stored path is not a URL.
           previewUrl: '',
           storage_path: r.file_path || undefined,
+          upload_state: r.file_path ? 'uploaded' : 'failed',
+          upload_error: r.file_path
+            ? undefined
+            : 'The image upload did not finish. Retry it if the original file is still available, or remove it and upload again.',
+          extraction_queue_message_id: r.extraction_queue_message_id == null
+            ? null
+            : Number(r.extraction_queue_message_id),
+          extraction_queued_at: r.extraction_queued_at || null,
+          extraction_generation: Number.isSafeInteger(Number(r.extraction_generation))
+            ? Number(r.extraction_generation)
+            : undefined,
           image_width: r.image_width ?? undefined,
           image_height: r.image_height ?? undefined,
           error_message: r.error_message || undefined,
@@ -409,26 +506,37 @@ export async function createReceipt(receipt: {
   batchId: string;
   userId: string;
   filename: string;
-}): Promise<void> {
-  const { error } = await supabase.from('receipts').insert({
-    id: receipt.id,
-    batch_id: receipt.batchId,
-    uploaded_by: receipt.userId,
-    filename: receipt.filename,
-    status: 'Pending',
-  });
+}): Promise<{ created_at?: string; updated_at?: string }> {
+  // Ignore an existing id so retrying an interrupted upload is idempotent and
+  // cannot reset a receipt that the server has already started processing.
+  const { data, error } = await supabase.from('receipts')
+    .upsert({
+      id: receipt.id,
+      batch_id: receipt.batchId,
+      uploaded_by: receipt.userId,
+      filename: receipt.filename,
+    }, {
+      onConflict: 'id',
+      ignoreDuplicates: true,
+      // Server-owned fields (including status) must use their database defaults;
+      // PostgREST otherwise fills omitted upsert columns with null.
+      defaultToNull: false,
+    })
+    .select('created_at, updated_at')
+    .maybeSingle();
   if (error) throw new Error(error.message);
+  return {
+    created_at: data?.created_at || undefined,
+    updated_at: data?.updated_at || undefined,
+  };
 }
 
 export async function updateReceiptRow(
   id: string,
   patch: Partial<{
-    status: string;
-    error_message: string | null;
     file_path: string | null;
     image_width: number | null;
     image_height: number | null;
-    verification_warnings: string[];
   }>
 ): Promise<void> {
   const { error } = await supabase.from('receipts').update(patch).eq('id', id);
@@ -440,6 +548,14 @@ export async function deleteReceipt(id: string): Promise<void> {
   if (error) throw new Error(error.message);
 }
 
+/** Storage cleanup is intentionally separate: delete the database row first. */
+export async function deleteReceiptImages(paths: string[]): Promise<void> {
+  const uniquePaths = [...new Set(paths.filter(Boolean))];
+  if (!uniquePaths.length) return;
+  const { error } = await supabase.storage.from(RECEIPTS_BUCKET).remove(uniquePaths);
+  if (error) throw new Error(error.message);
+}
+
 /**
  * Asks the server to extract a receipt, and returns as soon as it has accepted.
  *
@@ -448,7 +564,14 @@ export async function deleteReceipt(id: string): Promise<void> {
  * not holding the work, so closing the tab or losing the network partway
  * through cannot abandon it. Progress is observed by watching the receipt row.
  */
-export async function startReceiptExtraction(receiptId: string): Promise<void> {
+export interface StartReceiptExtractionResult {
+  receipt_id: string;
+  status: 'Queued' | 'Processing' | 'Extracted';
+  extraction_queue_message_id?: number | null;
+  extraction_queued_at?: string | null;
+}
+
+export async function startReceiptExtraction(receiptId: string): Promise<StartReceiptExtractionResult> {
   const { data: sessionData } = await supabase.auth.getSession();
   const token = sessionData.session?.access_token;
   if (!token) throw new Error('Your session has expired. Please sign in again.');
@@ -463,30 +586,122 @@ export async function startReceiptExtraction(receiptId: string): Promise<void> {
     const body = await res.json().catch(() => null);
     throw new Error(body?.detail || 'Could not start extraction on the server.');
   }
+  const body = await res.json().catch(() => ({}));
+  const hasQueueMessage = Object.prototype.hasOwnProperty.call(body, 'extraction_queue_message_id');
+  const hasQueuedAt = Object.prototype.hasOwnProperty.call(body, 'extraction_queued_at');
+  return {
+    receipt_id: typeof body.receipt_id === 'string' ? body.receipt_id : receiptId,
+    status: body.status === 'Queued' || body.status === 'Extracted' ? body.status : 'Processing',
+    extraction_queue_message_id: hasQueueMessage
+      ? (body.extraction_queue_message_id == null ? null : Number(body.extraction_queue_message_id))
+      : undefined,
+    extraction_queued_at: hasQueuedAt
+      ? (typeof body.extraction_queued_at === 'string' ? body.extraction_queued_at : null)
+      : undefined,
+  };
 }
 
 /** Current server-side state of specific receipts, for watching extractions. */
-export async function fetchReceiptStates(ids: string[]): Promise<
-  { id: string; status: ReceiptStatus; error_message?: string; verification_warnings?: string[] }[]
-> {
+export interface ReceiptServerState {
+  id: string;
+  status: ReceiptStatus;
+  error_message?: string;
+  verification_warnings?: string[];
+  extraction_queue_message_id?: number | null;
+  extraction_queued_at?: string | null;
+  extraction_generation?: number;
+  updated_at?: string;
+}
+
+export function parseReceiptServerState(value: unknown): ReceiptServerState | null {
+  if (!value || typeof value !== 'object') return null;
+  const row = value as Record<string, any>;
+  if (typeof row.id !== 'string' || !['Pending', 'Processing', 'Extracted', 'Failed'].includes(row.status)) {
+    return null;
+  }
+
+  const hasQueueMessage = Object.prototype.hasOwnProperty.call(row, 'extraction_queue_message_id');
+  const hasQueuedAt = Object.prototype.hasOwnProperty.call(row, 'extraction_queued_at');
+  const hasGeneration = Object.prototype.hasOwnProperty.call(row, 'extraction_generation');
+  const hasUpdatedAt = Object.prototype.hasOwnProperty.call(row, 'updated_at');
+  const generation = hasGeneration ? Number(row.extraction_generation) : undefined;
+  const updatedAt = hasUpdatedAt && row.updated_at != null ? String(row.updated_at) : undefined;
+  const queueMessageId = hasQueueMessage && row.extraction_queue_message_id != null
+    ? Number(row.extraction_queue_message_id)
+    : null;
+  const queuedAt = hasQueuedAt && row.extraction_queued_at != null
+    ? String(row.extraction_queued_at)
+    : null;
+
+  // Reject malformed ordering metadata instead of letting one corrupt event
+  // defeat monotonic state handling. Missing fields remain valid for a brief
+  // rolling-deploy window against the pre-queue schema.
+  if (hasGeneration && row.extraction_generation == null) return null;
+  if (hasUpdatedAt && row.updated_at == null) return null;
+  if (hasGeneration && (!Number.isSafeInteger(generation) || generation! < 0)) return null;
+  if (updatedAt !== undefined && Number.isNaN(Date.parse(updatedAt))) return null;
+  if (queueMessageId !== null && (!Number.isSafeInteger(queueMessageId) || queueMessageId < 1)) return null;
+  if (queuedAt !== null && Number.isNaN(Date.parse(queuedAt))) return null;
+
+  return {
+    id: row.id,
+    status: row.status as ReceiptStatus,
+    error_message: row.error_message || undefined,
+    verification_warnings: Array.isArray(row.verification_warnings) && row.verification_warnings.length
+      ? row.verification_warnings
+      : undefined,
+    extraction_queue_message_id: hasQueueMessage ? queueMessageId : undefined,
+    extraction_queued_at: hasQueuedAt ? queuedAt : undefined,
+    extraction_generation: generation,
+    updated_at: updatedAt,
+  };
+}
+
+export async function fetchReceiptStates(ids: string[]): Promise<ReceiptServerState[]> {
   if (!ids.length) return [];
-  const { data, error } = await supabase
-    .from('receipts')
-    .select('id, status, error_message, verification_warnings')
-    .in('id', ids);
+  const query = (includeQueue: boolean) => supabase
+      .from('receipts')
+      .select(`id, status, error_message, verification_warnings, updated_at${includeQueue ? `, ${RECEIPT_QUEUE_COLUMNS}` : ''}`)
+      .in('id', ids);
+
+  const includeQueue = receiptQueueColumnsAvailable !== false;
+  let result = await query(includeQueue);
+  if (includeQueue && result.error && queueColumnsMissing(result.error)) {
+    receiptQueueColumnsAvailable = false;
+    result = await query(false);
+  } else if (includeQueue && !result.error) {
+    receiptQueueColumnsAvailable = true;
+  }
+  const { data, error } = result;
 
   if (error) throw new Error(error.message);
-  return (data || []).map((r: any) => ({
-    id: r.id,
-    status: r.status as ReceiptStatus,
-    error_message: r.error_message || undefined,
-    verification_warnings: Array.isArray(r.verification_warnings) && r.verification_warnings.length
-      ? r.verification_warnings
-      : undefined,
-  }));
+  return (data || [])
+    .map(parseReceiptServerState)
+    .filter((state): state is ReceiptServerState => state !== null);
 }
 
 // ---------------------------------------------------------------- images
+
+export const RECEIPT_UPLOAD_ACCEPT = '.jpg,.jpeg,.png,.webp,.pdf,image/jpeg,image/png,image/webp,application/pdf';
+
+const RECEIPT_UPLOAD_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'pdf']);
+const RECEIPT_UPLOAD_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+  'application/pdf',
+]);
+
+/** Client-side format guard; the backend remains the final trust boundary. */
+export function validateReceiptUploadFile(file: Pick<File, 'name' | 'type'>): string | null {
+  const extension = file.name.split('.').pop()?.toLowerCase() || '';
+  const mimeType = file.type.trim().toLowerCase();
+  if (!RECEIPT_UPLOAD_EXTENSIONS.has(extension) || (mimeType && !RECEIPT_UPLOAD_MIME_TYPES.has(mimeType))) {
+    return 'Only JPG, JPEG, PNG, WEBP, and PDF files are supported.';
+  }
+  return null;
+}
 
 /**
  * Uploads under <org>/<batch>/<receipt> because the storage policies scope
@@ -496,14 +711,37 @@ export async function uploadReceiptImage(
   file: File,
   ids: { organizationId: string; batchId: string; receiptId: string }
 ): Promise<string> {
+  const validationError = validateReceiptUploadFile(file);
+  if (validationError) throw new Error(validationError);
+
   const ext = file.name.split('.').pop()?.toLowerCase() || 'jpg';
   const path = `${ids.organizationId}/${ids.batchId}/${ids.receiptId}.${ext}`;
 
-  const { error } = await supabase.storage
+  const upload = () => supabase.storage
     .from(RECEIPTS_BUCKET)
-    .upload(path, file, { upsert: true, contentType: file.type || undefined });
+    .upload(path, file, { upsert: false, contentType: file.type || undefined });
 
-  if (error) throw new Error(error.message);
+  let result = await upload();
+  const storageError = result.error as (typeof result.error & {
+    statusCode?: string;
+    error?: string;
+  });
+  const isDuplicate = Boolean(storageError) && (
+    storageError.statusCode === '409' ||
+    storageError.error === 'Duplicate' ||
+    /already exists|duplicate/i.test(storageError.message)
+  );
+
+  // A previous request can reach Storage even if its response never reaches
+  // the browser. Replace only that exact receipt key on retry. This uses the
+  // existing INSERT/DELETE policies and does not require broad UPDATE access.
+  if (isDuplicate) {
+    const { error: cleanupError } = await supabase.storage.from(RECEIPTS_BUCKET).remove([path]);
+    if (cleanupError) throw new Error(cleanupError.message);
+    result = await upload();
+  }
+
+  if (result.error) throw new Error(result.error.message);
   return path;
 }
 
@@ -851,7 +1089,7 @@ export async function downloadExportFile(filePath: string, fileName: string): Pr
 
 export interface OrgOverview {
   batches: { active: number; archived: number };
-  receipts: Record<ReceiptStatus, number>;
+  receipts: Record<ReceiptDisplayStatus, number>;
   rows: number;
   /** Rows whose ledger Tally will not recognise as-is. */
   ledgersUnresolved: number;
@@ -868,9 +1106,23 @@ export interface OrgOverview {
  * one company's volume the cost of counting is irrelevant.
  */
 export async function fetchOrgOverview(): Promise<OrgOverview> {
+  const fetchOverviewReceipts = async () => {
+    const query = (includeQueue: boolean) => supabase.from('receipts')
+      .select(`id, status, uploaded_by${includeQueue ? `, ${RECEIPT_QUEUE_COLUMNS}` : ''}`);
+    const includeQueue = receiptQueueColumnsAvailable !== false;
+    let result = await query(includeQueue);
+    if (includeQueue && result.error && queueColumnsMissing(result.error)) {
+      receiptQueueColumnsAvailable = false;
+      result = await query(false);
+    } else if (includeQueue && !result.error) {
+      receiptQueueColumnsAvailable = true;
+    }
+    return result;
+  };
+
   const [batchRes, receiptRes, txRes, exportRes, userRes] = await Promise.all([
     supabase.from('scan_batches').select('id, status'),
-    supabase.from('receipts').select('id, status, uploaded_by'),
+    fetchOverviewReceipts(),
     LEDGER_MATCHING
       ? supabase.from('transactions').select('id, ledger_match')
       : supabase.from('transactions').select('id'),
@@ -894,11 +1146,19 @@ export async function fetchOrgOverview(): Promise<OrgOverview> {
     else batches.active++;
   }
 
-  const receipts: Record<ReceiptStatus, number> =
-    { Pending: 0, Processing: 0, Extracted: 0, Failed: 0 };
+  const receipts: Record<ReceiptDisplayStatus, number> =
+    { Pending: 0, Queued: 0, Processing: 0, Extracted: 0, Failed: 0 };
   const perUploader = new Map<string, number>();
-  for (const r of receiptRes.data || []) {
-    if (r.status in receipts) receipts[r.status as ReceiptStatus]++;
+  const receiptRows = (receiptRes.data || []) as unknown as Array<{
+    status: ReceiptStatus;
+    uploaded_by?: string | null;
+    extraction_queue_message_id?: number | null;
+  }>;
+  for (const r of receiptRows) {
+    const displayStatus: ReceiptDisplayStatus = r.status === 'Pending' && r.extraction_queue_message_id != null
+      ? 'Queued'
+      : r.status as ReceiptStatus;
+    if (displayStatus in receipts) receipts[displayStatus]++;
     if (r.uploaded_by) perUploader.set(r.uploaded_by, (perUploader.get(r.uploaded_by) || 0) + 1);
   }
 

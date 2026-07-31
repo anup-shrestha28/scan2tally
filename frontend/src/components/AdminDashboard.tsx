@@ -61,7 +61,7 @@ export default function AdminDashboard({
     if (!signal.aborted) setOverview(data);
   }, {
     enabled: !loading && Boolean(overview),
-    intervalMs: overview?.receipts.Processing ? 5000 : 30000,
+    intervalMs: overview && (overview.receipts.Queued || overview.receipts.Processing) ? 5000 : 30000,
     maxIntervalMs: 120000,
   });
 
@@ -84,7 +84,7 @@ export default function AdminDashboard({
   }
 
   const { batches, receipts, rows, ledgersUnresolved, ledgerCount, exports, staff } = overview;
-  const awaiting = receipts.Pending + receipts.Processing;
+  const awaiting = receipts.Pending + receipts.Queued + receipts.Processing;
 
   return (
     <div className="page">
@@ -125,7 +125,9 @@ export default function AdminDashboard({
           label="Awaiting Extraction"
           value={awaiting}
           tone={awaiting ? 'amber' : undefined}
-          note={receipts.Processing ? `${receipts.Processing} being read right now` : 'nothing in progress'}
+          note={receipts.Queued || receipts.Processing
+            ? `${receipts.Queued} queued · ${receipts.Processing} being read`
+            : 'nothing in progress'}
         />
       </div>
 

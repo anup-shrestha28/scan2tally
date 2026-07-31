@@ -3,6 +3,8 @@ export type OrgStatus = 'Active' | 'Inactive';
 export type UserStatus = 'Active' | 'Inactive';
 export type BatchStatus = 'Active' | 'Archived';
 export type ReceiptStatus = 'Pending' | 'Processing' | 'Extracted' | 'Failed';
+export type ReceiptDisplayStatus = ReceiptStatus | 'Queued';
+export type ReceiptUploadState = 'waiting' | 'uploading' | 'uploaded' | 'failed';
 export type EntryType = 'Dr' | 'Cr';
 
 /**
@@ -49,6 +51,23 @@ export type CapacityLevel = 'healthy' | 'warning' | 'critical' | 'full';
 export type CapacityResource = 'storage' | 'database';
 export type CapacityConnectionState = 'connecting' | 'live' | 'retrying';
 
+/**
+ * A sanitized project-capacity state published for signed-in staff.
+ *
+ * Unlike PlatformUsage, this never contains byte counts, quotas, or bucket
+ * details. Admins and Operators can therefore receive it directly through
+ * Supabase Realtime without exposing the Super Admin's operational metrics.
+ */
+export interface CapacityAlert {
+  resource: CapacityResource;
+  level: CapacityLevel;
+  percent: number;
+  title: string;
+  message: string;
+  revision: number;
+  changedAt: string;
+}
+
 export interface CapacityMetric {
   usedBytes: number;
   quotaBytes: number;
@@ -69,7 +88,7 @@ export interface PlatformUsage {
   checkedAt: string;
   /** Full uses the protected SQL metric; storage-only is the live API fallback. */
   monitoringMode: 'full' | 'storage-only';
-  /** Exact metrics are omitted by the API for Admin and Operator callers. */
+  /** Exact metrics come only from the Super-Admin-only backend endpoint. */
   storage?: CapacityMetric;
   database?: CapacityMetric;
 }
@@ -79,6 +98,9 @@ export interface Receipt {
   filename: string;
   status: ReceiptStatus;
   previewUrl: string;
+  /** Raw database timestamps retained for durable FIFO and state ordering. */
+  created_at?: string;
+  updated_at?: string;
   // Measured from the image after upload, so we can warn about photos too
   // small to read reliably before spending an extraction on them.
   image_width?: number;
@@ -86,6 +108,20 @@ export interface Receipt {
   // Path inside the private 'receipts' storage bucket. previewUrl is a
   // short-lived signed URL derived from this, so only the path is durable.
   storage_path?: string;
+  /**
+   * Durable queue marker written by the backend. Pending + a message id is the
+   * user-facing Queued state; the receipt_status enum deliberately stays small.
+   */
+  extraction_queue_message_id?: number | null;
+  extraction_queued_at?: string | null;
+  /** Incremented by the backend for each extraction/retry generation. */
+  extraction_generation?: number;
+  /** Brief client-side bridge between a successful 202 and the Realtime row. */
+  enqueue_accepted?: boolean;
+  enqueue_error?: string;
+  /** Upload progress is local; a stored file_path is the durable success flag. */
+  upload_state?: ReceiptUploadState;
+  upload_error?: string;
   error_message?: string;
   // Reconciliation notices from the backend (e.g. the extracted rows disagree
   // with the voucher's printed जम्मा total). Advisory only — the receipt is

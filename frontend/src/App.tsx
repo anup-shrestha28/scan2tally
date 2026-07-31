@@ -9,15 +9,46 @@ import UserManagement from './components/UserManagement';
 import BatchWorkspace from './components/BatchWorkspace';
 import SideBySideReviewer from './components/SideBySideReviewer';
 import ExcelExporter from './components/ExcelExporter';
-import { User, ScanBatch, Receipt, Transaction, PlatformUsage, CapacityConnectionState } from './types';
+import {
+  User, ScanBatch, Receipt, Transaction, PlatformUsage, CapacityConnectionState,
+  CapacityAlert,
+} from './types';
 import { supabase } from './lib/supabase';
-import { fetchCurrentUser, fetchPlatformUsage, signOut } from './lib/db';
+import {
+  fetchCapacityAlerts, fetchCurrentUser, fetchPlatformUsage, parseCapacityAlertRow, signOut,
+} from './lib/db';
 import { LEDGER_MATCHING } from './lib/features';
 import { usePolling } from './lib/usePolling';
 
 type AppView = 'batches' | 'reviewer' | 'exporter' | 'users' | 'overview' | 'ledgers';
 const APP_VIEW_STORAGE_KEY = 'scan2tally-current-view';
 const APP_STATE_STORAGE_KEY = 'scan2tally-current-state';
+const CAPACITY_SEVERITY: Record<CapacityAlert['level'], number> = {
+  healthy: 0,
+  warning: 1,
+  critical: 2,
+  full: 3,
+};
+
+/**
+ * Realtime and the reconnect snapshot can arrive in either order. A resource's
+ * revision is assigned in Postgres, so an older bootstrap response can never
+ * replace a newer WebSocket event.
+ */
+function mergeCapacityAlerts(current: CapacityAlert[], incoming: CapacityAlert[]): CapacityAlert[] {
+  const byResource = new Map(current.map(alert => [alert.resource, alert]));
+  for (const alert of incoming) {
+    const existing = byResource.get(alert.resource);
+    if (!existing || alert.revision > existing.revision) {
+      byResource.set(alert.resource, alert);
+    }
+  }
+  return Array.from(byResource.values()).sort((left, right) => {
+    const severityDifference = CAPACITY_SEVERITY[right.level] - CAPACITY_SEVERITY[left.level];
+    if (severityDifference !== 0) return severityDifference;
+    return left.resource.localeCompare(right.resource);
+  });
+}
 
 function readSavedAppState(): {
   view?: AppView;
@@ -58,6 +89,7 @@ export default function App() {
   const [isDark, setIsDark] = useState<boolean>(true);
   const [platformUsage, setPlatformUsage] = useState<PlatformUsage | null>(null);
   const [capacityConnection, setCapacityConnection] = useState<CapacityConnectionState>('connecting');
+  const [capacityAlerts, setCapacityAlerts] = useState<CapacityAlert[]>([]);
 
   useEffect(() => {
     document.body.classList.toggle('light', !isDark);
@@ -138,10 +170,10 @@ export default function App() {
     }
   };
 
-  // Load once after authentication. Detailed numbers are returned only for a
-  // Super Admin; every role receives enough state to display a capacity alert.
+  // Exact metrics are operational Super Admin data. Admins and Operators never
+  // call this endpoint; their sanitized warnings arrive through Realtime below.
   useEffect(() => {
-    if (!currentUser) {
+    if (currentUser?.role !== 'Super Admin') {
       setPlatformUsage(null);
       setCapacityConnection('connecting');
       return;
@@ -155,16 +187,68 @@ export default function App() {
       // deployment/configuration problem stays out of the user-facing dashboard.
     });
     return () => controller.abort();
-  }, [currentUser?.id]);
+  }, [currentUser?.id, currentUser?.role]);
 
   // A 30-second snapshot is near-real-time for an aggregate capacity metric.
   // The polling hook prevents overlap and backs off while Supabase is unavailable.
   usePolling(async ({ signal }) => refreshPlatformUsage(signal), {
-    enabled: Boolean(currentUser),
+    enabled: currentUser?.role === 'Super Admin',
     intervalMs: 30000,
     maxIntervalMs: 120000,
     resetKey: currentUser?.id || '',
   });
+
+  // Admins and Operators receive capacity transitions over Supabase Realtime.
+  // Subscribe first, then read the persisted snapshot: this closes the gap for
+  // alerts raised before sign-in and re-hydrates after every reconnect.
+  useEffect(() => {
+    if (!currentUser || currentUser.role === 'Super Admin') {
+      setCapacityAlerts([]);
+      return;
+    }
+
+    let cancelled = false;
+    setCapacityAlerts([]);
+
+    const hydrate = async () => {
+      try {
+        const alerts = await fetchCapacityAlerts();
+        if (!cancelled) {
+          setCapacityAlerts(current => mergeCapacityAlerts(current, alerts));
+        }
+      } catch {
+        // Realtime is supplemental to the rest of the workspace. The channel
+        // will retry and hydrate again when it reconnects, without displaying a
+        // technical database/setup error to staff.
+      }
+    };
+
+    const channel = supabase
+      .channel(`platform-capacity-alerts-${currentUser.id}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'platform_capacity_alerts' },
+        payload => {
+          const alert = parseCapacityAlertRow(payload.new);
+          if (!cancelled && alert) {
+            setCapacityAlerts(current => mergeCapacityAlerts(current, [alert]));
+          }
+        }
+      )
+      .subscribe(status => {
+        if (status === 'SUBSCRIBED') void hydrate();
+      });
+
+    // Do not make the persisted warning depend on the WebSocket handshake.
+    // The second read on SUBSCRIBED closes the small query/subscribe race, and
+    // the revision merge makes both reads safe in either arrival order.
+    void hydrate();
+
+    return () => {
+      cancelled = true;
+      void supabase.removeChannel(channel);
+    };
+  }, [currentUser?.id, currentUser?.role]);
 
   const handleAuthenticated = () => {
     setAuthError(null);
@@ -234,7 +318,7 @@ export default function App() {
       />
 
       <main className="main-content">
-        {currentUser && platformUsage && platformUsage.level !== 'healthy' && (
+        {currentUser?.role === 'Super Admin' && platformUsage && platformUsage.level !== 'healthy' && (
           <div
             className={`capacity-alert capacity-alert-${platformUsage.level}`}
             role={platformUsage.level === 'warning' ? 'status' : 'alert'}
@@ -252,6 +336,27 @@ export default function App() {
               <span>{platformUsage.message}</span>
             </div>
             <span className="capacity-alert-percent">{platformUsage.percent.toFixed(1)}%</span>
+          </div>
+        )}
+        {currentUser && currentUser.role !== 'Super Admin' && (
+          <div className="capacity-alert-stack" aria-label="Platform capacity notifications">
+            {capacityAlerts
+              .filter(alert => alert.level !== 'healthy')
+              .map(alert => (
+                <div
+                  key={alert.resource}
+                  className={`capacity-alert capacity-alert-${alert.level}`}
+                  role={alert.level === 'warning' ? 'status' : 'alert'}
+                  aria-live={alert.level === 'warning' ? 'polite' : 'assertive'}
+                >
+                  <AlertTriangle size={18} />
+                  <div className="capacity-alert-copy">
+                    <strong>{alert.title}</strong>
+                    <span>{alert.message}</span>
+                  </div>
+                  <span className="capacity-alert-percent">{alert.percent.toFixed(1)}%</span>
+                </div>
+              ))}
           </div>
         )}
         {authLoading ? (

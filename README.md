@@ -51,21 +51,25 @@ Store and office staff write transaction details **by hand on paper receipts**. 
 
 ## 🧠 Two things worth knowing about the design
 
-### Extraction belongs to the server, not the tab
+### Extraction belongs to a durable, sequential server queue
 
 Reading a voucher takes tens of seconds. If that work lives inside the browser's HTTP request,
 closing the tab, refreshing, or shutting a laptop lid abandons it — and the receipt is left saying
 "Processing" with nothing in existence able to finish it.
 
-So `POST /api/receipts/{id}/extract` returns `202` immediately and the server does the work: it
-reads the image out of storage itself, runs the extraction, and writes both the rows and the final
-status straight to the database. The browser's only jobs are to start the work and to watch the
-receipt row, which leaves it free to disappear at any moment.
+So `POST /api/receipts/{id}/extract` returns `202` immediately and places the receipt in a durable
+Supabase Queue. The backend reads the image from private storage, runs OCR, and atomically writes
+the rows and final receipt state. The browser watches receipt changes through Supabase Realtime,
+with polling as a recovery path, so closing the tab cannot abandon the work.
 
-An extraction that dies with its process is picked up on start-up. Each job is **claimed** by the
-process running it, and the claim is refreshed while that process is alive, so a booting instance
-takes over only work whose claim nobody is refreshing — which is what makes it safe to run more
-than one backend process.
+There is one database-owned worker slot for the whole platform. Even with several backend replicas
+and several users uploading together, only one receipt can be in OCR at a time; the next FIFO
+message is claimed only after the current one finishes or its lease expires. Every heartbeat and
+final write carries a fencing token, so a crashed or delayed old worker cannot overwrite a newer
+attempt. Files selected together are also uploaded one at a time in their original order.
+
+This uses the Postgres-native `pgmq` extension already available through Supabase Queues. Redis and
+BullMQ are not required for this Python/Supabase deployment.
 
 ### A ledger name Tally does not recognise is not a typo
 
@@ -183,15 +187,30 @@ Editor. They are additive and safe to run more than once.
 | `003_export_file_storage.sql` | private storage and policies for generated Excel files |
 | `004_platform_capacity_usage.sql` | service-role-only Storage and database capacity metrics |
 | `005_platform_database_cluster_usage.sql` | corrects database usage to include the entire Postgres cluster |
+| `006_capacity_alerts_realtime.sql` | persisted, role-safe capacity warnings delivered through Supabase Realtime |
+| `007_sequential_extraction_queue.sql` | durable PGMQ extraction jobs, a global one-worker lease, fenced atomic completion, and receipt Realtime updates |
 
 **Run `002` before deploying this version of the web app** — it reads the ledger columns the
 migration adds, and will show a load error without them.
 
-**Run `004` to enable the database-size metric.** Before it is applied, the monitor still tracks
-file storage live through the server-side Storage API; the Super Admin dashboard marks only the
-database metric as unavailable. Admin and Operator capacity warnings continue to use every live
-metric that is available. The frontend refreshes every 30 seconds, and the backend shares a
-25-second snapshot so several signed-in users do not each trigger the same aggregate scan.
+**Run `007` before relying on sequential processing in production.** Stop the old backend, run the
+migration in the Supabase SQL Editor, then start the new backend. The migration enables `pgmq`,
+creates the private `receipt_extraction` queue, and safely moves receipts stranded in the old
+`Processing` state into it. It is safe to run again. Without `007`, the backend deliberately falls
+back to one local worker for rollout compatibility, but that fallback cannot coordinate separate
+backend machines.
+
+**Run `004`, `005`, and `006` to enable the complete capacity monitor.** The backend measures the
+project on one configurable schedule and writes only sanitized storage/database severity
+transitions to `platform_capacity_alerts`. Admin and Operator sessions load any existing warning
+at sign-in, then receive later changes over an authenticated Supabase Realtime connection; their
+browsers never call `/api/platform-usage`. The exact live byte counts and bucket breakdown remain
+available only to the Super Admin through that protected endpoint.
+
+The app must be open for a warning to appear instantly. Because the current alert is persisted,
+someone who signs in later still sees it immediately without opening a monitoring page. The
+backend process must remain running to perform measurements; set
+`SUPABASE_CAPACITY_ALERT_INTERVAL_SECONDS` to tune the detection interval (30 seconds by default).
 
 The in-app monitor reports **current live bytes**. Supabase's organization-level Free plan usage
 card reports billing-cycle averages, so its Storage number can legitimately lag behind or differ

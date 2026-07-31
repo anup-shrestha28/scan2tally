@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, MoreHorizontal, ChevronLeft, ChevronRight } from 'lucide-react';
-import { ScanBatch, Receipt, User, Transaction } from '../types';
+import { ScanBatch, Receipt, ReceiptDisplayStatus, User, Transaction } from '../types';
+import { supabase } from '../lib/supabase';
+import { usePolling } from '../lib/usePolling';
 import {
   newId,
   fetchBatches,
@@ -11,10 +13,15 @@ import {
   createReceipt,
   updateReceiptRow,
   deleteReceipt,
+  deleteReceiptImages,
   uploadReceiptImage,
+  validateReceiptUploadFile,
+  RECEIPT_UPLOAD_ACCEPT,
   getReceiptImageUrl,
   startReceiptExtraction,
   fetchReceiptStates,
+  parseReceiptServerState,
+  ReceiptServerState,
   fetchTransactionsForBatch,
   fetchExportsForBatch,
   downloadExportFile,
@@ -28,7 +35,7 @@ import {
  * voucher has finished — including one that was started before the tab was
  * last closed.
  */
-const EXTRACTION_POLL_MS = 3000;
+const EXTRACTION_POLL_MS = 10000;
 
 const NOT_JOURNAL_ENTRY_ERROR = 'The uploaded image is not a journal entry. Please check and try again.';
 
@@ -51,6 +58,84 @@ const ACTIVE_BATCH_STORAGE_KEY = 'scan2tally-active-batch';
  */
 const MIN_IMAGE_SHORT_EDGE = 1000;
 const RECEIPTS_PER_PAGE = 10;
+
+interface ReceiptUploadTask {
+  receiptId: string;
+  filename: string;
+  previewUrl: string;
+  file: File;
+  batchId: string;
+  organizationId: string;
+  userId: string;
+}
+
+function isReceiptQueued(receipt: Receipt): boolean {
+  return receipt.status === 'Pending' && (
+    receipt.extraction_queue_message_id != null || receipt.enqueue_accepted === true
+  );
+}
+
+function receiptDisplayStatus(receipt: Receipt): ReceiptDisplayStatus {
+  return isReceiptQueued(receipt) ? 'Queued' : receipt.status;
+}
+
+function uploadIsBusy(receipt: Receipt): boolean {
+  return receipt.upload_state === 'waiting' || receipt.upload_state === 'uploading';
+}
+
+function uploadIsComplete(receipt: Receipt): boolean {
+  return receipt.upload_state === 'uploaded' || Boolean(receipt.storage_path);
+}
+
+function isTerminalReceiptStatus(status: Receipt['status']): boolean {
+  return status === 'Extracted' || status === 'Failed';
+}
+
+function timestampMs(value?: string): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+/**
+ * A Realtime event and an in-flight poll can arrive out of order. Generation
+ * is authoritative across retries; updated_at orders transitions within one
+ * generation. The final guards cover legacy rows while migration 007 rolls out.
+ */
+function receiptServerStateCanAdvance(receipt: Receipt, state: ReceiptServerState): boolean {
+  const currentGeneration = receipt.extraction_generation ?? 0;
+  const incomingGeneration = state.extraction_generation ?? currentGeneration;
+  if (incomingGeneration < currentGeneration) return false;
+  if (incomingGeneration > currentGeneration) return true;
+
+  const currentUpdatedAt = timestampMs(receipt.updated_at);
+  const incomingUpdatedAt = timestampMs(state.updated_at);
+  if (currentUpdatedAt !== null && incomingUpdatedAt !== null) {
+    if (incomingUpdatedAt < currentUpdatedAt) return false;
+    if (incomingUpdatedAt > currentUpdatedAt) return true;
+  }
+
+  // A successful enqueue can briefly precede its Realtime echo. Do not let a
+  // same-generation response captured before that POST undo the local bridge.
+  if (
+    (receipt.enqueue_accepted || receipt.extraction_queue_message_id != null) &&
+    state.extraction_queue_message_id == null &&
+    state.status !== 'Processing'
+  ) {
+    return false;
+  }
+
+  // Equal/unknown ordering metadata must never move a terminal row backwards.
+  if (isTerminalReceiptStatus(receipt.status) && !isTerminalReceiptStatus(state.status)) return false;
+  return true;
+}
+
+/** Durable extraction order is independent from the newest-first file table. */
+function compareReceiptCreationOldestFirst(left: Receipt, right: Receipt): number {
+  const leftCreated = timestampMs(left.created_at) ?? 0;
+  const rightCreated = timestampMs(right.created_at) ?? 0;
+  return leftCreated - rightCreated || left.id.localeCompare(right.id);
+}
 
 function isLowResolution(receipt: Receipt): boolean {
   if (!receipt.image_width || !receipt.image_height) return false;
@@ -83,6 +168,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [uploadValidationError, setUploadValidationError] = useState<string | null>(null);
 
   const [activeBatchId, setActiveBatchId] = useState<string>('');
   const [editingBatchId, setEditingBatchId] = useState<string | null>(null);
@@ -134,9 +220,13 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     };
   }, [openBatchMenuId]);
 
-  // The server reads the image out of storage, so an extraction must not be
-  // requested until that upload has actually landed.
-  const uploadsRef = useRef<Record<string, Promise<void>>>({});
+  // One FIFO covers repeated selections as well as a single multi-file pick.
+  // Only the worker removes tasks, so file N+1 cannot begin before N settles.
+  const uploadQueueRef = useRef<ReceiptUploadTask[]>([]);
+  const uploadWorkerRunningRef = useRef(false);
+  // Gives optimistic rows a strict order even when several FileList selections
+  // happen inside the same millisecond. Server created_at replaces it on insert.
+  const optimisticReceiptClockRef = useRef(0);
   // Read inside the polling loop, which must not close over a stale render.
   const batchesRef = useRef<ScanBatch[]>([]);
   // Batches whose stored transactions have already been loaded.
@@ -166,16 +256,25 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const isArchived = activeBatch?.status === 'Archived';
   // Derived from the receipts themselves rather than tracked separately, so a
   // reopened tab shows work still running on the server.
-  const batchIsProcessing = (batch: ScanBatch) => batch.receipts.some(r => r.status === 'Processing');
-  const isProcessing = startingExtraction || activeReceipts.some(r => r.status === 'Processing');
+  const batchIsProcessing = (batch: ScanBatch) => batch.receipts.some(
+    r => r.status === 'Processing' || isReceiptQueued(r)
+  );
+  const batchIsUploading = (batch: ScanBatch) => batch.receipts.some(uploadIsBusy);
+  const isUploading = activeReceipts.some(uploadIsBusy);
+  const isProcessing = startingExtraction || activeReceipts.some(
+    r => r.status === 'Processing' || isReceiptQueued(r)
+  );
   const uploadsLocked = isProcessing || isArchived;
-  const extractableCount = activeReceipts.filter(r => r.status === 'Pending' || r.status === 'Failed').length;
+  const extractableCount = activeReceipts.filter(
+    r => (r.status === 'Pending' || r.status === 'Failed') &&
+      !isReceiptQueued(r) && uploadIsComplete(r)
+  ).length;
   const allReceiptsExtracted = activeReceipts.length > 0 && activeReceipts.every(r => r.status === 'Extracted');
-  const hasFailedExtraction = activeReceipts.some(r => r.status === 'Failed');
   // Only counts receipts still awaiting extraction — no point nagging about
   // photos that have already been processed.
   const lowResPendingCount = activeReceipts.filter(
-    r => (r.status === 'Pending' || r.status === 'Failed') && isLowResolution(r)
+    r => (r.status === 'Pending' || r.status === 'Failed') &&
+      !isReceiptQueued(r) && uploadIsComplete(r) && isLowResolution(r)
   ).length;
 
   useEffect(() => {
@@ -206,6 +305,17 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
         );
 
         if (cancelled) return;
+        const latestDurableReceiptTime = loaded.reduce(
+          (latest, batch) => batch.receipts.reduce(
+            (batchLatest, receipt) => Math.max(batchLatest, timestampMs(receipt.created_at) ?? 0),
+            latest
+          ),
+          0
+        );
+        optimisticReceiptClockRef.current = Math.max(
+          optimisticReceiptClockRef.current,
+          latestDurableReceiptTime
+        );
         setBatches(loaded);
         const rememberedBatchId = sessionStorage.getItem(ACTIVE_BATCH_STORAGE_KEY);
         const nextBatchId = rememberedBatchId && loaded.some(b => b.id === rememberedBatchId)
@@ -225,6 +335,70 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   useEffect(() => {
     batchesRef.current = batches;
   }, [batches]);
+
+  const applyReceiptStates = async (states: ReceiptServerState[]) => {
+    if (!states.length) return;
+    const currentBatches = batchesRef.current;
+    const currentReceipts = new Map(
+      currentBatches.flatMap(batch => batch.receipts.map(receipt => [receipt.id, receipt] as const))
+    );
+
+    // Transactions are committed before the backend announces Extracted. Load
+    // them before updating the visible status so Review never opens on an empty
+    // in-memory map merely because the Realtime event arrived quickly.
+    const extractedIds = new Set(states
+      .filter(state => {
+        const current = currentReceipts.get(state.id);
+        return Boolean(
+          current &&
+          state.status === 'Extracted' &&
+          current.status !== 'Extracted' &&
+          receiptServerStateCanAdvance(current, state)
+        );
+      })
+      .map(state => state.id));
+    const affectedBatchIds = currentBatches
+      .filter(batch => batch.receipts.some(receipt => extractedIds.has(receipt.id)))
+      .map(batch => batch.id);
+    await Promise.all(affectedBatchIds.map(async batchId => {
+      try {
+        const stored = await fetchTransactionsForBatch(batchId);
+        setReceiptTransactionsMap(previous => ({ ...previous, ...stored }));
+      } catch {
+        // Status is still authoritative; reopening the batch retries this read.
+        loadedTxBatchesRef.current.delete(batchId);
+      }
+    }));
+
+    const updates = new Map(states.map(state => [state.id, state]));
+    setBatches(previous => previous.map(batch => ({
+      ...batch,
+      receipts: batch.receipts.map(receipt => {
+        const state = updates.get(receipt.id);
+        if (!state || !receiptServerStateCanAdvance(receipt, state)) return receipt;
+        const nextQueueMessageId = state.extraction_queue_message_id !== undefined
+          ? state.extraction_queue_message_id
+          : receipt.extraction_queue_message_id;
+        const hasDurableQueueMarker = nextQueueMessageId != null;
+        return {
+          ...receipt,
+          status: state.status,
+          error_message: state.error_message,
+          verification_warnings: state.verification_warnings,
+          extraction_queue_message_id: nextQueueMessageId,
+          extraction_queued_at: state.extraction_queued_at !== undefined
+            ? state.extraction_queued_at
+            : receipt.extraction_queued_at,
+          extraction_generation: state.extraction_generation ?? receipt.extraction_generation,
+          updated_at: state.updated_at ?? receipt.updated_at,
+          enqueue_accepted: state.status === 'Pending' && !hasDurableQueueMarker
+            ? receipt.enqueue_accepted
+            : false,
+          enqueue_error: undefined,
+        };
+      }),
+    })));
+  };
 
   // Pull in transactions that were extracted previously. Without this, a batch
   // opened in a new session looks empty even though its rows are safely stored.
@@ -258,74 +432,55 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     return () => { cancelled = true; };
   }, [activeBatch?.id]);
 
-  // Watch whatever the server is still extracting, wherever it was started
-  // from. This is what replaces the old "wait for the HTTP response" flow, and
-  // it works just as well for a run that began before this tab existed.
+  // Realtime is the primary path. Polling these ids is the recovery path for a
+  // temporarily disconnected socket or a deployment where replication has not
+  // yet been enabled for receipts.
   const processingIds = batches
-    .flatMap(b => b.receipts.filter(r => r.status === 'Processing').map(r => r.id))
+    .flatMap(b => b.receipts
+      .filter(r => r.status === 'Processing' || isReceiptQueued(r))
+      .map(r => r.id))
     .sort();
   const processingKey = processingIds.join(',');
 
   useEffect(() => {
-    if (!processingKey) return;
-    const watching = processingKey.split(',');
     let cancelled = false;
-    let timer: number | undefined;
-
-    const check = async () => {
-      try {
-        const states = await fetchReceiptStates(watching);
-        if (cancelled) return;
-
-        const finished = states.filter(s => s.status !== 'Processing');
-        if (finished.length) {
-          const finishedIds = new Set(finished.map(f => f.id));
-
-          // Load the rows the server saved before flipping the status on
-          // screen, so a receipt never appears Extracted with nothing behind it.
-          const affectedBatchIds = new Set(
-            batchesRef.current
-              .filter(b => b.receipts.some(r => finishedIds.has(r.id)))
-              .map(b => b.id)
-          );
-          for (const batchId of affectedBatchIds) {
-            try {
-              const stored = await fetchTransactionsForBatch(batchId);
-              if (cancelled) return;
-              setReceiptTransactionsMap(prev => ({ ...prev, ...stored }));
-            } catch {
-              // The status update below still stands; the rows load on reopen.
-            }
-          }
-
-          setBatches(prev => prev.map(b => ({
-            ...b,
-            receipts: b.receipts.map(r => {
-              const update = finished.find(f => f.id === r.id);
-              return update
-                ? {
-                    ...r,
-                    status: update.status,
-                    error_message: update.error_message,
-                    verification_warnings: update.verification_warnings,
-                  }
-                : r;
-            }),
-          })));
+    const channel = supabase
+      .channel(`receipt-state-${currentUser.id}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'receipts' },
+        payload => {
+          const state = parseReceiptServerState(payload.new);
+          if (!cancelled && state) void applyReceiptStates([state]);
         }
-      } catch {
-        // Transient — the next tick tries again rather than surfacing a scary
-        // error for what is usually a momentary network blip.
-      }
-      if (!cancelled) timer = window.setTimeout(check, EXTRACTION_POLL_MS);
-    };
+      )
+      .subscribe(status => {
+        if (status !== 'SUBSCRIBED') return;
+        const ids = batchesRef.current.flatMap(batch => batch.receipts
+          .filter(receipt => receipt.status === 'Processing' || isReceiptQueued(receipt))
+          .map(receipt => receipt.id));
+        if (ids.length) {
+          fetchReceiptStates(ids)
+            .then(states => { if (!cancelled) return applyReceiptStates(states); })
+            .catch(() => { /* polling below remains the fallback */ });
+        }
+      });
 
-    timer = window.setTimeout(check, EXTRACTION_POLL_MS);
     return () => {
       cancelled = true;
-      if (timer) window.clearTimeout(timer);
+      void supabase.removeChannel(channel);
     };
-  }, [processingKey]);
+  }, [currentUser.id]);
+
+  usePolling(async ({ signal }) => {
+    const states = await fetchReceiptStates(processingKey ? processingKey.split(',') : []);
+    if (!signal.aborted) await applyReceiptStates(states);
+  }, {
+    enabled: Boolean(processingKey),
+    intervalMs: EXTRACTION_POLL_MS,
+    maxIntervalMs: 60000,
+    resetKey: processingKey,
+  });
 
   // Open the reviewer once a run this tab started has finished, preserving the
   // old behaviour of not making the user click through manually.
@@ -338,7 +493,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
       autoOpenRef.current = null;
       return;
     }
-    if (batch.receipts.some(r => r.status === 'Processing')) return;
+    if (batch.receipts.some(r => r.status === 'Processing' || isReceiptQueued(r))) return;
 
     autoOpenRef.current = null;
     const firstExtracted = batch.receipts.find(
@@ -441,10 +596,11 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     // not the one on screen. Deleting it would leave a job writing rows that
     // no longer have anything to belong to.
     const target = batches.find(b => b.id === id);
-    if ((target && batchIsProcessing(target)) || (startingExtraction && id === activeBatchId)) {
-      setSaveError('This batch cannot be deleted while extraction is in progress.');
+    if ((target && (batchIsProcessing(target) || batchIsUploading(target))) || (startingExtraction && id === activeBatchId)) {
+      setSaveError('This batch cannot be deleted while an upload or extraction is in progress.');
       return;
     }
+    const storedPaths = target?.receipts.flatMap(receipt => receipt.storage_path ? [receipt.storage_path] : []) || [];
     const snapshot = batches;
     const remaining = batches.filter(b => b.id !== id);
     setBatches(remaining);
@@ -457,7 +613,12 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     setDeletingBatchId(null);
     try {
       await deleteBatch(id);
-      setSaveError(null);
+      try {
+        await deleteReceiptImages(storedPaths);
+        setSaveError(null);
+      } catch (err: any) {
+        setSaveError(`Batch deleted, but some stored images could not be cleaned up: ${err?.message || 'unknown error'}`);
+      }
     } catch (err: any) {
       setBatches(snapshot);
       setSaveError(err?.message || 'Could not delete the batch.');
@@ -472,8 +633,8 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
    * button people would otherwise reach for to tidy up.
    */
   const handleToggleArchive = async (batch: ScanBatch) => {
-    if (batchIsProcessing(batch)) {
-      setSaveError('This batch cannot be archived while extraction is in progress.');
+    if (batchIsProcessing(batch) || batchIsUploading(batch)) {
+      setSaveError('This batch cannot be archived while an upload or extraction is in progress.');
       return;
     }
     const next = batch.status === 'Archived' ? 'Active' : 'Archived';
@@ -490,79 +651,176 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     }
   };
 
+  const updateReceipt = (batchId: string, receiptId: string, patch: Partial<Receipt>) => {
+    setBatches(previous => previous.map(batch => {
+      if (batch.id !== batchId) return batch;
+      return {
+        ...batch,
+        receipts: batch.receipts.map(receipt =>
+          receipt.id === receiptId ? { ...receipt, ...patch } : receipt
+        ),
+      };
+    }));
+  };
+
+  const drainUploadQueue = async () => {
+    if (uploadWorkerRunningRef.current) return;
+    uploadWorkerRunningRef.current = true;
+    try {
+      let task: ReceiptUploadTask | undefined;
+      while ((task = uploadQueueRef.current.shift())) {
+        updateReceipt(task.batchId, task.receiptId, {
+          upload_state: 'uploading',
+          upload_error: undefined,
+        });
+
+        try {
+          // Receipt creation is idempotent, which makes a failed upload safely
+          // retryable without replacing server-owned extraction fields.
+          const persisted = await createReceipt({
+            id: task.receiptId,
+            batchId: task.batchId,
+            userId: task.userId,
+            filename: task.filename,
+          });
+          if (persisted.created_at || persisted.updated_at) {
+            updateReceipt(task.batchId, task.receiptId, {
+              created_at: persisted.created_at,
+              updated_at: persisted.updated_at,
+            });
+          }
+
+          // Measurement starts only after the receipt row exists. It may run
+          // alongside this file's upload, but the next file still waits for both.
+          const dimensionsPromise = task.file.type === 'application/pdf'
+            ? Promise.resolve(null)
+            : measureImage(task.previewUrl);
+          const path = await uploadReceiptImage(task.file, {
+            organizationId: task.organizationId,
+            batchId: task.batchId,
+            receiptId: task.receiptId,
+          });
+          const dimensions = await dimensionsPromise;
+          await updateReceiptRow(task.receiptId, {
+            file_path: path,
+            ...(dimensions ? {
+              image_width: dimensions.width,
+              image_height: dimensions.height,
+            } : {}),
+          });
+          updateReceipt(task.batchId, task.receiptId, {
+            storage_path: path,
+            upload_state: 'uploaded',
+            upload_error: undefined,
+            ...(dimensions ? {
+              image_width: dimensions.width,
+              image_height: dimensions.height,
+            } : {}),
+          });
+        } catch (err: any) {
+          updateReceipt(task.batchId, task.receiptId, {
+            upload_state: 'failed',
+            upload_error: err?.message || 'The file could not be uploaded.',
+          });
+        }
+      }
+    } finally {
+      uploadWorkerRunningRef.current = false;
+      // A selection made as the worker was finishing must not be stranded.
+      if (uploadQueueRef.current.length) void drainUploadQueue();
+    }
+  };
+
+  const enqueueUpload = (task: ReceiptUploadTask) => {
+    updateReceipt(task.batchId, task.receiptId, {
+      upload_state: 'waiting',
+      upload_error: undefined,
+    });
+    uploadQueueRef.current.push(task);
+    void drainUploadQueue();
+  };
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement> | { target: { files: FileList | File[] } }) => {
-    const files = Array.from(e.target.files || []);
+    const selectedFiles = Array.from(e.target.files || []);
+    if (!selectedFiles.length || !activeBatch || !currentUser.organization_id) return;
+
+    const invalidFiles = selectedFiles.filter(file => validateReceiptUploadFile(file));
+    const files = selectedFiles.filter(file => !validateReceiptUploadFile(file));
+    if (invalidFiles.length) {
+      const names = invalidFiles.slice(0, 3).map(file => file.name).join(', ');
+      const remainder = invalidFiles.length > 3 ? ` and ${invalidFiles.length - 3} more` : '';
+      setUploadValidationError(
+        `${invalidFiles.length === 1 ? 'This file was' : 'These files were'} skipped: ${names}${remainder}. ` +
+        'Only JPG, JPEG, PNG, WEBP, and PDF files are supported.'
+      );
+    } else {
+      setUploadValidationError(null);
+    }
+
+    // Selecting the exact same file again should still trigger onChange.
+    if ('value' in e.target) (e.target as HTMLInputElement).value = '';
     if (!files.length) return;
-    if (!activeBatch || !currentUser.organization_id) return;
 
     const batchId = activeBatch.id;
-    const newFilesMap: Record<string, File> = { ...uploadedFilesMap };
-
-    const newReceipts: Receipt[] = files.map(file => {
-      const rcptId = newId();
-      newFilesMap[rcptId] = file;
-      return {
-        id: rcptId,
+    const firstCreatedAt = Math.max(Date.now(), optimisticReceiptClockRef.current + 1);
+    optimisticReceiptClockRef.current = firstCreatedAt + files.length - 1;
+    const newReceipts = files.map((file, index) => ({
+      receipt: {
+        id: newId(),
         filename: file.name,
-        status: 'Pending',
-        previewUrl: URL.createObjectURL(file)
-      };
-    });
-
-    setUploadedFilesMap(newFilesMap);
-    setReceiptPage(1);
-
-    setBatches(prev => prev.map(b => {
-      if (b.id === batchId) {
-        return { ...b, receipts: [...newReceipts, ...b.receipts] };
-      }
-      return b;
+        status: 'Pending' as const,
+        previewUrl: URL.createObjectURL(file),
+        upload_state: 'waiting' as const,
+        created_at: new Date(firstCreatedAt + index).toISOString(),
+        updated_at: new Date(firstCreatedAt + index).toISOString(),
+        extraction_generation: 0,
+      },
+      file,
     }));
 
-    // Persist the row first so the receipt survives a refresh even if the
-    // image upload is still running, then attach the stored image. The promise
-    // is kept because extraction happens server-side now: the server reads the
-    // image from storage, so it cannot be asked to start until this has landed.
-    newReceipts.forEach(receipt => {
-      const file = newFilesMap[receipt.id];
-      uploadsRef.current[receipt.id] = (async () => {
-        try {
-          await createReceipt({
-            id: receipt.id,
-            batchId,
-            userId: currentUser.id,
-            filename: receipt.filename,
-          });
-          const path = await uploadReceiptImage(file, {
-            organizationId: currentUser.organization_id!,
-            batchId,
-            receiptId: receipt.id,
-          });
-          await updateReceiptRow(receipt.id, { file_path: path });
-          updateReceipt(batchId, receipt.id, { storage_path: path });
-          setSaveError(null);
-        } catch (err: any) {
-          setSaveError(
-            `"${receipt.filename}" could not be saved to the server (${err?.message || 'unknown error'}). ` +
-            `It cannot be extracted until it uploads successfully.`
-          );
-        }
-      })();
-    });
+    // Functional merge avoids losing an earlier selection made before React has
+    // rendered this one. FileList order is retained in the FIFO below.
+    setUploadedFilesMap(previous => ({
+      ...previous,
+      ...Object.fromEntries(newReceipts.map(({ receipt, file }) => [receipt.id, file])),
+    }));
+    setReceiptPage(1);
+    setBatches(previous => previous.map(batch => batch.id === batchId
+      ? { ...batch, receipts: [...newReceipts.map(item => item.receipt), ...batch.receipts] }
+      : batch));
 
-    // Measure in the background so the thumbnails appear immediately. PDFs are
-    // skipped — there is no bitmap to measure.
-    newReceipts.forEach(receipt => {
-      const file = newFilesMap[receipt.id];
-      if (file?.type === 'application/pdf') return;
-      measureImage(receipt.previewUrl).then(size => {
-        if (!size) return;
-        updateReceipt(batchId, receipt.id, { image_width: size.width, image_height: size.height });
-        updateReceiptRow(receipt.id, {
-          image_width: size.width,
-          image_height: size.height,
-        }).catch(() => { /* dimensions are advisory; a failure here is not worth interrupting for */ });
+    for (const { receipt, file } of newReceipts) {
+      uploadQueueRef.current.push({
+        receiptId: receipt.id,
+        filename: receipt.filename,
+        previewUrl: receipt.previewUrl,
+        file,
+        batchId,
+        organizationId: currentUser.organization_id,
+        userId: currentUser.id,
       });
+    }
+    void drainUploadQueue();
+  };
+
+  const handleRetryUpload = (receipt: Receipt) => {
+    if (!activeBatch || !currentUser.organization_id || uploadIsBusy(receipt)) return;
+    const file = uploadedFilesMap[receipt.id];
+    if (!file) {
+      updateReceipt(activeBatch.id, receipt.id, {
+        upload_state: 'failed',
+        upload_error: 'The original file is no longer available in this browser. Remove this row and upload the file again.',
+      });
+      return;
+    }
+    enqueueUpload({
+      receiptId: receipt.id,
+      filename: receipt.filename,
+      previewUrl: receipt.previewUrl,
+      file,
+      batchId: activeBatch.id,
+      organizationId: currentUser.organization_id,
+      userId: currentUser.id,
     });
   };
 
@@ -570,11 +828,13 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     if (!activeBatch) return;
     const batchId = activeBatch.id;
     const receipt = activeBatch.receipts.find(r => r.id === receiptId);
-    const snapshot = batches;
-
-    if (receipt?.previewUrl?.startsWith('blob:')) {
-      URL.revokeObjectURL(receipt.previewUrl);
+    if (receipt && uploadIsBusy(receipt)) {
+      setSaveError('Wait for this upload to finish before deleting the receipt.');
+      return;
     }
+    const snapshot = batches;
+    const originalFile = uploadedFilesMap[receiptId];
+    const originalTransactions = receiptTransactionsMap[receiptId];
 
     setUploadedFilesMap(prev => {
       const next = { ...prev };
@@ -597,34 +857,27 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
 
     try {
       await deleteReceipt(receiptId);
-      setSaveError(null);
+      if (receipt?.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(receipt.previewUrl);
+      if (receipt?.storage_path) {
+        try {
+          await deleteReceiptImages([receipt.storage_path]);
+          setSaveError(null);
+        } catch (err: any) {
+          setSaveError(`Receipt deleted, but its stored image could not be cleaned up: ${err?.message || 'unknown error'}`);
+        }
+      } else {
+        setSaveError(null);
+      }
     } catch (err: any) {
       setBatches(snapshot);
+      if (originalFile) {
+        setUploadedFilesMap(previous => ({ ...previous, [receiptId]: originalFile }));
+      }
+      if (originalTransactions) {
+        setReceiptTransactionsMap(previous => ({ ...previous, [receiptId]: originalTransactions }));
+      }
       setSaveError(err?.message || 'Could not delete the receipt.');
     }
-  };
-
-  const updateReceipt = (batchId: string, receiptId: string, patch: Partial<Receipt>) => {
-    setBatches(prev => prev.map(b => {
-      if (b.id !== batchId) return b;
-      return { ...b, receipts: b.receipts.map(r => r.id === receiptId ? { ...r, ...patch } : r) };
-    }));
-  };
-
-  /**
-   * Mirrors a receipt's extraction outcome into the database.
-   *
-   * Kept separate from updateReceipt so the on-screen state updates instantly
-   * while the write happens in the background; a failed write must not wedge
-   * the extraction loop, so it only records a message.
-   */
-  const persistReceiptState = (
-    receiptId: string,
-    patch: { status?: string; error_message?: string | null; verification_warnings?: string[] }
-  ) => {
-    updateReceiptRow(receiptId, patch).catch((err: any) => {
-      setSaveError(`Could not save extraction status: ${err?.message || 'unknown error'}`);
-    });
   };
 
   /**
@@ -635,28 +888,36 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
    * result is picked up later by watching the receipt's status.
    */
   const beginExtraction = async (batchId: string, receipt: Receipt): Promise<void> => {
-    // The server fetches the image from storage, so the upload has to be
-    // finished first. Its own failure is reported by the upload itself.
-    try {
-      await uploadsRef.current[receipt.id];
-    } catch {
-      /* handled where the upload was started */
-    }
-
-    // Shown immediately so the row reacts to the click; the server sets the
-    // same status durably, which is what survives a refresh.
-    updateReceipt(batchId, receipt.id, {
-      status: 'Processing',
-      error_message: undefined,
-      verification_warnings: undefined,
-    });
+    if (!uploadIsComplete(receipt) || uploadIsBusy(receipt)) return;
 
     try {
-      await startReceiptExtraction(receipt.id);
+      const accepted = await startReceiptExtraction(receipt.id);
+      updateReceipt(batchId, receipt.id, accepted.status === 'Queued'
+        ? {
+            status: 'Pending',
+            enqueue_accepted: true,
+            enqueue_error: undefined,
+            ...(accepted.extraction_queue_message_id !== undefined
+              ? { extraction_queue_message_id: accepted.extraction_queue_message_id }
+              : {}),
+            ...(accepted.extraction_queued_at !== undefined
+              ? { extraction_queued_at: accepted.extraction_queued_at }
+              : {}),
+            error_message: undefined,
+            verification_warnings: undefined,
+          }
+        : {
+            status: accepted.status,
+            enqueue_accepted: false,
+            enqueue_error: undefined,
+            error_message: undefined,
+            verification_warnings: undefined,
+          });
     } catch (err: any) {
       const message = err?.message || 'Could not start extraction on the server.';
-      updateReceipt(batchId, receipt.id, { status: 'Failed', error_message: message });
-      persistReceiptState(receipt.id, { status: 'Failed', error_message: message });
+      // Queue/status columns are backend-owned. Keep the durable DB state intact
+      // and show this submission failure locally with a retry action.
+      updateReceipt(batchId, receipt.id, { enqueue_accepted: false, enqueue_error: message });
     }
   };
 
@@ -666,22 +927,37 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
 
     // US-25: only process receipts that are new or previously failed —
     // successfully extracted receipts are left untouched.
-    const targets = activeBatch.receipts.filter(r => r.status === 'Pending' || r.status === 'Failed');
+    const targets = activeBatch.receipts
+      .filter(r =>
+        (r.status === 'Pending' || r.status === 'Failed') &&
+        !isReceiptQueued(r) && uploadIsComplete(r)
+      )
+      // The table intentionally displays newest first; extraction does not.
+      // created_at survives refreshes and repeated picker/drop selections.
+      .sort(compareReceiptCreationOldestFirst);
     if (!targets.length) return;
 
     autoOpenRef.current = { batchId, receiptIds: targets.map(r => r.id) };
     setStartingExtraction(true);
-    // Queued one at a time so a rejected receipt cannot stop the rest (US-26).
-    // The server decides how many it actually reads at once.
-    for (const receipt of targets) {
-      await beginExtraction(batchId, receipt);
+    try {
+      // Enqueue requests are handed off in receipt order. One rejection is
+      // contained by beginExtraction and cannot prevent later receipts.
+      for (const receipt of targets) {
+        await beginExtraction(batchId, receipt);
+      }
+    } finally {
+      setStartingExtraction(false);
     }
-    setStartingExtraction(false);
   };
 
-  const handleRetryReceipt = (receipt: Receipt) => {
+  const handleRetryReceipt = async (receipt: Receipt) => {
     if (!activeBatch) return;
-    beginExtraction(activeBatch.id, receipt);
+    setStartingExtraction(true);
+    try {
+      await beginExtraction(activeBatch.id, receipt);
+    } finally {
+      setStartingExtraction(false);
+    }
   };
 
   const handleOpenReviewer = (receipt: Receipt) => {
@@ -767,6 +1043,20 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
           <AlertTriangle size={15} className="alert-icon" />
           <span className="alert-body">{saveError}</span>
           <button className="alert-dismiss" onClick={() => setSaveError(null)} title="Dismiss">
+            ×
+          </button>
+        </div>
+      )}
+      {uploadValidationError && (
+        <div className="alert alert-warning alert-top text-xs" role="alert">
+          <AlertTriangle size={15} className="alert-icon" />
+          <span className="alert-body">{uploadValidationError}</span>
+          <button
+            className="alert-dismiss"
+            onClick={() => setUploadValidationError(null)}
+            title="Dismiss"
+            aria-label="Dismiss upload format warning"
+          >
             ×
           </button>
         </div>
@@ -881,7 +1171,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                           <button
                             type="button"
                             role="menuitem"
-                            disabled={batchIsProcessing(b)}
+                            disabled={batchIsProcessing(b) || batchIsUploading(b)}
                             onClick={() => {
                               setOpenBatchMenuId(null);
                               handleToggleArchive(b);
@@ -894,7 +1184,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                             type="button"
                             role="menuitem"
                             className="batch-menu-danger"
-                            disabled={batchIsProcessing(b) || (startingExtraction && b.id === activeBatchId)}
+                            disabled={batchIsProcessing(b) || batchIsUploading(b) || (startingExtraction && b.id === activeBatchId)}
                             onClick={() => {
                               setOpenBatchMenuId(null);
                               if (b.receipts.length === 0) handleDeleteBatch(b.id);
@@ -954,9 +1244,9 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
               // extracted archived batch can still be opened and exported, so
               // the archive guard applies to extraction only.
               disabled={
+                isUploading ||
                 isProcessing ||
                 openingReview ||
-                hasFailedExtraction ||
                 (!allReceiptsExtracted && (!extractableCount || isArchived))
               }
               title={isArchived && !allReceiptsExtracted
@@ -968,10 +1258,15 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                   <Loader2 size={16} className="animate-spin" />
                   Opening review...
                 </>
+              ) : isUploading ? (
+                <>
+                  <Loader2 size={16} className="animate-spin" />
+                  Uploading receipts in order...
+                </>
               ) : isProcessing ? (
                 <>
                   <Loader2 size={16} className="animate-spin" />
-                  Extracting details...
+                  Queued / extracting...
                 </>
               ) : (
                 <>
@@ -1000,7 +1295,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
               type="file"
               className="dropzone-input"
               multiple
-              accept="image/*,.pdf"
+              accept={RECEIPT_UPLOAD_ACCEPT}
               onChange={handleFileUpload}
               disabled={uploadsLocked}
             />
@@ -1011,11 +1306,13 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
             <h4 className="dropzone-title">
               {isArchived ? 'This Batch is Archived'
                 : isProcessing ? 'Extraction in Progress — Uploads Locked'
+                : isUploading ? 'Uploading Receipts One at a Time'
                 : `Upload to ${activeBatch.name}`}
             </h4>
             <p className="dropzone-text">
               {isArchived ? 'Everything in it is still readable and exportable. Restore it to add more receipts.'
                 : isProcessing ? 'Please wait for the current batch to finish processing before adding more receipts.'
+                : isUploading ? 'New files can be added here and will join the end of the upload queue.'
                 : 'Drag and drop handwritten vouchers here, or browse your files'}
             </p>
             <div className="dropzone-cta">
@@ -1081,14 +1378,32 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                         <td>
                           <div className="stack-xs">
                             <span className={`status-pill ${
-                              rcpt.status === 'Extracted' ? 'status-extracted' :
-                              rcpt.status === 'Processing' ? 'status-processing' :
-                              rcpt.status === 'Failed' ? 'status-failed' : 'status-pending'
+                              rcpt.upload_state === 'waiting' ? 'status-queued' :
+                              rcpt.upload_state === 'uploading' ? 'status-processing' :
+                              rcpt.upload_state === 'failed' ? 'status-failed' :
+                              receiptDisplayStatus(rcpt) === 'Extracted' ? 'status-extracted' :
+                              receiptDisplayStatus(rcpt) === 'Processing' ? 'status-processing' :
+                              receiptDisplayStatus(rcpt) === 'Queued' ? 'status-queued' :
+                              receiptDisplayStatus(rcpt) === 'Failed' ? 'status-failed' : 'status-pending'
                             }`}>
-                              {rcpt.status === 'Extracted' ? <CheckCircle2 size={12} /> :
-                               rcpt.status === 'Failed' ? <AlertCircle size={12} /> : <Clock size={12} />}
-                              {rcpt.status}
+                              {rcpt.upload_state === 'failed' || receiptDisplayStatus(rcpt) === 'Failed'
+                                ? <AlertCircle size={12} />
+                                : receiptDisplayStatus(rcpt) === 'Extracted'
+                                  ? <CheckCircle2 size={12} />
+                                  : rcpt.upload_state === 'uploading'
+                                    ? <Loader2 size={12} className="animate-spin" />
+                                    : <Clock size={12} />}
+                              {rcpt.upload_state === 'waiting' ? 'Waiting to upload' :
+                               rcpt.upload_state === 'uploading' ? 'Uploading' :
+                               rcpt.upload_state === 'failed' ? 'Upload failed' :
+                               receiptDisplayStatus(rcpt)}
                             </span>
+                            {rcpt.upload_state === 'failed' && rcpt.upload_error && (
+                              <span className="receipt-error">{rcpt.upload_error}</span>
+                            )}
+                            {rcpt.enqueue_error && (
+                              <span className="receipt-error">{rcpt.enqueue_error}</span>
+                            )}
                             {rcpt.status === 'Failed' && rcpt.error_message && (
                               <span className="receipt-error">{rcpt.error_message}</span>
                             )}
@@ -1116,7 +1431,18 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                               </button>
                             )}
 
-                            {rcpt.status === 'Failed' && (
+                            {rcpt.upload_state === 'failed' && (
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => handleRetryUpload(rcpt)}
+                                title="Retry Upload"
+                                disabled={isProcessing || uploadIsBusy(rcpt)}
+                              >
+                                <RotateCw size={13} /> Retry Upload
+                              </button>
+                            )}
+
+                            {uploadIsComplete(rcpt) && (rcpt.status === 'Failed' || rcpt.enqueue_error) && !isReceiptQueued(rcpt) && (
                               <button
                                 className="btn btn-secondary btn-sm"
                                 onClick={() => handleRetryReceipt(rcpt)}
@@ -1127,12 +1453,12 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                               </button>
                             )}
 
-                            {rcpt.status !== 'Processing' && !isArchived && (
+                            {rcpt.status !== 'Processing' && !isReceiptQueued(rcpt) && !isArchived && (
                               <button
                                 className="btn btn-danger btn-sm"
                                 onClick={() => handleDeleteReceipt(rcpt.id)}
                                 title="Delete Receipt"
-                                disabled={isProcessing}
+                                disabled={isProcessing || uploadIsBusy(rcpt)}
                               >
                                 <Trash2 size={14} />
                               </button>
