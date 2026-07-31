@@ -10,18 +10,18 @@ services:
   - type: web
     name: scan2tally-api
     runtime: python
-    plan: starter
+    plan: free
     region: singapore
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
 
-    # Deliberately one instance, one uvicorn worker. The extraction queue is
-    # sequential platform-wide by design — exactly one voucher is read at a
-    # time — and each process starts its own consumer in the app lifespan.
+    # Left at the default single instance, single uvicorn worker. The extraction
+    # queue is sequential platform-wide by design — exactly one voucher is read
+    # at a time — and each process starts its own consumer in the app lifespan.
     # Scaling this out would run several consumers against the same queue.
-    numInstances: 1
+    # (numInstances is not settable on the free plan, hence no key here.)
 
     envVars:
       - key: PYTHON_VERSION
