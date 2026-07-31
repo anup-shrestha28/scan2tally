@@ -200,6 +200,10 @@ creates the private `receipt_extraction` queue, and safely moves receipts strand
 back to one local worker for rollout compatibility, but that fallback cannot coordinate separate
 backend machines.
 
+`007` requires `002`. If `007` was previously run out of order, stop the backend, apply `002`, rerun
+the idempotent `007`, and then restart the backend. This repairs the existing queue functions and
+lets `007` repeat its safe interrupted-receipt backfill.
+
 **Run `004`, `005`, and `006` to enable the complete capacity monitor.** The backend measures the
 project on one configurable schedule and writes only sanitized storage/database severity
 transitions to `platform_capacity_alerts`. Admin and Operator sessions load any existing warning

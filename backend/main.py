@@ -6,6 +6,7 @@ import base64
 import hashlib
 import asyncio
 import socket
+import time
 import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
@@ -1389,6 +1390,10 @@ EXTRACTION_QUEUE_POLL_SECONDS = max(
     0.5,
     _positive_env_number("EXTRACTION_QUEUE_POLL_SECONDS", 2.0),
 )
+EXTRACTION_QUEUE_ABSENCE_GRACE_SECONDS = max(
+    10.0,
+    _positive_env_number("EXTRACTION_QUEUE_ABSENCE_GRACE_SECONDS", 30.0),
+)
 EXTRACTION_QUEUE_VISIBILITY_SECONDS = max(
     EXTRACTION_TIMEOUT_SECONDS + EXTRACTION_FINALIZATION_MARGIN_SECONDS,
     int(_positive_env_number("EXTRACTION_QUEUE_VISIBILITY_SECONDS", 900.0)),
@@ -1443,6 +1448,15 @@ def receipt_job_select() -> str:
 # applied must not be sent rows or patches that carry them.
 ledger_matching_ready = False
 job_claiming_ready = False
+MIGRATION_002_REQUIRED_ERROR = (
+    "Extraction queue setup is incomplete. Apply "
+    "scripts/migrations/002_ledgers_claiming_audit.sql in Supabase, re-run "
+    "scripts/migrations/007_sequential_extraction_queue.sql, then restart the "
+    "backend."
+)
+extraction_queue_configuration_error: Optional[str] = None
+extraction_queue_absence_first_seen: Optional[float] = None
+extraction_queue_absence_confirmations = 0
 # True means migration 007 is healthy, False means its health RPC is confirmed
 # absent, and None means Supabase could not yet answer. The unknown state must
 # never fail open into the legacy worker because that could bypass a queue that
@@ -1482,7 +1496,25 @@ async def _column_exists(client: httpx.AsyncClient, table: str, column: str) -> 
         headers=_svc_headers(),
         params={"select": column, "limit": "1"},
     )
-    return res.status_code == 200
+    if res.status_code == 200:
+        return True
+
+    try:
+        body = res.json()
+    except ValueError:
+        body = None
+    code = str(body.get("code") or "") if isinstance(body, dict) else ""
+    if res.status_code in (400, 404) and code in {
+        "42703", "42P01", "PGRST204", "PGRST205",
+    }:
+        return False
+
+    context = _sanitized_supabase_error_context(res)
+    suffix = f" ({context})" if context else ""
+    raise RuntimeError(
+        f"Supabase schema probe for {table}.{column} failed with status "
+        f"{res.status_code}{suffix}."
+    )
 
 
 def _first_rpc_row(payload) -> Optional[dict]:
@@ -1497,44 +1529,109 @@ def _first_rpc_row(payload) -> Optional[dict]:
 async def detect_schema_features() -> None:
     """Works out which optional features this database can support.
 
-    Everything here depends on migration 002. Running without it is a perfectly
-    reasonable state to be in — an existing deployment on the morning of an
-    upgrade — and the app should keep extracting vouchers in it rather than fail
-    every job on a missing column. What it must not do is fail quietly, hence
-    the warning.
+    Everything here depends on migration 002. An older deployment without 007
+    may keep using the single-process compatibility worker while it upgrades.
+    Once any 007 queue objects exist, however, missing 002 prerequisites are a
+    broken migration chain and must pause rather than bypass the global queue.
     """
-    global ledger_matching_ready, job_claiming_ready, extraction_queue_ready
+    global ledger_matching_ready, job_claiming_ready
+    global extraction_queue_ready, extraction_queue_configuration_error
+    global extraction_queue_absence_first_seen, extraction_queue_absence_confirmations
     # A second probe can run in tests or after a transient database failure.
     # Never carry a previous successful queue probe into a failed one.
+    ledger_matching_ready = False
+    job_claiming_ready = False
     extraction_queue_ready = None if supabase_admin_available else False
+    extraction_queue_configuration_error = None
     if not supabase_admin_available:
+        extraction_queue_absence_first_seen = None
+        extraction_queue_absence_confirmations = 0
         return
 
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            ledger_matching_ready = await _column_exists(client, "ledgers", "id")
-            job_claiming_ready = await _column_exists(client, "receipts", "extraction_worker")
+            # Migration 002 is one unit: the queue completion RPC writes the
+            # transaction ledger fields and raw audit payload, while claiming
+            # needs both receipt claim columns. A lone `ledgers.id` or
+            # `extraction_worker` probe can therefore report a partially
+            # applied migration as usable and strand every queued receipt.
+            schema_probes = await asyncio.gather(
+                _column_exists(client, "ledgers", "id"),
+                _column_exists(client, "ledgers", "organization_id"),
+                _column_exists(client, "ledgers", "name"),
+                _column_exists(client, "ledgers", "aliases"),
+                _column_exists(client, "ledgers", "is_active"),
+                _column_exists(client, "transactions", "ledger_id"),
+                _column_exists(client, "transactions", "ledger_match"),
+                _column_exists(client, "transactions", "ledger_match_score"),
+                _column_exists(client, "receipts", "extraction_worker"),
+                _column_exists(client, "receipts", "extraction_claimed_at"),
+                _column_exists(client, "receipts", "raw_extraction"),
+                _column_exists(client, "receipts", "extraction_queue_message_id"),
+                _column_exists(client, "extraction_worker_slot", "slot_id"),
+            )
+            ledger_matching_ready = all(schema_probes[:8])
+            job_claiming_ready = all(schema_probes[8:11])
+            queue_schema_present = any(schema_probes[11:])
             queue_health = await client.post(
                 f"{SUPABASE_URL}/rest/v1/rpc/extraction_queue_health",
                 headers=_svc_headers(),
                 json={},
             )
+            queue_absence_candidate = False
             if queue_health.status_code == 200:
                 try:
                     health = _first_rpc_row(queue_health.json())
                 except ValueError:
                     health = None
-                if health and health.get("ready") is True:
+                if not (ledger_matching_ready and job_claiming_ready):
+                    # An HTTP-200 health RPC proves migration 007 exists, even
+                    # when a hardened version reports ready=false. It cannot
+                    # make the migration-002 columns referenced by its lifecycle
+                    # RPCs appear, so this is a known configuration error rather
+                    # than a temporary connection problem or legacy fallback.
+                    extraction_queue_configuration_error = MIGRATION_002_REQUIRED_ERROR
+                elif health and health.get("ready") is True:
                     extraction_queue_ready = True
             elif queue_health.status_code == 404:
-                # PostgREST uses 404/PGRST202 when a function is absent. Only
-                # that confirmed state may activate the compatibility worker.
-                extraction_queue_ready = False
+                # A proxy, paused project, or stale schema gateway can also
+                # answer 404. Only PostgREST's precise missing-function code,
+                # with no visible 007 markers and a confirmation grace period,
+                # may select legacy mode. Every other 404 remains fail-closed.
+                try:
+                    queue_error = queue_health.json()
+                except ValueError:
+                    queue_error = None
+                if (
+                    isinstance(queue_error, dict)
+                    and queue_error.get("code") == "PGRST202"
+                    and not queue_schema_present
+                ):
+                    queue_absence_candidate = True
+
+            if queue_absence_candidate:
+                now = time.monotonic()
+                if extraction_queue_absence_first_seen is None:
+                    extraction_queue_absence_first_seen = now
+                extraction_queue_absence_confirmations += 1
+                if (
+                    extraction_queue_absence_confirmations >= 2
+                    and now - extraction_queue_absence_first_seen
+                    >= EXTRACTION_QUEUE_ABSENCE_GRACE_SECONDS
+                ):
+                    extraction_queue_ready = False
+            else:
+                extraction_queue_absence_first_seen = None
+                extraction_queue_absence_confirmations = 0
     except Exception as err:
+        extraction_queue_absence_first_seen = None
+        extraction_queue_absence_confirmations = 0
         print(f"⚠️ Could not check the database schema: {err}")
         return
 
-    if ledger_matching_ready and job_claiming_ready:
+    if extraction_queue_configuration_error:
+        print(f"❌ {extraction_queue_configuration_error}")
+    elif ledger_matching_ready and job_claiming_ready:
         print("✅ Chart-of-accounts matching and job claiming enabled")
     else:
         # Not a fault: everything works. This is a note about one deployment
@@ -1547,6 +1644,8 @@ async def detect_schema_features() -> None:
             "nothing stops two instances extracting the same receipt twice."
         )
 
+    if extraction_queue_configuration_error:
+        return
     if extraction_queue_ready is True:
         print("✅ Durable global sequential extraction queue enabled")
     elif extraction_queue_ready is False:
@@ -1575,11 +1674,54 @@ async def _queue_rpc(client: httpx.AsyncClient, function: str, payload: dict):
         json=payload,
     )
     if res.status_code != 200:
-        raise RuntimeError(f"Extraction queue RPC {function} failed with status {res.status_code}.")
+        context = _sanitized_supabase_error_context(res)
+        suffix = f" ({context})" if context else ""
+        raise RuntimeError(
+            f"Extraction queue RPC {function} failed with status "
+            f"{res.status_code}{suffix}."
+        )
     try:
         return res.json()
     except ValueError as err:
         raise RuntimeError(f"Extraction queue RPC {function} returned invalid JSON.") from err
+
+
+def _sanitized_supabase_error_context(response: httpx.Response) -> str:
+    """Returns useful PostgREST fields without echoing credentials or payloads."""
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+
+    secrets = tuple(filter(None, (
+        SUPABASE_SERVICE_ROLE_KEY,
+        OPENAI_API_KEY,
+        GEMINI_API_KEY,
+    )))
+
+    def clean(value, limit: int) -> str:
+        if isinstance(value, (dict, list)):
+            text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        else:
+            text = str(value)
+        for secret in secrets:
+            text = text.replace(secret, "[redacted]")
+        text = re.sub(
+            r"(?i)\b(bearer|apikey|api_key|authorization)\s*[:=]?\s*[^\s,;]+",
+            r"\1 [redacted]",
+            text,
+        )
+        text = " ".join(text.split())
+        return text[:limit]
+
+    parts = []
+    for field, limit in (("code", 100), ("message", 500), ("details", 500)):
+        value = body.get(field)
+        if value not in (None, ""):
+            parts.append(f"{field}={clean(value, limit)}")
+    return "; ".join(parts)
 
 
 async def enqueue_extraction_job(
@@ -2153,9 +2295,17 @@ async def wait_for_extraction_queue_schema() -> None:
     database that already has the global queue. Once absence is positively
     confirmed, the old concurrency-one worker remains available for rollout.
     """
+    # A known broken migration chain cannot become safe through reconnecting.
+    # Keep extraction paused until the operator applies migration 002 and
+    # restarts, which reruns the complete feature probe before any worker starts.
+    if extraction_queue_configuration_error:
+        return
+
     while extraction_queue_ready is None:
         await asyncio.sleep(max(2.0, EXTRACTION_QUEUE_POLL_SECONDS))
         await detect_schema_features()
+        if extraction_queue_configuration_error:
+            return
 
     if extraction_queue_ready is True:
         await consume_extraction_queue()
@@ -2221,6 +2371,11 @@ async def start_receipt_extraction(receipt_id: str, authorization: Optional[str]
         raise HTTPException(status_code=503, detail="Background extraction is not configured on this server.")
 
     caller = await resolve_caller(authorization)
+    if extraction_queue_configuration_error:
+        raise HTTPException(
+            status_code=503,
+            detail=extraction_queue_configuration_error,
+        )
     receipt = await _load_receipt_for_caller(receipt_id, caller)
 
     # A completed receipt is already the desired outcome. Treat a repeated

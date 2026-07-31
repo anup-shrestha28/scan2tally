@@ -15,6 +15,155 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import main
 
 
+def _mock_async_client(monkeypatch, responder):
+    real_client = httpx.AsyncClient
+    transport = httpx.MockTransport(responder)
+
+    def factory(*_args, **kwargs):
+        return real_client(transport=transport, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", factory)
+
+
+@pytest.mark.parametrize("health_ready", [True, False])
+def test_queue_health_cannot_override_missing_migration_002_prerequisites(
+    monkeypatch, capsys, health_ready
+):
+    probed = set()
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/rpc/extraction_queue_health"):
+            return httpx.Response(200, json={"ready": health_ready})
+        column = request.url.params.get("select")
+        probed.add((request.url.path, column))
+        if column in {"aliases", "extraction_claimed_at"}:
+            return httpx.Response(400, json={"code": "42703", "message": "missing"})
+        return httpx.Response(200, json=[])
+
+    monkeypatch.setattr(main, "SUPABASE_URL", "https://project.supabase.co")
+    monkeypatch.setattr(main, "supabase_admin_available", True)
+    monkeypatch.setattr(main, "ledger_matching_ready", False)
+    monkeypatch.setattr(main, "job_claiming_ready", False)
+    monkeypatch.setattr(main, "extraction_queue_ready", None)
+    monkeypatch.setattr(main, "extraction_queue_configuration_error", None)
+    monkeypatch.setattr(main, "extraction_queue_absence_first_seen", None)
+    monkeypatch.setattr(main, "extraction_queue_absence_confirmations", 0)
+    _mock_async_client(monkeypatch, respond)
+
+    asyncio.run(main.detect_schema_features())
+
+    assert ("/rest/v1/receipts", "extraction_worker") in probed
+    assert ("/rest/v1/receipts", "extraction_claimed_at") in probed
+    assert ("/rest/v1/transactions", "ledger_match_score") in probed
+    assert main.ledger_matching_ready is False
+    assert main.job_claiming_ready is False
+    assert main.extraction_queue_ready is None
+    assert main.extraction_queue_configuration_error == main.MIGRATION_002_REQUIRED_ERROR
+    startup_output = capsys.readouterr().out
+    assert "002_ledgers_claiming_audit.sql" in startup_output
+    assert "007_sequential_extraction_queue.sql" in startup_output
+    assert "Fine for development" not in startup_output
+    assert "compatibility worker" not in startup_output
+
+
+def test_queue_becomes_ready_only_with_complete_migration_002_schema(monkeypatch):
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/rpc/extraction_queue_health"):
+            return httpx.Response(200, json={"ready": True})
+        return httpx.Response(200, json=[])
+
+    monkeypatch.setattr(main, "SUPABASE_URL", "https://project.supabase.co")
+    monkeypatch.setattr(main, "supabase_admin_available", True)
+    monkeypatch.setattr(main, "ledger_matching_ready", False)
+    monkeypatch.setattr(main, "job_claiming_ready", False)
+    monkeypatch.setattr(main, "extraction_queue_ready", None)
+    monkeypatch.setattr(main, "extraction_queue_configuration_error", None)
+    monkeypatch.setattr(main, "extraction_queue_absence_first_seen", None)
+    monkeypatch.setattr(main, "extraction_queue_absence_confirmations", 0)
+    _mock_async_client(monkeypatch, respond)
+
+    asyncio.run(main.detect_schema_features())
+
+    assert main.ledger_matching_ready is True
+    assert main.job_claiming_ready is True
+    assert main.extraction_queue_ready is True
+    assert main.extraction_queue_configuration_error is None
+
+
+@pytest.mark.parametrize(
+    ("health_body", "queue_marker_present", "expected_ready"),
+    [
+        ({"code": "PGRST202", "message": "function missing"}, False, None),
+        ({"code": "PGRST202", "message": "stale schema cache"}, True, None),
+        ({"code": "PGRST205", "message": "gateway table error"}, False, None),
+        ({"message": "generic not found"}, False, None),
+    ],
+)
+def test_only_postgrest_missing_function_404_starts_absence_confirmation(
+    monkeypatch, health_body, queue_marker_present, expected_ready
+):
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/rpc/extraction_queue_health"):
+            return httpx.Response(404, json=health_body)
+        if request.url.params.get("select") in {
+            "extraction_queue_message_id", "slot_id",
+        } and not queue_marker_present:
+            return httpx.Response(400, json={
+                "code": "42703",
+                "message": "queue marker missing",
+            })
+        return httpx.Response(200, json=[])
+
+    monkeypatch.setattr(main, "SUPABASE_URL", "https://project.supabase.co")
+    monkeypatch.setattr(main, "supabase_admin_available", True)
+    monkeypatch.setattr(main, "extraction_queue_ready", None)
+    monkeypatch.setattr(main, "extraction_queue_configuration_error", None)
+    monkeypatch.setattr(main, "extraction_queue_absence_first_seen", None)
+    monkeypatch.setattr(main, "extraction_queue_absence_confirmations", 0)
+    _mock_async_client(monkeypatch, respond)
+
+    asyncio.run(main.detect_schema_features())
+
+    assert main.extraction_queue_ready is expected_ready
+    assert main.extraction_queue_configuration_error is None
+
+
+def test_confirmed_queue_absence_uses_legacy_only_after_grace_period(monkeypatch):
+    now = {"value": 100.0}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/rpc/extraction_queue_health"):
+            return httpx.Response(404, json={
+                "code": "PGRST202",
+                "message": "function missing",
+            })
+        if request.url.params.get("select") in {
+            "extraction_queue_message_id", "slot_id",
+        }:
+            return httpx.Response(400, json={
+                "code": "42703",
+                "message": "queue marker missing",
+            })
+        return httpx.Response(200, json=[])
+
+    monkeypatch.setattr(main, "SUPABASE_URL", "https://project.supabase.co")
+    monkeypatch.setattr(main, "supabase_admin_available", True)
+    monkeypatch.setattr(main, "EXTRACTION_QUEUE_ABSENCE_GRACE_SECONDS", 30.0)
+    monkeypatch.setattr(main, "extraction_queue_ready", None)
+    monkeypatch.setattr(main, "extraction_queue_configuration_error", None)
+    monkeypatch.setattr(main, "extraction_queue_absence_first_seen", None)
+    monkeypatch.setattr(main, "extraction_queue_absence_confirmations", 0)
+    monkeypatch.setattr(main.time, "monotonic", lambda: now["value"])
+    _mock_async_client(monkeypatch, respond)
+
+    asyncio.run(main.detect_schema_features())
+    assert main.extraction_queue_ready is None
+
+    now["value"] += 31.0
+    asyncio.run(main.detect_schema_features())
+    assert main.extraction_queue_ready is False
+
+
 def test_provider_and_queue_deadlines_preserve_sequential_safety():
     assert main.VISION_PROVIDER_TIMEOUT_SECONDS <= main.EXTRACTION_TIMEOUT_SECONDS
     assert main.EXTRACTION_QUEUE_VISIBILITY_SECONDS >= (
@@ -135,6 +284,40 @@ def test_enqueue_rpc_is_service_role_authenticated_and_idempotent_shape(monkeypa
     }
 
 
+def test_queue_rpc_error_includes_sanitized_supabase_context(monkeypatch):
+    secret = "service-role-secret-value"
+    monkeypatch.setattr(main, "SUPABASE_URL", "https://project.supabase.co")
+    monkeypatch.setattr(main, "SUPABASE_SERVICE_ROLE_KEY", secret)
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={
+            "code": "42703",
+            "message": f"column extraction_claimed_at is missing; Bearer {secret}",
+            "details": {"apikey": secret, "migration": "002"},
+            "hint": "this field is intentionally not copied",
+        })
+
+    async def call_rpc():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await main._queue_rpc(client, "claim_next_receipt_extraction", {
+                "private": "request-payload-must-not-be-logged",
+            })
+
+    with pytest.raises(RuntimeError) as error:
+        asyncio.run(call_rpc())
+
+    message = str(error.value)
+    assert "claim_next_receipt_extraction" in message
+    assert "status 400" in message
+    assert "code=42703" in message
+    assert "message=column extraction_claimed_at is missing" in message
+    assert "details=" in message
+    assert "migration" in message
+    assert secret not in message
+    assert "request-payload-must-not-be-logged" not in message
+    assert "intentionally not copied" not in message
+
+
 def test_claim_rpc_identifies_worker_and_requests_one_visibility_lease(monkeypatch):
     monkeypatch.setattr(main, "SUPABASE_URL", "https://project.supabase.co")
     monkeypatch.setattr(main, "SUPABASE_SERVICE_ROLE_KEY", "service-role-test-key")
@@ -234,6 +417,35 @@ def test_enqueue_endpoint_does_not_fail_open_when_queue_probe_is_indeterminate(m
 
     assert error.value.status_code == 503
     assert "queue reconnects" in error.value.detail
+
+
+def test_enqueue_endpoint_reports_actionable_migration_002_configuration_error(monkeypatch):
+    monkeypatch.setattr(main, "supabase_admin_available", True)
+    monkeypatch.setattr(
+        main,
+        "extraction_queue_configuration_error",
+        main.MIGRATION_002_REQUIRED_ERROR,
+    )
+
+    async def resolve(_authorization):
+        return {"id": "user-1", "role": "Operator", "organization_id": "org-1"}
+
+    async def must_not_load_receipt(*_args):
+        pytest.fail("A known schema configuration error should fail before receipt work")
+
+    monkeypatch.setattr(main, "resolve_caller", resolve)
+    monkeypatch.setattr(main, "_load_receipt_for_caller", must_not_load_receipt)
+
+    with pytest.raises(main.HTTPException) as error:
+        asyncio.run(main.start_receipt_extraction(
+            "receipt-1", "Bearer valid-session"
+        ))
+
+    assert error.value.status_code == 503
+    assert error.value.detail == main.MIGRATION_002_REQUIRED_ERROR
+    assert "002_ledgers_claiming_audit.sql" in error.value.detail
+    assert "007_sequential_extraction_queue.sql" in error.value.detail
+    assert "restart" in error.value.detail.lower()
 
 
 def test_fenced_completion_rejection_never_falls_back_to_unfenced_failure(monkeypatch):

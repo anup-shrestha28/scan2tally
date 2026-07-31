@@ -638,10 +638,61 @@ ON CONFLICT (id) DO NOTHING;
 -- message, receipt), so a worker that wakes after losing its lease cannot
 -- overwrite a newer attempt.
 --
+-- Requires migration 002_ledgers_claiming_audit.sql. Apply 002 first.
 -- Deploy this migration while the old backend is stopped, then start the new
 -- backend.  Existing Processing receipts are moved into the durable queue.
 -- Safe to run more than once.
 -- ============================================================================
+
+-- Migration 007's lifecycle RPCs deliberately reuse the audit and claiming
+-- fields introduced by migration 002.  PL/pgSQL resolves table columns lazily,
+-- so without this explicit guard an out-of-order install can appear successful
+-- and even report healthy, only to fail when the first receipt is enqueued.
+DO $$
+DECLARE
+    missing_columns TEXT[];
+BEGIN
+    SELECT array_agg(required.table_name || '.' || required.column_name)
+    INTO missing_columns
+    FROM (VALUES
+        ('ledgers', 'id'),
+        ('ledgers', 'organization_id'),
+        ('ledgers', 'name'),
+        ('ledgers', 'aliases'),
+        ('ledgers', 'is_active'),
+        ('transactions', 'ledger_id'),
+        ('transactions', 'ledger_match'),
+        ('transactions', 'ledger_match_score'),
+        ('receipts', 'extraction_worker'),
+        ('receipts', 'extraction_claimed_at'),
+        ('receipts', 'raw_extraction')
+    ) AS required(table_name, column_name)
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns AS existing
+        WHERE existing.table_schema = 'public'
+          AND existing.table_name = required.table_name
+          AND existing.column_name = required.column_name
+    );
+
+    IF missing_columns IS NOT NULL
+       OR to_regtype('public.ledger_match') IS NULL THEN
+        RAISE EXCEPTION
+            'Migration 007 requires migration 002_ledgers_claiming_audit.sql first'
+            USING DETAIL = concat(
+                'Missing prerequisites: ',
+                COALESCE(array_to_string(missing_columns, ', '), ''),
+                CASE
+                    WHEN to_regtype('public.ledger_match') IS NULL
+                    THEN CASE WHEN missing_columns IS NULL THEN '' ELSE ', ' END
+                         || 'type public.ledger_match'
+                    ELSE ''
+                END
+            ),
+            HINT = 'Apply migration 002, then run migration 007 again.';
+    END IF;
+END;
+$$;
 
 CREATE EXTENSION IF NOT EXISTS pgmq CASCADE;
 
@@ -823,6 +874,7 @@ AS $$
 DECLARE
     queue_depth BIGINT := 0;
     current_slot public.extraction_worker_slot%ROWTYPE;
+    prerequisites_ready BOOLEAN := FALSE;
 BEGIN
     SELECT COALESCE(metrics.queue_length, 0)
     INTO queue_depth
@@ -833,8 +885,34 @@ BEGIN
     FROM public.extraction_worker_slot
     WHERE slot_id = 1;
 
+    SELECT to_regtype('public.ledger_match') IS NOT NULL
+       AND NOT EXISTS (
+            SELECT 1
+            FROM (VALUES
+                ('ledgers', 'id'),
+                ('ledgers', 'organization_id'),
+                ('ledgers', 'name'),
+                ('ledgers', 'aliases'),
+                ('ledgers', 'is_active'),
+                ('transactions', 'ledger_id'),
+                ('transactions', 'ledger_match'),
+                ('transactions', 'ledger_match_score'),
+                ('receipts', 'extraction_worker'),
+                ('receipts', 'extraction_claimed_at'),
+                ('receipts', 'raw_extraction')
+            ) AS required(table_name, column_name)
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM information_schema.columns AS existing
+                WHERE existing.table_schema = 'public'
+                  AND existing.table_name = required.table_name
+                  AND existing.column_name = required.column_name
+            )
+       )
+    INTO prerequisites_ready;
+
     RETURN jsonb_build_object(
-        'ready', TRUE,
+        'ready', prerequisites_ready AND COALESCE(current_slot.slot_id = 1, FALSE),
         'queue_name', 'receipt_extraction',
         'queue_length', COALESCE(queue_depth, 0),
         'active_receipt_id', current_slot.receipt_id,
