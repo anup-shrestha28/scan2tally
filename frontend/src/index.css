@@ -2519,13 +2519,19 @@ body.light .user-form-card .form-label {
 
 .receipt-row-actions .btn {
   min-height: 34px;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .receipt-row-actions .btn:first-child {
-  min-width: 108px;
+  width: 36px;
+  min-width: 36px;
+  padding-left: 0;
+  padding-right: 0;
 }
 
 .receipt-row-actions .btn:nth-child(2) {
+  width: 102px;
   min-width: 102px;
 }
 
