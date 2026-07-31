@@ -1122,6 +1122,68 @@ async def get_platform_usage(authorization: Optional[str] = Header(None)):
     return build_platform_usage_response(snapshot, caller.get("role") or "")
 
 
+@app.get("/api/team-directory")
+async def get_operator_team_directory(authorization: Optional[str] = Header(None)):
+    """Return a privacy-limited, same-organization directory to Operators.
+
+    This intentionally runs through the authenticated backend rather than
+    broadening SELECT access on public.users. Only the four fields rendered by
+    the read-only UI leave the server.
+    """
+    if not supabase_admin_available:
+        raise HTTPException(status_code=503, detail="The team directory is temporarily unavailable.")
+
+    caller = await resolve_caller(authorization)
+    if caller.get("role") != "Operator":
+        raise HTTPException(status_code=403, detail="This directory is available to Operators only.")
+
+    organization_id = caller.get("organization_id")
+    if not organization_id:
+        raise HTTPException(status_code=403, detail="Your account is not linked to an organization.")
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(
+                f"{SUPABASE_URL}/rest/v1/users",
+                headers=_svc_headers(),
+                params={
+                    "select": "id,name,designation,role",
+                    "organization_id": f"eq.{organization_id}",
+                    "status": "eq.Active",
+                    "order": "name.asc,id.asc",
+                },
+            )
+    except httpx.HTTPError:
+        raise HTTPException(status_code=503, detail="The team directory is temporarily unavailable.")
+
+    if response.status_code != 200:
+        raise HTTPException(status_code=503, detail="The team directory is temporarily unavailable.")
+    try:
+        rows = response.json()
+    except ValueError:
+        raise HTTPException(status_code=503, detail="The team directory is temporarily unavailable.")
+    if not isinstance(rows, list):
+        raise HTTPException(status_code=503, detail="The team directory is temporarily unavailable.")
+
+    # Whitelist every output key; a future SELECT change must not accidentally
+    # expose email, phone, status, organization ids or account metadata.
+    return {
+        "members": [
+            {
+                "id": row.get("id"),
+                "name": row.get("name"),
+                "designation": row.get("designation"),
+                "role": row.get("role"),
+            }
+            for row in rows
+            if isinstance(row, dict)
+            and row.get("id")
+            and row.get("name")
+            and row.get("role") in ("Admin", "Operator")
+        ]
+    }
+
+
 @app.post("/api/users")
 async def create_user(payload: CreateUserRequest, authorization: Optional[str] = Header(None)):
     """Creates a login on behalf of an administrator."""
@@ -1224,6 +1286,12 @@ async def create_user(payload: CreateUserRequest, authorization: Optional[str] =
 
 
 async def _load_target_user(client: httpx.AsyncClient, user_id: str, caller: dict) -> dict:
+    # These endpoints use the service-role key after this check, so RLS cannot
+    # protect them. Reject Operators before even looking up the target: knowing
+    # a same-org UUID must never turn a read-only directory into account control.
+    if caller.get("role") not in ("Super Admin", "Admin"):
+        raise HTTPException(status_code=403, detail="Only administrators can manage team members.")
+
     response = await client.get(
         f"{SUPABASE_URL}/rest/v1/users",
         headers=_svc_headers(),

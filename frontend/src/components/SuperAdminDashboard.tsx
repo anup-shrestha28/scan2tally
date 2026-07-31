@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Building2, Plus, CheckCircle2, XCircle, Loader2, AlertCircle, Database, HardDrive } from 'lucide-react';
 import { CapacityConnectionState, CapacityMetric, Organization, OrgStatus, PlatformUsage } from '../types';
+import SearchInput from './SearchInput';
 import StatusFilter from './StatusFilter';
+import { filterBySearch, normalizeSearchText } from '../lib/search';
 import { usePolling } from '../lib/usePolling';
 import {
   fetchOrganizationsWithStats,
@@ -110,12 +112,22 @@ export default function SuperAdminDashboard({ usage, connectionState }: SuperAdm
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [statusFilter, setStatusFilter] = useState<OrganizationStatusFilter>('All');
+  const [organizationSearch, setOrganizationSearch] = useState('');
 
   const [newOrgName, setNewOrgName] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
+  const hasOrganizationSearch = Boolean(normalizeSearchText(organizationSearch));
+  const searchMatchedOrgs = filterBySearch(orgs, organizationSearch, org => [
+    org.name,
+    org.created_at,
+    Number.isNaN(new Date(org.created_at).getTime())
+      ? org.created_at
+      : new Date(org.created_at).toLocaleDateString(),
+    `${org.usersCount ?? 0} ${(org.usersCount ?? 0) === 1 ? 'user' : 'users'}`,
+  ]);
   const filteredOrgs = statusFilter === 'All'
-    ? orgs
-    : orgs.filter(org => org.status === statusFilter);
+    ? searchMatchedOrgs
+    : searchMatchedOrgs.filter(org => org.status === statusFilter);
 
   const load = async () => {
     try {
@@ -159,6 +171,8 @@ export default function SuperAdminDashboard({ usage, connectionState }: SuperAdm
     try {
       const created = await createOrganization(name);
       setOrgs(prev => [...prev, created]);
+      setOrganizationSearch('');
+      setStatusFilter('All');
       setNewOrgName('');
       setShowAddModal(false);
       setError(null);
@@ -342,16 +356,24 @@ export default function SuperAdminDashboard({ usage, connectionState }: SuperAdm
             <Building2 size={20} color="var(--primary)" />
             Subscribed Client Organizations
           </h3>
-          <StatusFilter
-            value={statusFilter}
-            onChange={setStatusFilter}
-            ariaLabel="Filter organizations by status"
-            options={[
-              { value: 'All', label: `All statuses (${orgs.length})` },
-              { value: 'Active', label: `Active (${orgs.filter(org => org.status === 'Active').length})` },
-              { value: 'Inactive', label: `Inactive (${orgs.filter(org => org.status === 'Inactive').length})` },
-            ]}
-          />
+          <div className="table-toolbar-controls">
+            <SearchInput
+              value={organizationSearch}
+              onChange={setOrganizationSearch}
+              ariaLabel="Search client organizations"
+              placeholder="Search organizations…"
+            />
+            <StatusFilter
+              value={statusFilter}
+              onChange={setStatusFilter}
+              ariaLabel="Filter organizations by status"
+              options={[
+                { value: 'All', label: `All statuses (${searchMatchedOrgs.length})` },
+                { value: 'Active', label: `Active (${searchMatchedOrgs.filter(org => org.status === 'Active').length})` },
+                { value: 'Inactive', label: `Inactive (${searchMatchedOrgs.filter(org => org.status === 'Inactive').length})` },
+              ]}
+            />
+          </div>
         </div>
 
         <div className="table-container">
@@ -371,7 +393,9 @@ export default function SuperAdminDashboard({ usage, connectionState }: SuperAdm
                   <td colSpan={5} className="table-empty">
                     {orgs.length === 0
                       ? 'No client organizations yet.'
-                      : `No ${statusFilter.toLowerCase()} organizations.`}
+                      : hasOrganizationSearch
+                        ? `No organizations match “${organizationSearch.trim()}”${statusFilter === 'All' ? '.' : ` with ${statusFilter.toLowerCase()} status.`}`
+                        : `No ${statusFilter.toLowerCase()} organizations.`}
                   </td>
                 </tr>
               ) : filteredOrgs.map((org) => (

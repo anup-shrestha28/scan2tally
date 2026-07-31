@@ -1,7 +1,7 @@
 import { supabase } from './supabase';
 import {
   ScanBatch, Receipt, ReceiptStatus, ReceiptDisplayStatus, Transaction, User, UserRole, Organization,
-  BatchStatus, Ledger, LedgerMatchState, PlatformUsage, CapacityAlert,
+  BatchStatus, Ledger, LedgerMatchState, PlatformUsage, CapacityAlert, TeamDirectoryMember,
 } from '../types';
 import { ledgerMatchKey } from './ledgers';
 import { LEDGER_MATCHING } from './features';
@@ -117,6 +117,45 @@ export async function fetchOrgUsers(): Promise<User[]> {
     role: u.role as UserRole,
     status: u.status,
   }));
+}
+
+/**
+ * Active colleagues visible in an Operator's privacy-limited directory.
+ * The backend re-resolves the caller and organization from the session; the
+ * browser never sends either a role or organization id to authorize itself.
+ */
+export async function fetchOperatorTeamDirectory(): Promise<TeamDirectoryMember[]> {
+  const { data: sessionData } = await supabase.auth.getSession();
+  const token = sessionData.session?.access_token;
+  if (!token) throw new Error('Your session has expired. Please sign in again.');
+
+  const base = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:8000';
+  const response = await fetch(`${base}/api/team-directory`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(body?.detail || 'Could not load the team directory.');
+  }
+  if (!Array.isArray(body?.members)) {
+    throw new Error('Could not load the team directory.');
+  }
+
+  return body.members
+    .filter((member: any) =>
+      member
+      && typeof member.id === 'string'
+      && typeof member.name === 'string'
+      && (member.role === 'Admin' || member.role === 'Operator')
+    )
+    .map((member: any) => ({
+      id: member.id,
+      name: member.name,
+      designation: typeof member.designation === 'string' && member.designation
+        ? member.designation
+        : undefined,
+      role: member.role as UserRole,
+    }));
 }
 
 /**

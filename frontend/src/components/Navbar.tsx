@@ -8,7 +8,7 @@ interface NavbarProps {
   onLogout: () => void;
   isDark: boolean;
   onToggleTheme: () => void;
-  /** Absent for roles that cannot manage staff, which hides the control entirely. */
+  /** Opens the role-appropriate team view (read-only for Operators). */
   onManageUsers?: () => void;
   /** Admin only: the chart of accounts every extraction is matched against. */
   onManageLedgers?: () => void;
@@ -151,7 +151,7 @@ export default function Navbar({
                   </button>
                 )}
                 {onManageUsers && (
-                  <button className={`nav-link${currentView === 'users' ? ' nav-link-active' : ''}`} onClick={onManageUsers} title="Manage team members">
+                  <button className={`nav-link${currentView === 'users' ? ' nav-link-active' : ''}`} onClick={onManageUsers} title="View team members">
                     <Users size={15} />
                     <span>Team</span>
                   </button>

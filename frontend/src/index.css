@@ -315,7 +315,8 @@ body {
   gap: 10px;
   flex: 1 1 auto;
   min-height: 0;
-  max-height: calc(100vh - 260px);
+  /* Heading + create/search/archive controls stay visible; only results scroll. */
+  max-height: calc(100vh - 344px);
   overflow-y: auto;
   padding-right: 4px;
   scrollbar-gutter: stable;
@@ -343,7 +344,7 @@ body {
 .batch-item-select {
   display: block;
   width: 100%;
-  padding: 0 32px 0 0;
+  padding: 0;
   border: 0;
   background: transparent;
   color: inherit;
@@ -353,7 +354,7 @@ body {
 }
 
 .batch-item-select:focus-visible {
-  outline: 2px solid var(--focus-ring);
+  outline: 2px solid var(--primary);
   outline-offset: 4px;
   border-radius: var(--radius-sm);
 }
@@ -525,6 +526,7 @@ body {
 }
 
 .batch-item-details {
+  display: block;
   min-width: 0;
 }
 
@@ -533,6 +535,10 @@ body {
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
+  /* Reserve space for the three-dot menu only on the title row. Keeping that
+     padding off the whole card leaves the metadata row identical when the
+     Current badge is present. */
+  padding-right: 32px;
   color: var(--text-main);
   font-size: 0.9rem;
   font-weight: 650;
@@ -556,12 +562,15 @@ body {
 .batch-item-meta {
   display: flex;
   align-items: center;
+  flex-wrap: nowrap;
   gap: 6px;
   margin-top: 5px;
   color: var(--text-muted);
   font-size: 0.74rem;
   line-height: 1.2;
 }
+
+.batch-item-meta > span { white-space: nowrap; }
 
 .batch-actions {
   display: flex;
@@ -1231,8 +1240,57 @@ input[type='number']::-webkit-inner-spin-button {
 .page-header-actions {
   display: flex;
   align-items: center;
+  margin-left: auto;
   gap: 12px;
+  flex-wrap: nowrap;
+}
+
+.page-header-actions > .btn { flex: 0 0 auto; white-space: nowrap; }
+
+/* Keep the team-directory controls as one deliberately aligned desktop row.
+   The outer page header may wrap the whole group when space is tight. */
+.team-header-controls {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  margin-left: auto;
+}
+
+.team-header-controls .search-input,
+.table-toolbar-controls .search-input {
+  flex: 0 0 280px;
+  width: 280px;
+}
+
+.team-header-controls .status-filter,
+.table-toolbar-controls .status-filter {
+  flex: 0 0 190px;
+  min-width: 190px;
+}
+
+.team-header-controls > .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.table-section-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
   flex-wrap: wrap;
+}
+
+.table-section-toolbar .section-title { margin-bottom: 0; }
+
+.table-toolbar-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+  margin-left: auto;
+  gap: 10px;
+  flex-wrap: nowrap;
 }
 
 .status-filter {
@@ -1281,6 +1339,98 @@ input[type='number']::-webkit-inner-spin-button {
   border-color: var(--primary);
   outline: none;
   box-shadow: 0 0 0 2px var(--primary-glow);
+}
+
+/* Shared search field for sidebars and list/table toolbars. */
+.search-input {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 1 260px;
+  width: min(260px, 100%);
+  min-width: 210px;
+}
+
+.search-input-full {
+  width: 100%;
+  min-width: 0;
+  flex-basis: 100%;
+}
+
+.search-input-icon {
+  position: absolute;
+  left: 11px;
+  z-index: 1;
+  color: var(--text-muted);
+  pointer-events: none;
+  transition: color 140ms ease;
+}
+
+.search-input-field {
+  width: 100%;
+  height: 36px;
+  padding: 0 36px 0 35px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  outline: none;
+  background: var(--bg-input);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 0.82rem;
+  line-height: 1;
+  transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
+}
+
+.search-input-field::placeholder { color: var(--text-dim); }
+.search-input-field::-webkit-search-cancel-button { display: none; }
+
+.search-input-field:hover:not(:disabled) { border-color: var(--text-dim); }
+
+.search-input-field:focus-visible {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-glow);
+}
+
+.search-input:focus-within .search-input-icon { color: var(--primary); }
+
+.search-input-field:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.search-input-clear {
+  position: absolute;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 25px;
+  height: 25px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 140ms ease, background-color 140ms ease;
+}
+
+.search-input-clear:hover {
+  background: var(--bg-card-hover);
+  color: var(--text-main);
+}
+
+.search-input-clear:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+@media (max-width: 640px) {
+  .search-input {
+    width: 100%;
+    min-width: 0;
+    flex: 1 1 100%;
+  }
 }
 
 /** Team Member Details Page **/
@@ -1348,9 +1498,35 @@ input[type='number']::-webkit-inner-spin-button {
   .user-form-card { width: 100%; }
 }
 
+@media (max-width: 800px) {
+  .team-header-controls,
+  .table-toolbar-controls {
+    width: 100%;
+    margin-left: 0;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+  }
+
+  .team-header-controls .search-input,
+  .team-header-controls .status-filter,
+  .table-toolbar-controls .search-input,
+  .table-toolbar-controls .status-filter {
+    width: 100%;
+    min-width: 0;
+    flex: 1 1 100%;
+  }
+
+  .team-header-controls > .btn { width: 100%; }
+}
+
 @media (max-width: 640px) {
-  .page-header-actions { width: 100%; }
+  .page-header-actions { width: 100%; margin-left: 0; flex-wrap: wrap; }
+  .page-header-actions .search-input,
   .page-header-actions .status-filter { flex: 1; }
+  .table-section-toolbar { align-items: stretch; }
+  .table-toolbar-controls { width: 100%; margin-left: 0; justify-content: stretch; flex-wrap: wrap; }
+  .table-toolbar-controls .search-input,
+  .table-toolbar-controls .status-filter { width: 100%; flex: 1 1 100%; }
 }
 
 /* Heading inside a card. */
@@ -1782,6 +1958,29 @@ input[type='number']::-webkit-inner-spin-button {
   padding: 12px 4px;
   text-align: center;
 }
+
+.batch-search-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.batch-search-note button {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--primary);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.batch-search-note button:hover { text-decoration: underline; }
+.batch-search-note button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 
 .batch-lowres-warning {
   display: flex;
@@ -2481,7 +2680,7 @@ body:not(.light) .theme-toggle { color: var(--accent-amber); }
 
 .batch-item-select {
   height: 42px;
-  padding: 0 32px 0 0;
+  padding: 0;
   color: #f8fafc;
 }
 

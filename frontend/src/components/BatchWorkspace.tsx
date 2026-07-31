@@ -1,8 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, MoreHorizontal, ChevronLeft, ChevronRight } from 'lucide-react';
 import { ScanBatch, Receipt, ReceiptDisplayStatus, User, Transaction } from '../types';
+import SearchInput from './SearchInput';
 import StatusFilter from './StatusFilter';
 import { supabase } from '../lib/supabase';
+import { filterBySearch, normalizeSearchText } from '../lib/search';
 import { usePolling } from '../lib/usePolling';
 import {
   newId,
@@ -252,6 +254,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const [batchMenuPosition, setBatchMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const [receiptPage, setReceiptPage] = useState(1);
   const [receiptStatusFilter, setReceiptStatusFilter] = useState<ReceiptStatusFilter>('All');
+  const [batchSearch, setBatchSearch] = useState('');
   const [previewReceipt, setPreviewReceipt] = useState<Receipt | null>(null);
   const [previewRotation, setPreviewRotation] = useState(0);
   const [dragOver, setDragOver] = useState<boolean>(false);
@@ -312,13 +315,26 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const autoOpenRef = useRef<{ batchId: string; receiptIds: string[] } | null>(null);
 
   const wantedStatus = showArchived ? 'Archived' : 'Active';
-  const visibleBatches = batches.filter(b => b.status === wantedStatus);
+  const statusScopedBatches = batches.filter(b => b.status === wantedStatus);
+  const hasBatchSearch = Boolean(normalizeSearchText(batchSearch));
+  const visibleBatches = filterBySearch(statusScopedBatches, batchSearch, batch => [
+    batch.name,
+    batch.created_at,
+    formatBatchDate(batch.created_at),
+    `${batch.receipts.length} ${batch.receipts.length === 1 ? 'receipt' : 'receipts'}`,
+    ...batch.receipts.map(receipt => receipt.filename),
+  ]);
   const archivedCount = batches.filter(b => b.status === 'Archived').length;
 
   // May be undefined before the first load finishes, or when the user has no
   // batches yet — every read below has to tolerate that.
+  // Search only controls the sidebar results. It must never silently replace
+  // the batch open in the workspace just because that batch does not match.
   const activeBatch: ScanBatch | undefined =
-    visibleBatches.find(b => b.id === activeBatchId) || visibleBatches[0];
+    statusScopedBatches.find(b => b.id === activeBatchId) || statusScopedBatches[0];
+  const activeBatchHiddenBySearch = Boolean(
+    hasBatchSearch && activeBatch && !visibleBatches.some(batch => batch.id === activeBatch.id)
+  );
   const activeReceipts = activeBatch?.receipts ?? [];
   const receiptStatusCounts = activeReceipts.reduce<Record<ReceiptFilterStatus, number>>(
     (counts, receipt) => {
@@ -411,9 +427,15 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
         );
         setBatches(loaded);
         const rememberedBatchId = sessionStorage.getItem(ACTIVE_BATCH_STORAGE_KEY);
-        const nextBatchId = rememberedBatchId && loaded.some(b => b.id === rememberedBatchId)
-          ? rememberedBatchId
-          : loaded[0]?.id || '';
+        // The screen always opens on Active batches. Do not restore an archived
+        // id without also restoring that view, or the highlighted card and the
+        // workspace would disagree about which batch is current.
+        const rememberedActiveBatch = loaded.find(batch => (
+          batch.id === rememberedBatchId && batch.status === 'Active'
+        ));
+        const nextBatchId = rememberedActiveBatch?.id
+          || loaded.find(batch => batch.status === 'Active')?.id
+          || '';
         setActiveBatchId(nextBatchId);
         if (nextBatchId) sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, nextBatchId);
       } catch (err: any) {
@@ -659,6 +681,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
         userId: currentUser.id,
       });
       setBatches(prev => [newBatch, ...prev]);
+      setBatchSearch('');
       setActiveBatchId(newBatch.id);
       sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, newBatch.id);
       setSaveError(null);
@@ -698,7 +721,8 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     const remaining = batches.filter(b => b.id !== id);
     setBatches(remaining);
     if (activeBatchId === id) {
-      const nextBatchId = remaining[0]?.id || '';
+      setBatchSearch('');
+      const nextBatchId = remaining.find(batch => batch.status === wantedStatus)?.id || '';
       setActiveBatchId(nextBatchId);
       if (nextBatchId) sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, nextBatchId);
       else sessionStorage.removeItem(ACTIVE_BATCH_STORAGE_KEY);
@@ -733,7 +757,15 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     const next = batch.status === 'Archived' ? 'Active' : 'Archived';
     const snapshot = batches;
     setBatches(prev => prev.map(b => (b.id === batch.id ? { ...b, status: next } : b)));
-    if (activeBatchId === batch.id) setActiveBatchId('');
+    if (activeBatchId === batch.id) {
+      const nextBatchId = batches.find(candidate => (
+        candidate.id !== batch.id && candidate.status === batch.status
+      ))?.id || '';
+      setBatchSearch('');
+      setActiveBatchId(nextBatchId);
+      if (nextBatchId) sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, nextBatchId);
+      else sessionStorage.removeItem(ACTIVE_BATCH_STORAGE_KEY);
+    }
 
     try {
       await setBatchStatus(batch.id, next);
@@ -1166,10 +1198,35 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
             </button>
           )}
 
+          <SearchInput
+            value={batchSearch}
+            onChange={value => {
+              setBatchSearch(value);
+              setOpenBatchMenuId(null);
+            }}
+            ariaLabel={showArchived ? 'Search archived batches' : 'Search active batches'}
+            placeholder="Search batches or file names…"
+            fullWidth
+          />
+          {activeBatchHiddenBySearch && (
+            <div className="batch-search-note" role="status">
+              <span>Current batch is hidden by this search.</span>
+              <button type="button" onClick={() => setBatchSearch('')}>Show it</button>
+            </div>
+          )}
+
           {(archivedCount > 0 || showArchived) && (
             <button
               className="btn btn-secondary btn-sm btn-block"
-              onClick={() => { setShowArchived(v => !v); setActiveBatchId(''); }}
+              onClick={() => {
+                const nextStatus = showArchived ? 'Active' : 'Archived';
+                const nextBatchId = batches.find(batch => batch.status === nextStatus)?.id || '';
+                setShowArchived(value => !value);
+                setBatchSearch('');
+                setActiveBatchId(nextBatchId);
+                if (nextBatchId) sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, nextBatchId);
+                else sessionStorage.removeItem(ACTIVE_BATCH_STORAGE_KEY);
+              }}
             >
               {showArchived
                 ? <><ArchiveRestore size={14} /> Back to active batches</>
@@ -1179,19 +1236,15 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
 
           <div className={`batch-list${openBatchMenuId ? ' batch-list-menu-open' : ''}`}>
             {!visibleBatches.length && (
-              <div className="batch-list-empty">
-                {showArchived ? 'Nothing archived yet.' : 'No active batches.'}
+              <div className="batch-list-empty" role="status">
+                {statusScopedBatches.length === 0
+                  ? (showArchived ? 'Nothing archived yet.' : 'No active batches.')
+                  : `No batches match “${batchSearch.trim()}”.`}
               </div>
             )}
             {visibleBatches.map(b => (
-              <div 
-                key={b.id} 
-                onClick={() => {
-                  setActiveBatchId(b.id);
-                  setReceiptPage(1);
-                  setOpenBatchMenuId(null);
-                  sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, b.id);
-                }}
+              <div
+                key={b.id}
                 ref={editingBatchId === b.id ? editingBatchRef : undefined}
                 className={`batch-item${b.id === activeBatchId ? ' batch-item-active' : ''}`}
               >
@@ -1211,19 +1264,31 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                   </div>
                 ) : (
                   <div className="batch-item-content">
-                    <div className="batch-item-details">
-                      <div className="batch-item-name">
-                        <span>{b.name}</span>
-                      </div>
-                      <div className="batch-item-meta">
-                        <span>{b.receipts.length} {b.receipts.length === 1 ? 'receipt' : 'receipts'}</span>
-                        <span>•</span>
-                        <span>{formatBatchDate(b.created_at)}</span>
-                        {b.id === activeBatchId && <span className="batch-current-badge">Current</span>}
-                      </div>
-                    </div>
+                    <button
+                      type="button"
+                      className="batch-item-select"
+                      aria-current={b.id === activeBatchId ? 'true' : undefined}
+                      onClick={() => {
+                        setActiveBatchId(b.id);
+                        setReceiptPage(1);
+                        setOpenBatchMenuId(null);
+                        sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, b.id);
+                      }}
+                    >
+                      <span className="batch-item-details">
+                        <span className="batch-item-name">
+                          <span>{b.name}</span>
+                        </span>
+                        <span className="batch-item-meta">
+                          <span>{b.receipts.length} {b.receipts.length === 1 ? 'receipt' : 'receipts'}</span>
+                          <span>•</span>
+                          <span>{formatBatchDate(b.created_at)}</span>
+                          {b.id === activeBatchId && <span className="batch-current-badge">Current</span>}
+                        </span>
+                      </span>
+                    </button>
 
-                    <div className="batch-menu" onClick={e => e.stopPropagation()}>
+                    <div className="batch-menu">
                       <button
                         type="button"
                         className="batch-menu-trigger"

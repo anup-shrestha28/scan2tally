@@ -278,7 +278,8 @@ CREATE POLICY "Users Read Own Organization" ON public.organizations
 -- Only Admins may enumerate colleagues. Without the role check this reads as an
 -- organisation-wide directory, letting any Operator list every co-worker's name
 -- and email — which the policy name never intended. Operators still reach their
--- own row through "Users Read Own Profile" below, which is all the app needs.
+-- own row through "Users Read Own Profile" below; their limited directory is
+-- served by the authenticated backend without broadening table access.
 CREATE POLICY "Admins View Users in Same Org" ON public.users
     FOR SELECT USING (
         public.get_auth_user_role() = 'Admin' AND

@@ -47,6 +47,14 @@ export interface User {
   orgName?: string;
 }
 
+/** Privacy-limited colleague data available to an Operator's read-only view. */
+export interface TeamDirectoryMember {
+  id: string;
+  name: string;
+  designation?: string;
+  role: UserRole;
+}
+
 export type CapacityLevel = 'healthy' | 'warning' | 'critical' | 'full';
 export type CapacityResource = 'storage' | 'database';
 export type CapacityConnectionState = 'connecting' | 'live' | 'retrying';

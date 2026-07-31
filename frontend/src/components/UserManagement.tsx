@@ -3,9 +3,11 @@ import {
   UserPlus, Users, Loader2, Pencil, Trash2, UserRound, Mail, Phone, Briefcase, LockKeyhole,
   AlertCircle, CheckCircle2, XCircle, ArrowLeft, Eye, EyeOff
 } from 'lucide-react';
-import { User, UserRole, UserStatus } from '../types';
-import { fetchOrgUsers, createUserAccount, updateUserAccount, changeUserPassword, changeOwnPassword, deleteUserAccount, setUserStatus, fetchOrganizations } from '../lib/db';
+import { TeamDirectoryMember, User, UserRole, UserStatus } from '../types';
+import { fetchOrgUsers, fetchOperatorTeamDirectory, createUserAccount, updateUserAccount, changeUserPassword, changeOwnPassword, deleteUserAccount, setUserStatus, fetchOrganizations } from '../lib/db';
+import SearchInput from './SearchInput';
 import StatusFilter from './StatusFilter';
+import { filterBySearch, normalizeSearchText } from '../lib/search';
 
 interface UserManagementProps {
   currentUser: User;
@@ -27,13 +29,17 @@ const toTitleCase = (value: string) =>
 
 export default function UserManagement({ currentUser, onBack }: UserManagementProps) {
   const isSuperAdmin = currentUser.role === 'Super Admin';
+  const isOperator = currentUser.role === 'Operator';
 
   const [users, setUsers] = useState<User[]>([]);
+  const [operatorDirectory, setOperatorDirectory] = useState<TeamDirectoryMember[]>([]);
   const [orgs, setOrgs] = useState<{ id: string; name: string; status: string }[]>([]);
   const activeOrgs = orgs.filter(o => o.status === 'Active');
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<UserStatusFilter>('All');
+  const [userSearch, setUserSearch] = useState('');
+  const hasUserSearch = Boolean(normalizeSearchText(userSearch));
 
   const [showForm, setShowForm] = useState(false);
   const [editingUser, setEditingUser] = useState<User | null>(null);
@@ -63,6 +69,15 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
 
   const load = async () => {
     try {
+      if (isOperator) {
+        // Operators receive a purpose-built projection instead of SELECT access
+        // to public.users. It contains no email, phone, status or other account
+        // management data and is confined to active colleagues in their org.
+        setOperatorDirectory(await fetchOperatorTeamDirectory());
+        setLoadError(null);
+        return;
+      }
+
       const [list, orgList] = await Promise.all([
         fetchOrgUsers(),
         isSuperAdmin ? fetchOrganizations() : Promise.resolve([]),
@@ -77,7 +92,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
     }
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [currentUser.id, currentUser.role]);
 
   const displayedUsers = isSuperAdmin
     ? [...users].sort((a, b) => {
@@ -89,9 +104,26 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
         return getSortRank(a) - getSortRank(b) || a.name.localeCompare(b.name);
       })
     : users;
+  const organizationNames = new Map(orgs.map(org => [org.id, org.name]));
+  const searchMatchedUsers = filterBySearch(displayedUsers, userSearch, user => [
+    user.name,
+    user.email,
+    user.phone,
+    user.designation,
+    user.role,
+    isSuperAdmin
+      ? (organizationNames.get(user.organization_id || '') || 'Platform')
+      : (currentUser.orgName || 'Your organization'),
+  ]);
   const filteredUsers = statusFilter === 'All'
-    ? displayedUsers
-    : displayedUsers.filter(user => user.status === statusFilter);
+    ? searchMatchedUsers
+    : searchMatchedUsers.filter(user => user.status === statusFilter);
+  const filteredOperatorDirectory = filterBySearch(operatorDirectory, userSearch, member => [
+    member.name,
+    member.designation,
+    member.role,
+    currentUser.orgName,
+  ]);
 
   const resetForm = () => {
     setName(''); setEmail(''); setPhone(''); setPassword(''); setDesignation('');
@@ -172,6 +204,10 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
         ? await updateUserAccount(editingUser.id, input)
         : await createUserAccount(input);
       setNotice(editingUser ? `${saved.name}'s details were updated.` : `${saved.name} can now sign in with ${saved.email}.`);
+      if (!editingUser) {
+        setUserSearch('');
+        setStatusFilter('All');
+      }
       setShowForm(false);
       resetForm();
       await load();
@@ -252,6 +288,84 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
     return (
       <div className="loading-state">
         <Loader2 size={18} className="animate-spin" /> Loading users...
+      </div>
+    );
+  }
+
+  if (isOperator) {
+    return (
+      <div className="page page-compact">
+        <div className="page-header page-header-center">
+          <div className="row">
+            {onBack && (
+              <button className="back-link" onClick={onBack}>
+                <ArrowLeft size={16} /> Back
+              </button>
+            )}
+            <div>
+              <h2 className="page-title page-title-icon">
+                <Users size={22} color="var(--primary)" /> Team Members
+              </h2>
+              <p className="page-subtitle">
+                Active colleagues in {currentUser.orgName || 'your organization'}
+              </p>
+            </div>
+          </div>
+          <div className="page-header-actions">
+            <SearchInput
+              value={userSearch}
+              onChange={setUserSearch}
+              ariaLabel="Search team directory"
+              placeholder="Search team members…"
+            />
+          </div>
+        </div>
+
+        {loadError && (
+          <div className="alert alert-error">
+            <AlertCircle size={16} className="alert-icon" /> Could not load the team directory.
+          </div>
+        )}
+
+        <div className="card">
+          <div className="table-container">
+            <table className="custom-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Designation</th>
+                  <th style={{ width: '180px' }}>Role</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredOperatorDirectory.length === 0 ? (
+                  <tr>
+                    <td colSpan={3} className="table-empty">
+                      {loadError
+                        ? 'The directory is temporarily unavailable.'
+                        : operatorDirectory.length === 0
+                          ? 'No active team members found.'
+                          : `No team members match “${userSearch.trim()}”.`}
+                    </td>
+                  </tr>
+                ) : filteredOperatorDirectory.map(member => (
+                  <tr key={member.id}>
+                    <td className="text-strong">
+                      {member.name}
+                      {member.id === currentUser.id && (
+                        <span className="text-dim" style={{ fontWeight: 400, fontSize: '0.78rem', marginLeft: '6px' }}>
+                          (you)
+                        </span>
+                      )}
+                    </td>
+                    <td className="text-muted">{member.designation || '—'}</td>
+                    <td><span className={`role-tag ${ROLE_STYLES[member.role]}`}>{member.role}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     );
   }
@@ -374,15 +488,21 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
           </div>
         </div>
 
-        <div className="page-header-actions">
+        <div className="page-header-actions team-header-controls">
+          <SearchInput
+            value={userSearch}
+            onChange={setUserSearch}
+            ariaLabel="Search team members"
+            placeholder="Search name, email or organization…"
+          />
           <StatusFilter
             value={statusFilter}
             onChange={setStatusFilter}
             ariaLabel="Filter team members by status"
             options={[
-              { value: 'All', label: `All statuses (${users.length})` },
-              { value: 'Active', label: `Active (${users.filter(user => user.status === 'Active').length})` },
-              { value: 'Inactive', label: `Inactive (${users.filter(user => user.status === 'Inactive').length})` },
+              { value: 'All', label: `All statuses (${searchMatchedUsers.length})` },
+              { value: 'Active', label: `Active (${searchMatchedUsers.filter(user => user.status === 'Active').length})` },
+              { value: 'Inactive', label: `Inactive (${searchMatchedUsers.filter(user => user.status === 'Inactive').length})` },
             ]}
           />
           {!showForm && (
@@ -548,7 +668,9 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
                   <td colSpan={6} className="table-empty">
                     {users.length === 0
                       ? 'No team members yet.'
-                      : `No ${statusFilter.toLowerCase()} team members.`}
+                      : hasUserSearch
+                        ? `No team members match “${userSearch.trim()}”${statusFilter === 'All' ? '.' : ` with ${statusFilter.toLowerCase()} status.`}`
+                        : `No ${statusFilter.toLowerCase()} team members.`}
                   </td>
                 </tr>
               ) : filteredUsers.map(u => {

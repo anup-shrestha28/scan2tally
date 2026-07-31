@@ -296,12 +296,9 @@ export default function App() {
         onLogout={handleLogout}
         isDark={isDark}
         onToggleTheme={() => setIsDark(d => !d)}
-        // Operators have no staff-management rights, so they never see the control.
-        onManageUsers={
-          currentUser && currentUser.role !== 'Operator'
-            ? () => setCurrentView('users')
-            : undefined
-        }
+        // Everyone may open Team. Operators get a deliberately read-only,
+        // same-organisation directory; management controls remain Admin-only.
+        onManageUsers={currentUser ? () => setCurrentView('users') : undefined}
         // The chart of accounts and the organisation overview are an Admin's
         // responsibility; an Operator has no use for either and cannot write to
         // the first, so neither control is shown to them at all.
