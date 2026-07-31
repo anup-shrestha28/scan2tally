@@ -319,6 +319,11 @@ CREATE POLICY "Users Access Receipts in Org Batches" ON public.receipts
         batch_id IN (
             SELECT id FROM public.scan_batches WHERE organization_id = public.get_auth_user_org_id()
         )
+    ) WITH CHECK (
+        batch_id IN (
+            SELECT id FROM public.scan_batches WHERE organization_id = public.get_auth_user_org_id()
+        ) AND
+        uploaded_by = auth.uid()
     );
 
 CREATE POLICY "Users Access Transactions in Org" ON public.transactions

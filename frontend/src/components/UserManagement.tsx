@@ -64,6 +64,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
 
   const [busy, setBusy] = useState(false);
   const [pendingDeleteUser, setPendingDeleteUser] = useState<User | null>(null);
+  const [pendingStatusUser, setPendingStatusUser] = useState<User | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -211,7 +212,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
       setShowForm(false);
       resetForm();
       await load();
-      setTimeout(() => setNotice(null), 8000);
+      setTimeout(() => setNotice(null), 1000);
     } catch (err: any) {
       setFormError(err?.message || 'Could not create the account.');
     } finally {
@@ -254,7 +255,9 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
         <div className="modal-icon modal-icon-danger"><Trash2 size={22} /></div>
         <h3 className="modal-title" id="delete-member-title">Delete account?</h3>
         <p className="modal-text">
-          Delete <strong>{pendingDeleteUser.name}</strong> permanently? This action cannot be undone.
+          Delete <strong>{pendingDeleteUser.name}</strong> permanently? Their batches, receipts,
+          extracted transactions, and exports will also be permanently deleted.
+          This action cannot be undone.
         </p>
         <div className="modal-actions">
           <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => setPendingDeleteUser(null)}>Cancel</button>
@@ -266,9 +269,12 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
     </div>
   );
 
-  const toggleStatus = async (user: User) => {
+  const confirmStatusChange = async () => {
+    if (!pendingStatusUser) return;
+    const user = pendingStatusUser;
     const next = user.status === 'Active' ? 'Inactive' : 'Active';
     const snapshot = users;
+    setPendingStatusUser(null);
     setUsers(prev => prev.map(u => (u.id === user.id ? { ...u, status: next } : u)));
     try {
       await setUserStatus(user.id, next);
@@ -283,6 +289,31 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
       setLoadError(err?.message || 'Could not update that user.');
     }
   };
+
+  const statusModal = pendingStatusUser && (() => {
+    const deactivating = pendingStatusUser.status === 'Active';
+    return (
+      <div className="modal-overlay modal-overlay-top" onClick={() => !busy && setPendingStatusUser(null)}>
+        <div className="modal modal-confirm" role="dialog" aria-modal="true" aria-labelledby="change-member-status-title" onClick={event => event.stopPropagation()}>
+          <div className="modal-icon modal-icon-danger"><AlertCircle size={22} /></div>
+          <h3 className="modal-title" id="change-member-status-title">
+            {deactivating ? 'Deactivate account?' : 'Reactivate account?'}
+          </h3>
+          <p className="modal-text">
+            {deactivating
+              ? <> <strong>{pendingStatusUser.name}</strong> will no longer be able to sign in. Their account and history will be kept.</>
+              : <>Allow <strong>{pendingStatusUser.name}</strong> to sign in again?</>}
+          </p>
+          <div className="modal-actions">
+            <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => setPendingStatusUser(null)}>Cancel</button>
+            <button type="button" className={deactivating ? 'btn btn-danger-solid' : 'btn btn-primary'} disabled={busy} onClick={confirmStatusChange}>
+              {deactivating ? 'Deactivate' : 'Reactivate'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  })();
 
   if (loading) {
     return (
@@ -392,27 +423,44 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
           </div>
         )}
         <div className="card member-detail-card">
-          <div className="row member-detail-summary" style={{ justifyContent: 'space-between' }}>
-            <div><h3 className="section-title">{selectedUser.name}</h3><span className={`role-tag ${ROLE_STYLES[selectedUser.role]}`}>{selectedUser.role}</span></div>
-            <span className={`status-pill ${selectedUser.status === 'Active' ? 'status-extracted' : 'status-failed'}`}>
-              {selectedUser.status === 'Active' ? <CheckCircle2 size={12} /> : <XCircle size={12} />} {selectedUser.status}
-            </span>
-          </div>
-          <div className="grid-2">
-            <div className="detail-item"><span className="text-dim text-xs"><Mail size={13} /> Email</span><strong>{selectedUser.email}</strong></div>
-            <div className="detail-item"><span className="text-dim text-xs"><Phone size={13} /> Phone</span><strong>{selectedUser.phone || 'Not provided'}</strong></div>
-            <div className="detail-item"><span className="text-dim text-xs"><Briefcase size={13} /> Designation</span><strong>{selectedUser.designation || 'Not provided'}</strong></div>
-            <div className="detail-item"><span className="text-dim text-xs">Organization</span><strong>{detailOrg}</strong></div>
-          </div>
-          {selectedUser.id === currentUser.id ? (
-            <div className="form-actions member-detail-actions">
-              <button className="btn btn-secondary" onClick={openPasswordChange}><LockKeyhole size={15} /> Change password</button>
+          <div className="member-detail-layout">
+            <aside className="member-detail-profile">
+              <div className="member-detail-avatar"><UserRound size={28} /></div>
+              <div className="member-detail-identity">
+                <span className="member-detail-eyebrow">Team member</span>
+                <h3>{selectedUser.name}</h3>
+                <div className="member-detail-badges">
+                  <span className={`role-tag ${ROLE_STYLES[selectedUser.role]}`}>{selectedUser.role}</span>
+                  <span className={`status-pill ${selectedUser.status === 'Active' ? 'status-extracted' : 'status-failed'}`}>
+                    {selectedUser.status === 'Active' ? <CheckCircle2 size={12} /> : <XCircle size={12} />} {selectedUser.status}
+                  </span>
+                </div>
+              </div>
+            </aside>
+            <div className="member-detail-content">
+              <div className="member-detail-section-heading">
+                <div>
+                  <span className="member-detail-eyebrow">Profile</span>
+                  <h4>Account information</h4>
+                </div>
+              </div>
+              <div className="member-detail-info-grid">
+                <div className="detail-item"><span className="text-dim text-xs"><Mail size={13} /> Email</span><strong>{selectedUser.email}</strong></div>
+                <div className="detail-item"><span className="text-dim text-xs"><Phone size={13} /> Phone</span><strong>{selectedUser.phone || 'Not provided'}</strong></div>
+                <div className="detail-item"><span className="text-dim text-xs"><Briefcase size={13} /> Designation</span><strong>{selectedUser.designation || 'Not provided'}</strong></div>
+                <div className="detail-item"><span className="text-dim text-xs">Organization</span><strong>{detailOrg}</strong></div>
+              </div>
+              {selectedUser.id === currentUser.id ? (
+                <div className="form-actions member-detail-actions">
+                  <button className="btn btn-secondary" onClick={openPasswordChange}><LockKeyhole size={15} /> Change password</button>
+                </div>
+              ) : selectedUser.role !== 'Super Admin' && <div className="form-actions member-detail-actions">
+                <button className="btn btn-primary" onClick={() => beginEdit(selectedUser)}><Pencil size={15} /> Edit member</button>
+                <button className="btn btn-secondary" onClick={openPasswordChange}><LockKeyhole size={15} /> Change password</button>
+                <button className="btn btn-danger" onClick={() => removeUser(selectedUser)} disabled={busy}><Trash2 size={15} /> Delete account</button>
+              </div>}
             </div>
-          ) : selectedUser.role !== 'Super Admin' && <div className="form-actions member-detail-actions">
-            <button className="btn btn-primary" onClick={() => beginEdit(selectedUser)}><Pencil size={15} /> Edit member</button>
-            <button className="btn btn-secondary" onClick={openPasswordChange}><LockKeyhole size={15} /> Change password</button>
-            <button className="btn btn-danger" onClick={() => removeUser(selectedUser)} disabled={busy}><Trash2 size={15} /> Delete account</button>
-          </div>}
+          </div>
         </div>
         {showPasswordChange && (
           <div className="modal-overlay" onClick={() => !passwordBusy && setShowPasswordChange(false)}>
@@ -463,6 +511,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
           </div>
         )}
         {deleteModal}
+        {statusModal}
       </div>
     );
   }
@@ -497,7 +546,13 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
           />
           <StatusFilter
             value={statusFilter}
-            onChange={setStatusFilter}
+            onChange={value => {
+              setStatusFilter(value);
+              if (showForm) {
+                setShowForm(false);
+                resetForm();
+              }
+            }}
             ariaLabel="Filter team members by status"
             options={[
               { value: 'All', label: `All statuses (${searchMatchedUsers.length})` },
@@ -562,34 +617,34 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
               </div>
             </div>
 
-            {!editingUser && <div className="grid-2">
-              <div className="form-group">
-                <label className="form-label">Password</label>
-                <div className="input-affix">
-                  <input
-                    type={showPassword ? 'text' : 'password'}
-                    className="form-input"
-                    value={password}
-                    onChange={e => setPassword(e.target.value)}
-                    placeholder={editingUser ? 'Leave blank to keep current password' : 'At least 8 characters'}
-                    autoComplete="new-password"
-                    minLength={8}
-                    disabled={busy}
-                    required={!editingUser}
-                  />
-                  <button
-                    type="button"
-                    className="input-affix-btn"
-                    onClick={() => setShowPassword(v => !v)}
-                    title={showPassword ? 'Hide password' : 'Show password'}
-                  >
-                    {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
-                  </button>
-                </div>
-              </div>
-            </div>}
-
             <div className="grid-2 user-form-profile-grid">
+              {!editingUser && (
+                <div className="form-group">
+                  <label className="form-label">Password</label>
+                  <div className="input-affix">
+                    <input
+                      type={showPassword ? 'text' : 'password'}
+                      className="form-input"
+                      value={password}
+                      onChange={e => setPassword(e.target.value)}
+                      placeholder="At least 8 characters"
+                      autoComplete="new-password"
+                      minLength={8}
+                      disabled={busy}
+                      required
+                    />
+                    <button
+                      type="button"
+                      className="input-affix-btn"
+                      onClick={() => setShowPassword(v => !v)}
+                      title={showPassword ? 'Hide password' : 'Show password'}
+                    >
+                      {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div className="form-group">
                 <label className="form-label">Designation <span className="text-dim">(optional)</span></label>
                 <input className="form-input" value={designation} onChange={e => setDesignation(e.target.value)}
@@ -649,7 +704,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
         </div>
       )}
 
-      <div className="card">
+      {!showForm && <div className="card">
         <div className="table-container">
           <table className="custom-table">
             <thead>
@@ -659,7 +714,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
                 <th>Organization</th>
                 <th style={{ width: '150px' }}>Role</th>
                 <th style={{ width: '110px' }}>Status</th>
-                <th style={{ width: '260px' }}>Actions</th>
+                <th style={{ width: '310px' }}>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -709,11 +764,11 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
                     </td>
                     <td>
                       <div className="table-actions">
-                        <button className="btn btn-sm btn-secondary" onClick={() => setSelectedUser(u)} title="View member details"><Eye size={14} /> View</button>
+                        <button className="btn btn-sm table-action-view" onClick={() => setSelectedUser(u)} title="View member details"><Eye size={14} /> View</button>
                         {!isSelf && u.role !== 'Super Admin' && <>
-                          <button className="btn btn-sm btn-secondary" onClick={() => beginEdit(u)} title="Edit member"><Pencil size={14} /></button>
-                          <button className="btn btn-sm btn-danger" onClick={() => removeUser(u)} title="Delete account"><Trash2 size={14} /></button>
-                          <button className={`btn btn-sm ${u.status === 'Active' ? 'btn-danger' : 'btn-secondary'}`} onClick={() => toggleStatus(u)} title={u.status === 'Active' ? 'Block this person from signing in' : 'Allow this person to sign in again'}>
+                          <button className="btn btn-sm table-action-edit table-action-icon" onClick={() => beginEdit(u)} title="Edit member" aria-label={`Edit ${u.name}`}><Pencil size={14} /></button>
+                          <button className="btn btn-sm table-action-delete table-action-icon" onClick={() => removeUser(u)} title="Delete account" aria-label={`Delete ${u.name}`}><Trash2 size={14} /></button>
+                          <button className={`btn btn-sm table-action-status ${u.status === 'Active' ? 'table-action-deactivate' : 'table-action-reactivate'}`} onClick={() => setPendingStatusUser(u)} title={u.status === 'Active' ? 'Block this person from signing in' : 'Allow this person to sign in again'}>
                             {u.status === 'Active' ? 'Deactivate' : 'Reactivate'}
                           </button>
                         </>}
@@ -725,8 +780,9 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
             </tbody>
           </table>
         </div>
-      </div>
+      </div>}
       {deleteModal}
+      {statusModal}
     </div>
   );
 }

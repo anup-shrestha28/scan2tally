@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+<<<<<<< Updated upstream
 import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, MoreHorizontal, ChevronLeft, ChevronRight } from 'lucide-react';
 import { ScanBatch, Receipt, ReceiptDisplayStatus, User, Transaction } from '../types';
 import SearchInput from './SearchInput';
@@ -6,6 +7,10 @@ import StatusFilter from './StatusFilter';
 import { supabase } from '../lib/supabase';
 import { filterBySearch, normalizeSearchText } from '../lib/search';
 import { usePolling } from '../lib/usePolling';
+=======
+import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, MoreHorizontal, ChevronLeft, ChevronRight, Search } from 'lucide-react';
+import { ScanBatch, Receipt, ReceiptStatus, User, Transaction } from '../types';
+>>>>>>> Stashed changes
 import {
   newId,
   fetchBatches,
@@ -30,6 +35,7 @@ import {
   downloadExportFile,
   ExportRecord,
 } from '../lib/db';
+import StatusFilter from './StatusFilter';
 
 /**
  * How often to re-check receipts the server is still working on.
@@ -250,11 +256,18 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const editingBatchRef = useRef<HTMLDivElement | null>(null);
   const [editedBatchName, setEditedBatchName] = useState<string>('');
   const [deletingBatchId, setDeletingBatchId] = useState<string | null>(null);
+  const [pendingDeleteReceiptIds, setPendingDeleteReceiptIds] = useState<string[]>([]);
   const [openBatchMenuId, setOpenBatchMenuId] = useState<string | null>(null);
   const [batchMenuPosition, setBatchMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const [receiptPage, setReceiptPage] = useState(1);
+<<<<<<< Updated upstream
   const [receiptStatusFilter, setReceiptStatusFilter] = useState<ReceiptStatusFilter>('All');
   const [batchSearch, setBatchSearch] = useState('');
+=======
+  const [receiptStatusFilter, setReceiptStatusFilter] = useState<'All' | ReceiptStatus>('All');
+  const [receiptSearch, setReceiptSearch] = useState('');
+  const [selectedReceiptIds, setSelectedReceiptIds] = useState<Set<string>>(new Set());
+>>>>>>> Stashed changes
   const [previewReceipt, setPreviewReceipt] = useState<Receipt | null>(null);
   const [previewRotation, setPreviewRotation] = useState(0);
   const [dragOver, setDragOver] = useState<boolean>(false);
@@ -336,6 +349,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     hasBatchSearch && activeBatch && !visibleBatches.some(batch => batch.id === activeBatch.id)
   );
   const activeReceipts = activeBatch?.receipts ?? [];
+<<<<<<< Updated upstream
   const receiptStatusCounts = activeReceipts.reduce<Record<ReceiptFilterStatus, number>>(
     (counts, receipt) => {
       counts[receiptFilterStatus(receipt)] += 1;
@@ -359,12 +373,25 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const paginatedReceipts = filteredReceipts.slice(
     (visibleReceiptPage - 1) * RECEIPTS_PER_PAGE,
     visibleReceiptPage * RECEIPTS_PER_PAGE
+=======
+  const normalizedReceiptSearch = receiptSearch.trim().toLocaleLowerCase();
+  const filteredReceipts = activeReceipts.filter(receipt => {
+    const matchesStatus = receiptStatusFilter === 'All' || receipt.status === receiptStatusFilter;
+    const matchesName = !normalizedReceiptSearch || receipt.filename.toLocaleLowerCase().includes(normalizedReceiptSearch);
+    return matchesStatus && matchesName;
+  });
+  const receiptPageCount = Math.max(1, Math.ceil(filteredReceipts.length / RECEIPTS_PER_PAGE));
+  const paginatedReceipts = filteredReceipts.slice(
+    (receiptPage - 1) * RECEIPTS_PER_PAGE,
+    receiptPage * RECEIPTS_PER_PAGE
+>>>>>>> Stashed changes
   );
   // An archived batch is a record, not a workspace. It stays fully readable and
   // exportable; what stops is adding to it.
   const isArchived = activeBatch?.status === 'Archived';
   // Derived from the receipts themselves rather than tracked separately, so a
   // reopened tab shows work still running on the server.
+<<<<<<< Updated upstream
   const batchIsProcessing = (batch: ScanBatch) => batch.receipts.some(
     r => r.status === 'Processing' || isReceiptQueued(r)
   );
@@ -373,6 +400,15 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const isProcessing = startingExtraction || activeReceipts.some(
     r => r.status === 'Processing' || isReceiptQueued(r)
   );
+=======
+  const batchIsProcessing = (batch: ScanBatch) => batch.receipts.some(r => r.status === 'Processing');
+  const isProcessing = startingExtraction || activeReceipts.some(r => r.status === 'Processing');
+  const selectableReceipts = filteredReceipts.filter(
+    receipt => !isArchived && !isProcessing && receipt.status !== 'Processing'
+  );
+  const allSelectableSelected = selectableReceipts.length > 0 &&
+    selectableReceipts.every(receipt => selectedReceiptIds.has(receipt.id));
+>>>>>>> Stashed changes
   const uploadsLocked = isProcessing || isArchived;
   const extractableCount = activeReceipts.filter(
     r => (r.status === 'Pending' || r.status === 'Failed') &&
@@ -389,6 +425,21 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   useEffect(() => {
     setReceiptPage(page => Math.min(page, receiptPageCount));
   }, [receiptPageCount]);
+
+  useEffect(() => {
+    setReceiptPage(1);
+  }, [activeBatch?.id, receiptStatusFilter, receiptSearch]);
+
+  useEffect(() => {
+    const visibleIds = new Set(activeReceipts.map(receipt => receipt.id));
+    setSelectedReceiptIds(previous => new Set(
+      [...previous].filter(id => visibleIds.has(id))
+    ));
+  }, [activeBatch?.id, activeReceipts]);
+
+  useEffect(() => {
+    setSelectedReceiptIds(new Set());
+  }, [activeBatch?.id, receiptStatusFilter, receiptSearch]);
 
   // Load everything this user is allowed to see. Row-level security decides
   // that server-side, so there is no organisation filter here.
@@ -966,6 +1017,11 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
       delete next[receiptId];
       return next;
     });
+    setSelectedReceiptIds(prev => {
+      const next = new Set(prev);
+      next.delete(receiptId);
+      return next;
+    });
 
     setReceiptTransactionsMap(prev => {
       const next = { ...prev };
@@ -1005,6 +1061,77 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     }
   };
 
+<<<<<<< Updated upstream
+=======
+  const handleDeleteSelectedReceipts = async () => {
+    if (!activeBatch || isArchived || isProcessing) return;
+    const ids = selectableReceipts
+      .filter(receipt => selectedReceiptIds.has(receipt.id))
+      .map(receipt => receipt.id);
+    if (!ids.length) return;
+    setPendingDeleteReceiptIds(ids);
+  };
+
+  const confirmDeleteSelectedReceipts = async () => {
+    if (!activeBatch || !pendingDeleteReceiptIds.length) return;
+    const ids = pendingDeleteReceiptIds;
+    setPendingDeleteReceiptIds([]);
+
+    const snapshot = batches;
+    const idSet = new Set(ids);
+    setBatches(previous => previous.map(batch => batch.id === activeBatch.id
+      ? { ...batch, receipts: batch.receipts.filter(receipt => !idSet.has(receipt.id)) }
+      : batch
+    ));
+    setSelectedReceiptIds(new Set());
+    setUploadedFilesMap(previous => {
+      const next = { ...previous };
+      ids.forEach(id => {
+        const receipt = activeBatch.receipts.find(item => item.id === id);
+        if (receipt?.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(receipt.previewUrl);
+        delete next[id];
+      });
+      return next;
+    });
+    setReceiptTransactionsMap(previous => {
+      const next = { ...previous };
+      ids.forEach(id => delete next[id]);
+      return next;
+    });
+
+    try {
+      await Promise.all(ids.map(id => deleteReceipt(id)));
+      setSaveError(null);
+    } catch (err: any) {
+      setBatches(snapshot);
+      setSaveError(err?.message || 'Could not delete the selected files.');
+    }
+  };
+
+  const updateReceipt = (batchId: string, receiptId: string, patch: Partial<Receipt>) => {
+    setBatches(prev => prev.map(b => {
+      if (b.id !== batchId) return b;
+      return { ...b, receipts: b.receipts.map(r => r.id === receiptId ? { ...r, ...patch } : r) };
+    }));
+  };
+
+  /**
+   * Mirrors a receipt's extraction outcome into the database.
+   *
+   * Kept separate from updateReceipt so the on-screen state updates instantly
+   * while the write happens in the background; a failed write must not wedge
+   * the extraction loop, so it only records a message.
+   */
+  const persistReceiptState = (
+    receiptId: string,
+    patch: { status?: string; error_message?: string | null; verification_warnings?: string[] }
+  ) => {
+    updateReceiptRow(receiptId, patch).catch((err: any) => {
+      setSaveError(`Could not save extraction status: ${err?.message || 'unknown error'}`);
+    });
+  };
+
+>>>>>>> Stashed changes
   /**
    * Hands one receipt to the server and returns once it has been accepted.
    *
@@ -1264,6 +1391,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                   </div>
                 ) : (
                   <div className="batch-item-content">
+<<<<<<< Updated upstream
                     <button
                       type="button"
                       className="batch-item-select"
@@ -1287,6 +1415,28 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                         </span>
                       </span>
                     </button>
+=======
+                    <div className="batch-item-details">
+                      <div
+                        className="batch-item-name"
+                        title="Double-click to rename"
+                        onDoubleClick={event => {
+                          event.stopPropagation();
+                          if (isProcessing && b.id === activeBatchId) return;
+                          setEditingBatchId(b.id);
+                          setEditedBatchName(b.name);
+                        }}
+                      >
+                        <span>{b.name}</span>
+                      </div>
+                      <div className="batch-item-meta">
+                        <span>{b.receipts.length} {b.receipts.length === 1 ? 'receipt' : 'receipts'}</span>
+                        <span>•</span>
+                        <span>{formatBatchDate(b.created_at)}</span>
+                        {b.id === activeBatchId && <span className="batch-current-badge">Current</span>}
+                      </div>
+                    </div>
+>>>>>>> Stashed changes
 
                     <div className="batch-menu">
                       <button
@@ -1481,10 +1631,15 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
           </div>
 
           <div className="card">
+<<<<<<< Updated upstream
             <div className="receipt-table-toolbar">
+=======
+            <div className="row row-between files-toolbar">
+>>>>>>> Stashed changes
               <h4 className="section-title">
-                Files in {activeBatch.name} ({activeBatch.receipts.length})
+                Files in {activeBatch.name} ({filteredReceipts.length}{receiptStatusFilter !== 'All' ? ` of ${activeBatch.receipts.length}` : ''})
               </h4>
+<<<<<<< Updated upstream
               <div className="receipt-table-toolbar-actions">
                 {exportHistory[0]?.file_path && (
                   <button
@@ -1514,6 +1669,56 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                   ]}
                 />
               </div>
+=======
+              <div className="files-controls">
+                {selectedReceiptIds.size > 0 && (
+                  <button
+                    type="button"
+                    className="btn btn-danger btn-sm files-delete-selected"
+                    onClick={handleDeleteSelectedReceipts}
+                    disabled={isArchived || isProcessing}
+                  >
+                    <Trash2 size={14} /> Delete selected ({selectedReceiptIds.size})
+                  </button>
+                )}
+                <label className="files-search">
+                  <Search size={14} aria-hidden="true" />
+                  <input
+                    type="search"
+                    value={receiptSearch}
+                    onChange={event => setReceiptSearch(event.target.value)}
+                    placeholder="Search file names"
+                    aria-label="Search files in this batch"
+                  />
+                </label>
+                <div className="files-filter">
+                  <StatusFilter
+                    value={receiptStatusFilter}
+                    onChange={setReceiptStatusFilter}
+                    ariaLabel="Filter files by extraction status"
+                    options={[
+                      { value: 'All', label: `All statuses (${activeBatch.receipts.length})` },
+                      { value: 'Pending', label: `Pending (${activeBatch.receipts.filter(r => r.status === 'Pending').length})` },
+                      { value: 'Processing', label: `Processing (${activeBatch.receipts.filter(r => r.status === 'Processing').length})` },
+                      { value: 'Extracted', label: `Extracted (${activeBatch.receipts.filter(r => r.status === 'Extracted').length})` },
+                      { value: 'Failed', label: `Failed (${activeBatch.receipts.filter(r => r.status === 'Failed').length})` },
+                    ]}
+                  />
+                </div>
+              </div>
+              {exportHistory[0]?.file_path && (
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => handleDownloadExport(exportHistory[0])}
+                  disabled={downloadingExportId === exportHistory[0].id}
+                  title="Download the latest Excel export for this batch"
+                >
+                  {downloadingExportId === exportHistory[0].id
+                    ? <Loader2 size={13} className="animate-spin" />
+                    : <FileSpreadsheet size={13} />} Download latest Excel
+                </button>
+              )}
+>>>>>>> Stashed changes
             </div>
 
             {!activeBatch.receipts.length ? (
@@ -1525,22 +1730,60 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                 <table className="custom-table">
                   <thead>
                     <tr>
-                      <th>File Name</th>
+                      <th>
+                        <label className="file-select-control">
+                          <input
+                            type="checkbox"
+                            checked={allSelectableSelected}
+                            disabled={!selectableReceipts.length}
+                            onChange={event => {
+                              setSelectedReceiptIds(previous => {
+                                const next = new Set(previous);
+                                selectableReceipts.forEach(receipt => {
+                                  if (event.target.checked) next.add(receipt.id);
+                                  else next.delete(receipt.id);
+                                });
+                                return next;
+                              });
+                            }}
+                            aria-label="Select all visible files"
+                          />
+                          <span>File Name</span>
+                        </label>
+                      </th>
                       <th>Extraction Status</th>
                       <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
+<<<<<<< Updated upstream
                     {paginatedReceipts.length === 0 ? (
                       <tr>
                         <td colSpan={3} className="table-empty">
                           No receipts match this status.
                         </td>
+=======
+                    {!paginatedReceipts.length ? (
+                      <tr>
+                        <td colSpan={3} className="table-empty">No files match this status.</td>
+>>>>>>> Stashed changes
                       </tr>
                     ) : paginatedReceipts.map(rcpt => (
                       <tr key={rcpt.id}>
                         <td style={{ fontWeight: 500 }}>
                           <div className="file-cell">
+                            <input
+                              type="checkbox"
+                              checked={selectedReceiptIds.has(rcpt.id)}
+                              disabled={isArchived || isProcessing || rcpt.status === 'Processing'}
+                              onChange={event => setSelectedReceiptIds(previous => {
+                                const next = new Set(previous);
+                                if (event.target.checked) next.add(rcpt.id);
+                                else next.delete(rcpt.id);
+                                return next;
+                              })}
+                              aria-label={`Select ${rcpt.filename}`}
+                            />
                             <FileText size={16} color="var(--primary)" />
                             {rcpt.filename}
                           </div>
@@ -1617,7 +1860,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                             {rcpt.status !== 'Processing' && !isReceiptQueued(rcpt) && !isArchived && (
                               <button
                                 className="btn btn-danger btn-sm"
-                                onClick={() => handleDeleteReceipt(rcpt.id)}
+                                onClick={() => setPendingDeleteReceiptIds([rcpt.id])}
                                 title="Delete Receipt"
                                 disabled={isProcessing || uploadIsBusy(rcpt)}
                               >
@@ -1633,7 +1876,11 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                 {receiptPageCount > 1 && (
                   <div className="files-pagination" aria-label="Receipt file pages">
                     <span className="pagination-summary">
+<<<<<<< Updated upstream
                       Showing {(visibleReceiptPage - 1) * RECEIPTS_PER_PAGE + 1}–{Math.min(visibleReceiptPage * RECEIPTS_PER_PAGE, filteredReceipts.length)} of {filteredReceipts.length}
+=======
+                      Showing {(receiptPage - 1) * RECEIPTS_PER_PAGE + 1}–{Math.min(receiptPage * RECEIPTS_PER_PAGE, filteredReceipts.length)} of {filteredReceipts.length}
+>>>>>>> Stashed changes
                     </span>
                     <div className="pagination-controls">
                       <button
@@ -1720,6 +1967,26 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
       </div>
 
       {/* Delete Confirmation Modal */}
+      {pendingDeleteReceiptIds.length > 0 && (
+        <div className="modal-overlay modal-overlay-top" onClick={() => setPendingDeleteReceiptIds([])}>
+          <div className="modal modal-confirm" role="dialog" aria-modal="true" aria-labelledby="delete-receipts-title" onClick={event => event.stopPropagation()}>
+            <div className="modal-icon modal-icon-danger">
+              <Trash2 size={24} />
+            </div>
+            <h3 className="modal-title" id="delete-receipts-title">Delete {pendingDeleteReceiptIds.length === 1 ? 'file' : 'files'}?</h3>
+            <p className="modal-text">
+              Delete <strong>{pendingDeleteReceiptIds.length} selected {pendingDeleteReceiptIds.length === 1 ? 'file' : 'files'}</strong> permanently? This action cannot be undone.
+            </p>
+            <div className="modal-actions">
+              <button type="button" className="btn btn-secondary" onClick={() => setPendingDeleteReceiptIds([])}>Cancel</button>
+              <button type="button" className="btn btn-danger btn-danger-solid" onClick={confirmDeleteSelectedReceipts}>
+                <Trash2 size={15} /> Delete permanently
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {deletingBatchId && (
         <div className="modal-overlay">
           <div className="modal modal-confirm">

@@ -1403,6 +1403,43 @@ async def delete_user(user_id: str, authorization: Optional[str] = Header(None))
         target = await _load_target_user(client, user_id, caller)
         if target.get("role") == "Super Admin":
             raise HTTPException(status_code=403, detail="Super Admin accounts cannot be deleted here.")
+
+        # The account is explicitly destructive: remove rows that reference the
+        # profile before deleting auth.users (which cascades to public.users).
+        # Otherwise scan_batches.created_by and the other required audit FKs
+        # correctly reject the auth deletion.
+        dependent_deletes = (
+            ("receipts", {"uploaded_by": f"eq.{user_id}"}),
+            ("exports", {"generated_by": f"eq.{user_id}"}),
+            ("scan_batches", {"created_by": f"eq.{user_id}"}),
+        )
+        for table, params in dependent_deletes:
+            response = await client.delete(
+                f"{SUPABASE_URL}/rest/v1/{table}",
+                headers={**_svc_headers(), "Prefer": "return=minimal"},
+                params=params,
+            )
+            if response.status_code not in (200, 204):
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Could not remove the account's linked {table} records.",
+                )
+
+        # These references are optional, so preserve the rows while removing
+        # the deleted user's identity from their audit fields.
+        for table, column in (("users", "created_by"), ("ledgers", "created_by"), ("transactions", "updated_by")):
+            response = await client.patch(
+                f"{SUPABASE_URL}/rest/v1/{table}",
+                headers={**_svc_headers(), "Prefer": "return=minimal"},
+                params={column: f"eq.{user_id}"},
+                json={column: None},
+            )
+            if response.status_code not in (200, 204):
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Could not clear the account's audit references in {table}.",
+                )
+
         deleted = await client.delete(
             f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}", headers=_svc_headers()
         )
@@ -1414,14 +1451,6 @@ async def delete_user(user_id: str, authorization: Optional[str] = Header(None))
             raw_detail = " ".join(
                 str(error_body.get(key) or "") for key in ("message", "details", "hint", "code")
             )
-            if "foreign key" in raw_detail.lower() or "scan_batches_created_by_fkey" in raw_detail:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "This account cannot be deleted because it has batches or other records "
-                        "linked to it. Deactivate the account instead to keep its history safe."
-                    ),
-                )
             detail = error_body.get("message") or "Could not delete the login."
             raise HTTPException(status_code=400, detail=detail)
     return {"id": user_id}
