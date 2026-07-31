@@ -1297,7 +1297,16 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                       }}
                     >
                       <span className="batch-item-details">
-                        <span className="batch-item-name">
+                        <span
+                          className="batch-item-name"
+                          title="Double-click to rename"
+                          onDoubleClick={event => {
+                            event.stopPropagation();
+                            if (isProcessing && b.id === activeBatchId) return;
+                            setEditingBatchId(b.id);
+                            setEditedBatchName(b.name);
+                          }}
+                        >
                           <span>{b.name}</span>
                         </span>
                         <span className="batch-item-meta">
