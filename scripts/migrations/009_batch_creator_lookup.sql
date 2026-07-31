@@ -12,7 +12,7 @@ AS $$
           b.organization_id = public.get_auth_user_org_id()
           AND (
             b.created_by = auth.uid()
-            OR (b.hidden_from_users = FALSE AND public.get_auth_user_role() = 'Admin')
+            OR b.hidden_from_users = FALSE
             OR (b.hidden_from_users = TRUE AND b.hidden_by = auth.uid())
           )
         )

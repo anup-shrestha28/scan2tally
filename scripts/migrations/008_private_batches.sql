@@ -13,8 +13,7 @@ CREATE POLICY "Users Access Org Scan Batches" ON public.scan_batches
     USING (
         organization_id = public.get_auth_user_org_id() AND
         (
-            (hidden_from_users = FALSE AND
-                (created_by = auth.uid() OR public.get_auth_user_role() = 'Admin'))
+            hidden_from_users = FALSE
             OR (hidden_from_users = TRUE AND hidden_by = auth.uid())
         )
     )
