@@ -364,27 +364,15 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
 
       {showImbalanceWarning && (
         <div className="modal-overlay modal-overlay-top">
-          <div className="modal modal-prompt">
+          <div className="modal modal-prompt imbalance-modal">
             <div className="modal-head modal-head-warning">
               <AlertTriangle size={23} />
               <h3 className="modal-title">Imbalance Detected</h3>
             </div>
             <p className="modal-text">
-              These vouchers do not balance. Tally will not post them as written.
-              Download the file anyway?
+              Debit / Credit Imbalance Detected in one or more receipts.<br />
+              Are you sure you want to download Excel?
             </p>
-            {/* Naming them is the point: "one or more receipts" sends the
-                accountant back to hunt through the whole batch. */}
-            <ul className="imbalance-list">
-              {imbalancedGroups.map(group => (
-                <li key={group.name}>
-                  <span className="imbalance-name">{group.name}</span>
-                  <span className="imbalance-diff">
-                    off by Rs. {Math.abs(group.difference).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                  </span>
-                </li>
-              ))}
-            </ul>
             <div className="modal-actions">
               <button className="btn btn-secondary" onClick={() => setShowImbalanceWarning(false)}>
                 Cancel
