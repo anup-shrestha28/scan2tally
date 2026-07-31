@@ -1656,7 +1656,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                           </div>
                         </td>
                         <td>
-                          <div className="row-actions">
+                          <div className="row-actions receipt-row-actions">
                             <button
                               className="btn btn-secondary btn-sm"
                               onClick={() => handleReviewSingleReceipt(rcpt)}

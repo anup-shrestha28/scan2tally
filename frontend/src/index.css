@@ -2336,6 +2336,31 @@ body.light .user-form-card .form-label {
   max-width: 260px;
 }
 .row-actions { display: flex; gap: 8px; }
+.receipt-row-actions {
+  align-items: center;
+  gap: 12px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.receipt-row-actions .btn {
+  min-height: 34px;
+}
+
+.receipt-row-actions .btn:first-child {
+  min-width: 108px;
+}
+
+.receipt-row-actions .btn:nth-child(2) {
+  min-width: 102px;
+}
+
+.receipt-row-actions .btn:last-child {
+  width: 36px;
+  min-width: 36px;
+  padding-left: 0;
+  padding-right: 0;
+}
 .table-actions {
   display: flex;
   align-items: center;
