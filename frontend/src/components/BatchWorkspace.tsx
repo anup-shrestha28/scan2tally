@@ -250,6 +250,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const editingBatchRef = useRef<HTMLDivElement | null>(null);
   const [editedBatchName, setEditedBatchName] = useState<string>('');
   const [deletingBatchId, setDeletingBatchId] = useState<string | null>(null);
+  const [pendingDeleteReceiptIds, setPendingDeleteReceiptIds] = useState<string[]>([]);
   const [openBatchMenuId, setOpenBatchMenuId] = useState<string | null>(null);
   const [batchMenuPosition, setBatchMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const [receiptPage, setReceiptPage] = useState(1);
@@ -354,11 +355,23 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     }
   );
   const normalizedReceiptSearch = normalizeSearchText(receiptSearch);
-  const filteredReceipts = activeReceipts.filter(receipt => {
-    const matchesStatus = receiptStatusFilter === 'All' || receiptFilterStatus(receipt) === receiptStatusFilter;
-    const matchesName = !normalizedReceiptSearch || normalizeSearchText(receipt.filename).includes(normalizedReceiptSearch);
-    return matchesStatus && matchesName;
-  });
+  const filteredReceipts = activeReceipts
+    .filter(receipt => {
+      const matchesStatus = receiptStatusFilter === 'All' || receiptFilterStatus(receipt) === receiptStatusFilter;
+      const matchesName = !normalizedReceiptSearch || normalizeSearchText(receipt.filename).includes(normalizedReceiptSearch);
+      return matchesStatus && matchesName;
+    })
+    .sort((a, b) => {
+      const issueScore = (receipt: Receipt) => (
+        receipt.upload_state === 'failed' ||
+        receipt.status === 'Failed' ||
+        Boolean(receipt.enqueue_error || receipt.error_message) ||
+        isLowResolution(receipt)
+          ? 0
+          : 1
+      );
+      return issueScore(a) - issueScore(b);
+    });
   const receiptPageCount = Math.max(1, Math.ceil(filteredReceipts.length / RECEIPTS_PER_PAGE));
   const visibleReceiptPage = Math.min(receiptPage, receiptPageCount);
   const paginatedReceipts = filteredReceipts.slice(
@@ -399,6 +412,50 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     setReceiptPage(1);
     setSelectedReceiptIds(new Set());
   }, [activeBatch?.id, receiptStatusFilter, receiptSearch]);
+
+  useEffect(() => {
+    if (!previewReceipt) return;
+
+    const handlePreviewKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setPreviewReceipt(null);
+        return;
+      }
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+
+      const currentIndex = activeReceipts.findIndex(receipt => receipt.id === previewReceipt.id);
+      if (currentIndex < 0) return;
+      const nextIndex = event.key === 'ArrowRight' ? currentIndex + 1 : currentIndex - 1;
+      const nextReceipt = activeReceipts[nextIndex];
+      if (!nextReceipt) return;
+
+      event.preventDefault();
+      setPreviewRotation(0);
+      setPreviewReceipt(nextReceipt);
+    };
+
+    window.addEventListener('keydown', handlePreviewKeyDown);
+    return () => window.removeEventListener('keydown', handlePreviewKeyDown);
+  }, [activeReceipts, previewReceipt]);
+
+  useEffect(() => {
+    if (previewReceipt || receiptPageCount <= 1) return;
+
+    const handlePaginationKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.matches('input, select, textarea, [contenteditable="true"]')) return;
+      if (event.key === 'ArrowLeft' && visibleReceiptPage > 1) {
+        event.preventDefault();
+        setReceiptPage(page => Math.max(1, page - 1));
+      } else if (event.key === 'ArrowRight' && visibleReceiptPage < receiptPageCount) {
+        event.preventDefault();
+        setReceiptPage(page => Math.min(receiptPageCount, page + 1));
+      }
+    };
+
+    window.addEventListener('keydown', handlePaginationKeyDown);
+    return () => window.removeEventListener('keydown', handlePaginationKeyDown);
+  }, [previewReceipt, receiptPageCount, visibleReceiptPage]);
 
   // Load everything this user is allowed to see. Row-level security decides
   // that server-side, so there is no organisation filter here.
@@ -1021,7 +1078,13 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
       .filter(receipt => selectedReceiptIds.has(receipt.id) && !uploadIsBusy(receipt) && receipt.status !== 'Processing')
       .map(receipt => receipt.id);
     if (!ids.length) return;
-    if (!window.confirm(`Delete ${ids.length} selected ${ids.length === 1 ? 'file' : 'files'} permanently?`)) return;
+    setPendingDeleteReceiptIds(ids);
+  };
+
+  const confirmDeleteSelectedReceipts = async () => {
+    const ids = pendingDeleteReceiptIds;
+    if (!ids.length) return;
+    setPendingDeleteReceiptIds([]);
     setSelectedReceiptIds(new Set());
     for (const id of ids) await handleDeleteReceipt(id);
   };
@@ -1531,7 +1594,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                     onClick={handleDeleteSelectedReceipts}
                     disabled={isArchived || isProcessing}
                   >
-                    <Trash2 size={14} /> Delete selected ({selectedReceiptIds.size})
+                    <Trash2 size={14} /> Delete ({selectedReceiptIds.size})
                   </button>
                 )}
                 <label className="files-search">
@@ -1580,7 +1643,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
               </div>
             ) : (
               <div className="table-container">
-                <table className="custom-table">
+                <table className="custom-table receipt-file-table">
                   <thead>
                     <tr>
                       <th>
@@ -1804,6 +1867,28 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
         )}
       </div>
 
+      {pendingDeleteReceiptIds.length > 0 && (
+        <div className="modal-overlay modal-overlay-top" onClick={() => setPendingDeleteReceiptIds([])}>
+          <div className="modal modal-confirm" role="dialog" aria-modal="true" aria-labelledby="delete-files-title" onClick={event => event.stopPropagation()}>
+            <div className="modal-icon modal-icon-danger"><Trash2 size={24} /></div>
+            <h3 className="modal-title" id="delete-files-title">
+              Delete {pendingDeleteReceiptIds.length === 1 ? 'file' : 'files'}?
+            </h3>
+            <p className="modal-text">
+              Delete <strong>{pendingDeleteReceiptIds.length} selected {pendingDeleteReceiptIds.length === 1 ? 'file' : 'files'}</strong> permanently? This action cannot be undone.
+            </p>
+            <div className="modal-actions">
+              <button type="button" className="btn btn-secondary" onClick={() => setPendingDeleteReceiptIds([])}>
+                Cancel
+              </button>
+              <button type="button" className="btn btn-danger btn-danger-solid" onClick={confirmDeleteSelectedReceipts}>
+                <Trash2 size={15} /> Delete permanently
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Delete Confirmation Modal */}
       {deletingBatchId && (
         <div className="modal-overlay">
@@ -1835,7 +1920,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
           <div className="card preview-card" onClick={(e) => e.stopPropagation()}>
             <div className="row row-between">
               <h3 style={{ fontSize: '1rem', fontWeight: 700, margin: 0 }}>Image Preview</h3>
-              <span className="text-muted text-xs">{previewReceipt.filename}</span>
+              <span className="text-muted text-xs">{previewReceipt.filename} · Use ← → to browse</span>
             </div>
 
             <div className="preview-stage">
@@ -1862,6 +1947,19 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
 
               {!isPdfReceipt(previewReceipt) && (
                 <div className="rotate-bar">
+                  {!isArchived && !isProcessing && !uploadIsBusy(previewReceipt) && previewReceipt.status !== 'Processing' && (
+                    <button
+                      type="button"
+                      className="rotate-btn preview-delete-control"
+                      title="Delete file"
+                      onClick={() => {
+                        setPreviewReceipt(null);
+                        setPendingDeleteReceiptIds([previewReceipt.id]);
+                      }}
+                    >
+                      <Trash2 size={22} />
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="rotate-btn"

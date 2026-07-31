@@ -680,6 +680,9 @@ body {
 }
 
 .files-delete-selected {
+  min-height: 38px;
+  padding: 9px 18px;
+  font-size: 0.85rem;
   white-space: nowrap;
 }
 
@@ -2341,6 +2344,24 @@ body.light .user-form-card .form-label {
   gap: 12px;
   flex-wrap: nowrap;
   white-space: nowrap;
+  justify-content: flex-end;
+}
+
+.receipt-file-table th:nth-child(2),
+.receipt-file-table td:nth-child(2) {
+  text-align: center;
+}
+
+.receipt-file-table td:nth-child(2) .receipt-status-stack {
+  align-items: center;
+}
+
+.receipt-file-table td:nth-child(3) {
+  text-align: right;
+}
+
+.receipt-file-table th:nth-child(3) {
+  text-align: center;
 }
 
 .receipt-row-actions .btn {
@@ -2474,8 +2495,8 @@ body.light .user-form-card .form-label {
   z-index: 2;
 }
 .rotate-btn {
-  width: 44px;
-  height: 44px;
+  width: 60px;
+  height: 60px;
   border-radius: 50%;
   border: none;
   background: rgba(15, 23, 42, 0.75);
@@ -2485,6 +2506,15 @@ body.light .user-form-card .form-label {
   justify-content: center;
   cursor: pointer;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+
+.preview-delete-control {
+  background: rgba(225, 29, 72, 0.82);
+}
+
+.preview-delete-control:hover {
+  background: #e11d48;
+  transform: translateY(-2px);
 }
 
 /* Compact rotate control that lives in a panel header. Hover was previously
