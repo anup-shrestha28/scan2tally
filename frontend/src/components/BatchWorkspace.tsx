@@ -1108,6 +1108,10 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
 
   const handleOpenReviewer = (receipt: Receipt) => {
     if (!activeBatch) return;
+    if (!allReceiptsExtracted) {
+      setSaveError('Review & Edit becomes available after every file in this batch has finished extraction.');
+      return;
+    }
     onSelectBatch(
       activeBatch,
       receipt,
@@ -1123,6 +1127,10 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
 
   const handleContinueReview = async () => {
     if (!activeBatch || openingReview) return;
+    if (!allReceiptsExtracted) {
+      setSaveError('Review & Edit becomes available after every file in this batch has finished extraction.');
+      return;
+    }
     setOpeningReview(true);
     try {
       const transactionMap = await fetchTransactionsForBatch(activeBatch.id);
@@ -1659,7 +1667,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                             {/* The way back into extracted rows on a later
                                 visit — without this the reviewer is reachable
                                 only in the session that ran the extraction. */}
-                            {rcpt.status === 'Extracted' && (
+                            {allReceiptsExtracted && rcpt.status === 'Extracted' && (
                               <button
                                 className="btn btn-primary btn-sm"
                                 onClick={() => handleOpenReviewer(rcpt)}
