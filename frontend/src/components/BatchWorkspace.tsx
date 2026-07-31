@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, MoreHorizontal, ChevronLeft, ChevronRight } from 'lucide-react';
+import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, MoreHorizontal, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import { ScanBatch, Receipt, ReceiptDisplayStatus, User, Transaction } from '../types';
 import SearchInput from './SearchInput';
 import StatusFilter from './StatusFilter';
@@ -255,6 +255,8 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const [receiptPage, setReceiptPage] = useState(1);
   const [receiptStatusFilter, setReceiptStatusFilter] = useState<ReceiptStatusFilter>('All');
   const [batchSearch, setBatchSearch] = useState('');
+  const [receiptSearch, setReceiptSearch] = useState('');
+  const [selectedReceiptIds, setSelectedReceiptIds] = useState<Set<string>>(new Set());
   const [previewReceipt, setPreviewReceipt] = useState<Receipt | null>(null);
   const [previewRotation, setPreviewRotation] = useState(0);
   const [dragOver, setDragOver] = useState<boolean>(false);
@@ -351,9 +353,12 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
       Failed: 0,
     }
   );
-  const filteredReceipts = receiptStatusFilter === 'All'
-    ? activeReceipts
-    : activeReceipts.filter(receipt => receiptFilterStatus(receipt) === receiptStatusFilter);
+  const normalizedReceiptSearch = normalizeSearchText(receiptSearch);
+  const filteredReceipts = activeReceipts.filter(receipt => {
+    const matchesStatus = receiptStatusFilter === 'All' || receiptFilterStatus(receipt) === receiptStatusFilter;
+    const matchesName = !normalizedReceiptSearch || normalizeSearchText(receipt.filename).includes(normalizedReceiptSearch);
+    return matchesStatus && matchesName;
+  });
   const receiptPageCount = Math.max(1, Math.ceil(filteredReceipts.length / RECEIPTS_PER_PAGE));
   const visibleReceiptPage = Math.min(receiptPage, receiptPageCount);
   const paginatedReceipts = filteredReceipts.slice(
@@ -389,6 +394,11 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   useEffect(() => {
     setReceiptPage(page => Math.min(page, receiptPageCount));
   }, [receiptPageCount]);
+
+  useEffect(() => {
+    setReceiptPage(1);
+    setSelectedReceiptIds(new Set());
+  }, [activeBatch?.id, receiptStatusFilter, receiptSearch]);
 
   // Load everything this user is allowed to see. Row-level security decides
   // that server-side, so there is no organisation filter here.
@@ -1005,6 +1015,17 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     }
   };
 
+  const handleDeleteSelectedReceipts = async () => {
+    if (!activeBatch || isArchived || isProcessing) return;
+    const ids = filteredReceipts
+      .filter(receipt => selectedReceiptIds.has(receipt.id) && !uploadIsBusy(receipt) && receipt.status !== 'Processing')
+      .map(receipt => receipt.id);
+    if (!ids.length) return;
+    if (!window.confirm(`Delete ${ids.length} selected ${ids.length === 1 ? 'file' : 'files'} permanently?`)) return;
+    setSelectedReceiptIds(new Set());
+    for (const id of ids) await handleDeleteReceipt(id);
+  };
+
   /**
    * Hands one receipt to the server and returns once it has been accepted.
    *
@@ -1486,6 +1507,26 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                 Files in {activeBatch.name} ({activeBatch.receipts.length})
               </h4>
               <div className="receipt-table-toolbar-actions">
+                {selectedReceiptIds.size > 0 && (
+                  <button
+                    type="button"
+                    className="btn btn-danger btn-sm files-delete-selected"
+                    onClick={handleDeleteSelectedReceipts}
+                    disabled={isArchived || isProcessing}
+                  >
+                    <Trash2 size={14} /> Delete selected ({selectedReceiptIds.size})
+                  </button>
+                )}
+                <label className="files-search">
+                  <Search size={14} aria-hidden="true" />
+                  <input
+                    type="search"
+                    value={receiptSearch}
+                    onChange={event => setReceiptSearch(event.target.value)}
+                    placeholder="Search file names"
+                    aria-label="Search files in this batch"
+                  />
+                </label>
                 {exportHistory[0]?.file_path && (
                   <button
                     className="btn btn-secondary btn-sm"
@@ -1525,7 +1566,22 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                 <table className="custom-table">
                   <thead>
                     <tr>
-                      <th>File Name</th>
+                      <th>
+                        <label className="file-select-control">
+                          <input
+                            type="checkbox"
+                            checked={filteredReceipts.length > 0 && filteredReceipts.every(receipt => selectedReceiptIds.has(receipt.id))}
+                            disabled={isArchived || isProcessing || !filteredReceipts.length}
+                            onChange={event => setSelectedReceiptIds(previous => {
+                              const next = new Set(previous);
+                              filteredReceipts.forEach(receipt => event.target.checked ? next.add(receipt.id) : next.delete(receipt.id));
+                              return next;
+                            })}
+                            aria-label="Select all visible files"
+                          />
+                          <span>File Name</span>
+                        </label>
+                      </th>
                       <th>Extraction Status</th>
                       <th>Actions</th>
                     </tr>
@@ -1541,6 +1597,18 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                       <tr key={rcpt.id}>
                         <td style={{ fontWeight: 500 }}>
                           <div className="file-cell">
+                            <input
+                              type="checkbox"
+                              checked={selectedReceiptIds.has(rcpt.id)}
+                              disabled={isArchived || isProcessing || uploadIsBusy(rcpt) || rcpt.status === 'Processing'}
+                              onChange={event => setSelectedReceiptIds(previous => {
+                                const next = new Set(previous);
+                                if (event.target.checked) next.add(rcpt.id);
+                                else next.delete(rcpt.id);
+                                return next;
+                              })}
+                              aria-label={`Select ${rcpt.filename}`}
+                            />
                             <FileText size={16} color="var(--primary)" />
                             {rcpt.filename}
                           </div>
