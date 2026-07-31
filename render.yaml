@@ -1,0 +1,75 @@
+# Render Blueprint for the Scan2Tally backend.
+#
+# The frontend is NOT here — it is a static Vite bundle and lives on Vercel.
+# Only the FastAPI service (OCR, extraction queue, user admin) runs on Render.
+#
+# Import this file from the Render dashboard: New > Blueprint > pick this repo.
+# Secrets are marked `sync: false`, which means Render prompts for them on the
+# first deploy and never stores them in git.
+services:
+  - type: web
+    name: scan2tally-api
+    runtime: python
+    plan: starter
+    region: singapore
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+
+    # Deliberately one instance, one uvicorn worker. The extraction queue is
+    # sequential platform-wide by design — exactly one voucher is read at a
+    # time — and each process starts its own consumer in the app lifespan.
+    # Scaling this out would run several consumers against the same queue.
+    numInstances: 1
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+
+      # ---- Secrets: entered in the Render dashboard, never committed ----
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+
+      # ---- Tunables: same defaults as backend/.env.example ----
+      - key: OPENAI_VISION_MODEL
+        value: gpt-5.5
+      - key: OCR_CONSENSUS_RUNS
+        value: "3"
+      - key: VISION_PROVIDER_TIMEOUT_SECONDS
+        value: "300"
+      - key: EXTRACTION_QUEUE_POLL_SECONDS
+        value: "2"
+      - key: EXTRACTION_QUEUE_ABSENCE_GRACE_SECONDS
+        value: "30"
+      - key: EXTRACTION_QUEUE_VISIBILITY_SECONDS
+        value: "900"
+      - key: EXTRACTION_QUEUE_HEARTBEAT_SECONDS
+        value: "30"
+      - key: EXTRACTION_QUEUE_MAX_ATTEMPTS
+        value: "3"
+      - key: EXTRACTION_TIMEOUT_SECONDS
+        value: "600"
+      - key: EXTRACTION_FINALIZATION_MARGIN_SECONDS
+        value: "300"
+
+      # Storage/database quotas the in-app capacity monitor warns against.
+      # These are Supabase Free-plan limits; raise to 100 / 8192 on Pro.
+      - key: SUPABASE_STORAGE_QUOTA_GB
+        value: "1"
+      - key: SUPABASE_DATABASE_QUOTA_MB
+        value: "500"
+      - key: SUPABASE_USAGE_WARNING_PERCENT
+        value: "80"
+      - key: SUPABASE_USAGE_CRITICAL_PERCENT
+        value: "95"
+      - key: SUPABASE_CAPACITY_CACHE_SECONDS
+        value: "25"
+      - key: SUPABASE_CAPACITY_ALERT_INTERVAL_SECONDS
+        value: "30"
