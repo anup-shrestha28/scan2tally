@@ -574,6 +574,12 @@ body {
   text-transform: uppercase;
 }
 
+.batch-hidden-icon {
+  flex: 0 0 auto;
+  color: var(--primary);
+  opacity: 0.9;
+}
+
 .batch-item-meta {
   display: flex;
   align-items: center;

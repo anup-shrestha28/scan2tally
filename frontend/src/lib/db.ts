@@ -436,7 +436,7 @@ export async function fetchBatches(): Promise<ScanBatch[]> {
   const query = (includeQueue: boolean) => supabase
       .from('scan_batches')
       .select(`
-        id, name, status, hidden_from_users, hidden_by, created_at,
+        id, created_by, name, status, hidden_from_users, hidden_by, created_at,
         receipts (
           id, filename, file_path, status, error_message,
           image_width, image_height, verification_warnings, created_at, updated_at
@@ -457,8 +457,19 @@ export async function fetchBatches(): Promise<ScanBatch[]> {
 
   if (error) throw new Error(error.message);
 
+  const creatorIds = [...new Set((data || []).map((batch: any) => batch.created_by).filter(Boolean))];
+  const creatorNames = new Map<string, string>();
+  if (creatorIds.length) {
+    const { data: creators } = await supabase.rpc('get_batch_creator_names', { p_batch_ids: creatorIds });
+    for (const creator of creators || []) {
+      if (creator?.id && creator?.name) creatorNames.set(creator.id, creator.name);
+    }
+  }
+
   return (data || []).map((b: any) => ({
     id: b.id,
+    created_by_name: creatorNames.get(b.created_by) || null,
+    created_by: b.created_by,
     name: b.name,
     status: b.status,
     hidden_from_users: Boolean(b.hidden_from_users),

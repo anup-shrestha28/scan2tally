@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, Download, Eye, EyeOff, MoreHorizontal, ChevronLeft, ChevronRight, Search } from 'lucide-react';
+import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, Download, Eye, EyeOff, LockKeyhole, MoreHorizontal, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import { ScanBatch, Receipt, ReceiptDisplayStatus, User, Transaction } from '../types';
 import SearchInput from './SearchInput';
 import StatusFilter from './StatusFilter';
@@ -1408,11 +1408,24 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                           }}
                         >
                           <span>{b.name}</span>
+                          {b.hidden_from_users && (
+                            <LockKeyhole
+                              size={14}
+                              className="batch-hidden-icon"
+                              aria-label="Hidden from other users"
+                            />
+                          )}
                         </span>
                         <span className="batch-item-meta">
                           <span>{b.receipts.length} {b.receipts.length === 1 ? 'receipt' : 'receipts'}</span>
                           <span>•</span>
                           <span>{formatBatchDate(b.created_at)}</span>
+                          {b.created_by !== currentUser.id && b.created_by && (
+                            <>
+                              <span>•</span>
+                              <span title={b.created_by}>Created by {b.created_by_name || `ID ${b.created_by}`}</span>
+                            </>
+                          )}
                           {b.id === activeBatchId && <span className="batch-current-badge">Current</span>}
                         </span>
                       </span>

@@ -139,6 +139,8 @@ export interface Receipt {
 
 export interface ScanBatch {
   id: string;
+  created_by?: string;
+  created_by_name?: string | null;
   name: string;
   status: BatchStatus;
   hidden_from_users?: boolean;
