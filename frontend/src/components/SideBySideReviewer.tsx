@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2, RotateCcw, RotateCw, ChevronLeft, ChevronRight, Loader2, HelpCircle } from 'lucide-react';
+import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2, RotateCcw, RotateCw, ZoomIn, ChevronLeft, ChevronRight, Loader2, HelpCircle } from 'lucide-react';
 import { ScanBatch, Receipt, Transaction, User, Ledger } from '../types';
 import { saveTransactionsForReceipt, getReceiptImageUrl, deleteReceipt, fetchLedgers, resolveLedgerName } from '../lib/db';
 import { LEDGER_MATCHING } from '../lib/features';
@@ -118,6 +118,7 @@ export default function SideBySideReviewer({
   const dirtyRef = useRef(false);
   const changeVersionRef = useRef(0);
   const [rotation, setRotation] = useState(0);
+  const [zoom, setZoom] = useState(1);
   const [showImbalanceModal, setShowImbalanceModal] = useState(false);
   const [pendingExportData, setPendingExportData] = useState<Transaction[] | null>(null);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
@@ -178,6 +179,7 @@ export default function SideBySideReviewer({
     dirtyRef.current = false;
     setCurrentIndex(nextIndex);
     setRotation(0);
+    setZoom(1);
   };
 
   useEffect(() => {
@@ -619,16 +621,26 @@ export default function SideBySideReviewer({
               <button className="panel-rotate" onClick={rotateRight} title="Rotate Right">
                 <RotateCw size={14} />
               </button>
+              <button className="panel-rotate zoom-icon-control" onClick={() => setZoom(value => value > 1 ? 1 : 2)} title={zoom > 1 ? 'Reset zoom' : 'Zoom image'}>
+                <ZoomIn size={14} />
+              </button>
             </div>
           </div>
 
-          <div className="image-viewer image-viewer-fixed">
+          <div
+            className="image-viewer image-viewer-fixed"
+            onWheel={event => {
+              event.preventDefault();
+              setZoom(value => Math.max(1, Math.min(3, value - event.deltaY * 0.002)));
+            }}
+          >
             {imageUrl ? (
               <img
                 src={imageUrl}
                 alt="Uploaded Handwritten Bill Receipt"
                 className="receipt-img receipt-img-rotatable"
-                style={{ transform: `rotate(${rotation}deg)` }}
+                style={{ transform: `rotate(${rotation}deg) scale(${zoom})` }}
+                onDoubleClick={() => setZoom(value => value > 1 ? 1 : 2)}
               />
             ) : (
               <div className="text-muted text-center">No Receipt Image Selected</div>

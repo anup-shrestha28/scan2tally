@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, Download, Eye, EyeOff, LockKeyhole, MoreHorizontal, ChevronLeft, ChevronRight, Search } from 'lucide-react';
+import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, Download, Eye, EyeOff, LockKeyhole, ZoomIn, MoreHorizontal, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import { ScanBatch, Receipt, ReceiptDisplayStatus, User, Transaction } from '../types';
 import SearchInput from './SearchInput';
 import StatusFilter from './StatusFilter';
@@ -262,6 +262,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const [selectedReceiptIds, setSelectedReceiptIds] = useState<Set<string>>(new Set());
   const [previewReceipt, setPreviewReceipt] = useState<Receipt | null>(null);
   const [previewRotation, setPreviewRotation] = useState(0);
+  const [previewZoom, setPreviewZoom] = useState(1);
   const [dragOver, setDragOver] = useState<boolean>(false);
   // True only while extraction requests are being handed to the server. Once
   // they are accepted the receipts' own Processing status takes over, so this
@@ -445,6 +446,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
 
       event.preventDefault();
       setPreviewRotation(0);
+      setPreviewZoom(1);
       setPreviewReceipt(nextReceipt);
     };
 
@@ -1214,6 +1216,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
 
   const handleReviewSingleReceipt = (receipt: Receipt) => {
     setPreviewRotation(0);
+    setPreviewZoom(1);
     setPreviewReceipt(receipt);
   };
 
@@ -2015,7 +2018,14 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
               <span className="text-muted text-xs">{previewReceipt.filename} · Use ← → to browse</span>
             </div>
 
-            <div className="preview-stage">
+            <div
+              className="preview-stage"
+              onWheel={event => {
+                if (isPdfReceipt(previewReceipt)) return;
+                event.preventDefault();
+                setPreviewZoom(zoom => Math.max(1, Math.min(3, zoom - event.deltaY * 0.002)));
+              }}
+            >
               {isPdfReceipt(previewReceipt) ? (
                 <iframe
                   className="preview-frame"
@@ -2027,10 +2037,11 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                   className="preview-img"
                   src={previewReceipt.previewUrl}
                   alt={previewReceipt.filename}
+                  onDoubleClick={() => setPreviewZoom(zoom => zoom > 1 ? 1 : 2)}
                   // Rotation swaps which axis is constrained, so these two are
                   // genuinely dynamic and stay inline.
                   style={{
-                    transform: `rotate(${previewRotation}deg)`,
+                    transform: `rotate(${previewRotation}deg) scale(${previewZoom})`,
                     maxWidth: Math.abs(previewRotation % 180) === 90 ? '68vh' : '100%',
                     maxHeight: Math.abs(previewRotation % 180) === 90 ? '100%' : '68vh',
                   }}
@@ -2067,6 +2078,9 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                     onClick={() => setPreviewRotation(r => r + 90)}
                   >
                     <RotateCw size={22} />
+                  </button>
+                  <button type="button" className="rotate-btn zoom-icon-control" title={previewZoom > 1 ? 'Reset zoom' : 'Zoom image'} onClick={() => setPreviewZoom(zoom => zoom > 1 ? 1 : 2)}>
+                    <ZoomIn size={22} />
                   </button>
                 </div>
               )}

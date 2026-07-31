@@ -2636,6 +2636,12 @@ body.light .user-form-card .form-label {
   object-fit: contain;
   display: block;
   transition: transform 0.3s ease;
+  cursor: zoom-in;
+}
+
+.preview-img:active,
+.receipt-img-rotatable:active {
+  cursor: grabbing;
 }
 
 .rotate-bar {
