@@ -1817,10 +1817,12 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                         <td>
                           <div className="row-actions receipt-row-actions">
                             <button
-                              className="btn btn-secondary btn-sm"
+                              className="btn btn-secondary btn-sm preview-image-button"
                               onClick={() => handleReviewSingleReceipt(rcpt)}
+                              title="Preview Image"
+                              aria-label="Preview Image"
                             >
-                              Preview Image
+                              <ZoomIn size={15} />
                             </button>
 
                             {/* The way back into extracted rows on a later
