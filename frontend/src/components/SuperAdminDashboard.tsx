@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Building2, Plus, CheckCircle2, XCircle, Loader2, AlertCircle, Database, HardDrive } from 'lucide-react';
-import { CapacityMetric, Organization, OrgStatus, PlatformUsage } from '../types';
+import { CapacityConnectionState, CapacityMetric, Organization, OrgStatus, PlatformUsage } from '../types';
 import StatusFilter from './StatusFilter';
 import { usePolling } from '../lib/usePolling';
 import {
@@ -14,14 +14,14 @@ type OrganizationStatusFilter = 'All' | OrgStatus;
 
 interface SuperAdminDashboardProps {
   usage: PlatformUsage | null;
-  usageError?: string | null;
+  connectionState: CapacityConnectionState;
 }
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const unitIndex = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const value = bytes / (1024 ** unitIndex);
+  const unitIndex = Math.min(Math.floor(Math.log(bytes) / Math.log(1000)), units.length - 1);
+  const value = bytes / (1000 ** unitIndex);
   return `${value.toLocaleString(undefined, { maximumFractionDigits: unitIndex < 2 ? 0 : 2 })} ${units[unitIndex]}`;
 }
 
@@ -72,7 +72,38 @@ function CapacityMeter({
   );
 }
 
-export default function SuperAdminDashboard({ usage, usageError }: SuperAdminDashboardProps) {
+function CapacityPlaceholder({
+  label, icon, state, note,
+}: {
+  label: string;
+  icon: React.ReactNode;
+  state: CapacityConnectionState | 'unavailable';
+  note: string;
+}) {
+  const value = state === 'connecting'
+    ? 'Connecting…'
+    : state === 'retrying'
+      ? 'Reconnecting…'
+      : 'Not connected';
+
+  return (
+    <div className="capacity-meter capacity-meter-neutral capacity-meter-placeholder" aria-busy={state === 'connecting'}>
+      <div className="capacity-meter-head">
+        <div className="row-sm">
+          {icon}
+          <div>
+            <div className="capacity-meter-label">{label}</div>
+            <div className="capacity-meter-value">{value}</div>
+          </div>
+        </div>
+      </div>
+      <div className="capacity-progress"><span /></div>
+      <div className="capacity-meter-note">{note}</div>
+    </div>
+  );
+}
+
+export default function SuperAdminDashboard({ usage, connectionState }: SuperAdminDashboardProps) {
   const [orgs, setOrgs] = useState<Organization[]>([]);
   const [stats, setStats] = useState({ activeUsers: 0, receipts: 0, batches: 0 });
   const [loading, setLoading] = useState(true);
@@ -204,23 +235,30 @@ export default function SuperAdminDashboard({ usage, usageError }: SuperAdminDas
         </div>
       </div>
 
-      {usage?.storage && usage.database ? (
-        <section className="card capacity-card" aria-labelledby="capacity-heading">
-          <div className="capacity-card-head">
-            <div>
-              <h3 id="capacity-heading" className="section-title section-title-lg">
-                <HardDrive size={20} color="var(--primary)" /> Supabase Capacity
-              </h3>
-              <p className="text-muted text-xs">
-                Live project usage · warning at {usage.warningThresholdPercent}% · critical at {usage.criticalThresholdPercent}%
-              </p>
-            </div>
-            <span className="capacity-checked">
-              Updated {new Date(usage.checkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-            </span>
+      <section className="card capacity-card" aria-labelledby="capacity-heading">
+        <div className="capacity-card-head">
+          <div>
+            <h3 id="capacity-heading" className="section-title section-title-lg">
+              <HardDrive size={20} color="var(--primary)" /> Supabase Capacity
+            </h3>
+            <p className="text-muted text-xs">
+              {usage?.monitoringMode === 'storage-only' ? 'Live file storage' : 'Live project usage'}
+              {' · current bytes, not billing-cycle average'}
+              {usage && ` · warning at ${usage.warningThresholdPercent}% · critical at ${usage.criticalThresholdPercent}%`}
+            </p>
           </div>
+          <span className={`capacity-live capacity-live-${connectionState}`} aria-live="polite">
+            <span className="capacity-live-dot" />
+            {connectionState === 'live' && usage
+              ? `Live · ${new Date(usage.checkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
+              : connectionState === 'retrying'
+                ? 'Reconnecting'
+                : 'Connecting'}
+          </span>
+        </div>
 
-          <div className="capacity-grid">
+        <div className="capacity-grid">
+          {usage?.storage ? (
             <CapacityMeter
               label="File storage"
               icon={<HardDrive size={18} />}
@@ -229,35 +267,46 @@ export default function SuperAdminDashboard({ usage, usageError }: SuperAdminDas
               criticalAt={usage.criticalThresholdPercent}
               note={`${usage.storage.objectCount || 0} stored ${usage.storage.objectCount === 1 ? 'file' : 'files'}`}
             />
+          ) : (
+            <CapacityPlaceholder
+              label="File storage"
+              icon={<HardDrive size={18} />}
+              state={connectionState}
+              note="Reading current files from Supabase Storage"
+            />
+          )}
+
+          {usage?.database ? (
             <CapacityMeter
               label="Database"
               icon={<Database size={18} />}
               metric={usage.database}
               warningAt={usage.warningThresholdPercent}
               criticalAt={usage.criticalThresholdPercent}
-              note="Tables, indexes and Supabase-managed schemas"
+              note="All databases, tables and indexes in this project cluster"
             />
-          </div>
-
-          {Object.keys(usage.storage.byBucket || {}).length > 0 && (
-            <div className="capacity-breakdown" aria-label="Storage by bucket">
-              {Object.entries(usage.storage.byBucket || {})
-                .sort(([, first], [, second]) => second - first)
-                .map(([bucket, bytes]) => (
-                  <span key={bucket}><strong>{bucket}</strong> {formatBytes(bytes)}</span>
-                ))}
-            </div>
+          ) : (
+            <CapacityPlaceholder
+              label="Database"
+              icon={<Database size={18} />}
+              state={usage?.monitoringMode === 'storage-only' ? 'unavailable' : connectionState}
+              note={usage?.monitoringMode === 'storage-only'
+                ? 'Database tracking activates when the secure metric is deployed'
+                : 'Reading current tables and indexes'}
+            />
           )}
-        </section>
-      ) : usageError ? (
-        <div className="alert alert-warning alert-top">
-          <AlertCircle size={16} className="alert-icon" />
-          <div className="alert-body">
-            <div className="alert-title">Capacity monitoring needs setup</div>
-            <div className="alert-detail">{usageError}</div>
-          </div>
         </div>
-      ) : null}
+
+        {usage?.storage && Object.keys(usage.storage.byBucket || {}).length > 0 && (
+          <div className="capacity-breakdown" aria-label="Storage by bucket">
+            {Object.entries(usage.storage.byBucket || {})
+              .sort(([, first], [, second]) => second - first)
+              .map(([bucket, bytes]) => (
+                <span key={bucket}><strong>{bucket}</strong> {formatBytes(bytes)}</span>
+              ))}
+          </div>
+        )}
+      </section>
 
       {showAddModal && (
         <div className="card" style={{ borderColor: 'var(--primary)' }}>

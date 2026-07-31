@@ -296,6 +296,7 @@ export async function fetchPlatformUsage(): Promise<PlatformUsage> {
   const base = import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:8000';
   const res = await fetch(`${base}/api/platform-usage`, {
     headers: { Authorization: `Bearer ${token}` },
+    cache: 'no-store',
   });
   const body = await res.json().catch(() => null);
   if (!res.ok) {

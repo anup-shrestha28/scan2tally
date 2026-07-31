@@ -47,6 +47,7 @@ export interface User {
 
 export type CapacityLevel = 'healthy' | 'warning' | 'critical' | 'full';
 export type CapacityResource = 'storage' | 'database';
+export type CapacityConnectionState = 'connecting' | 'live' | 'retrying';
 
 export interface CapacityMetric {
   usedBytes: number;
@@ -66,6 +67,8 @@ export interface PlatformUsage {
   warningThresholdPercent: number;
   criticalThresholdPercent: number;
   checkedAt: string;
+  /** Full uses the protected SQL metric; storage-only is the live API fallback. */
+  monitoringMode: 'full' | 'storage-only';
   /** Exact metrics are omitted by the API for Admin and Operator callers. */
   storage?: CapacityMetric;
   database?: CapacityMetric;

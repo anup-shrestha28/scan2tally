@@ -1,8 +1,11 @@
 """Capacity warnings must change at the configured boundaries, not near them."""
 
+import asyncio
+import json
 import os
 import sys
 
+import httpx
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -86,3 +89,57 @@ def test_super_admin_receives_exact_metrics_and_bucket_breakdown():
     assert response["storage"]["objectCount"] == 9
     assert response["storage"]["byBucket"] == {"receipts": 800, "exports": 50}
     assert response["database"]["usedBytes"] == 400
+
+
+def test_storage_only_snapshot_remains_live_without_inventing_database_usage():
+    response = main.build_platform_usage_response({
+        "storage_bytes": 850,
+        "database_bytes": None,
+        "storage_objects": 3,
+        "storage_by_bucket": {"receipts": 850},
+    }, "Super Admin")
+
+    assert response["level"] == "warning"
+    assert response["monitoringMode"] == "storage-only"
+    assert response["storage"]["usedBytes"] == 850
+    assert "database" not in response
+
+
+def test_storage_api_fallback_traverses_folders_and_sums_object_metadata(monkeypatch):
+    monkeypatch.setattr(main, "SUPABASE_URL", "https://project.supabase.co")
+    monkeypatch.setattr(main, "SUPABASE_SERVICE_ROLE_KEY", "service-role-test-key")
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/storage/v1/bucket":
+            return httpx.Response(200, json=[{"id": "receipts"}, {"id": "exports"}])
+
+        payload = json.loads(request.content)
+        prefix = payload["prefix"]
+        if request.url.path.endswith("/receipts") and prefix == "":
+            return httpx.Response(200, json=[
+                {"id": None, "name": "org-1", "metadata": None},
+                {"id": "root-file", "name": "root.jpg", "metadata": {"size": 5}},
+            ])
+        if request.url.path.endswith("/receipts") and prefix == "org-1":
+            return httpx.Response(200, json=[
+                {"id": "file-1", "name": "one.jpg", "metadata": {"size": "10"}},
+                {"id": "file-2", "name": "two.jpg", "metadata": {"contentLength": 20}},
+            ])
+        if request.url.path.endswith("/exports") and prefix == "":
+            return httpx.Response(200, json=[
+                {"id": "export-1", "name": "report.xlsx", "metadata": {"size": 7}},
+            ])
+        return httpx.Response(404, json={"message": "unexpected request"})
+
+    async def collect():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            return await main.fetch_storage_usage_via_api(client)
+
+    snapshot = asyncio.run(collect())
+
+    assert snapshot == {
+        "database_bytes": None,
+        "storage_bytes": 42,
+        "storage_objects": 4,
+        "storage_by_bucket": {"receipts": 35, "exports": 7},
+    }

@@ -182,12 +182,22 @@ Editor. They are additive and safe to run more than once.
 | `002_ledgers_claiming_audit.sql` | the `ledgers` chart of accounts, job claiming, and a stored copy of what the model returned |
 | `003_export_file_storage.sql` | private storage and policies for generated Excel files |
 | `004_platform_capacity_usage.sql` | service-role-only Storage and database capacity metrics |
+| `005_platform_database_cluster_usage.sql` | corrects database usage to include the entire Postgres cluster |
 
 **Run `002` before deploying this version of the web app** — it reads the ledger columns the
 migration adds, and will show a load error without them.
 
-**Run `004` before enabling capacity monitoring.** Until it is applied, the Super Admin dashboard
-shows a setup notice and Admin/Operator screens continue normally without a capacity banner.
+**Run `004` to enable the database-size metric.** Before it is applied, the monitor still tracks
+file storage live through the server-side Storage API; the Super Admin dashboard marks only the
+database metric as unavailable. Admin and Operator capacity warnings continue to use every live
+metric that is available. The frontend refreshes every 30 seconds, and the backend shares a
+25-second snapshot so several signed-in users do not each trigger the same aggregate scan.
+
+The in-app monitor reports **current live bytes**. Supabase's organization-level Free plan usage
+card reports billing-cycle averages, so its Storage number can legitimately lag behind or differ
+from this live snapshot. Migration `005` makes the live database number use the same all-databases
+cluster query documented for Supabase's project database report. Displayed MB/GB and quota
+percentages use decimal units, matching the Supabase plan card rather than binary MiB/GiB.
 
 The *backend* is deliberately tolerant of the gap: it detects the missing columns at start-up,
 prints a warning, and carries on extracting vouchers with ledger matching switched off, so an

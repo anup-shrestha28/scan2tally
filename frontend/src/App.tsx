@@ -9,7 +9,7 @@ import UserManagement from './components/UserManagement';
 import BatchWorkspace from './components/BatchWorkspace';
 import SideBySideReviewer from './components/SideBySideReviewer';
 import ExcelExporter from './components/ExcelExporter';
-import { User, ScanBatch, Receipt, Transaction, PlatformUsage } from './types';
+import { User, ScanBatch, Receipt, Transaction, PlatformUsage, CapacityConnectionState } from './types';
 import { supabase } from './lib/supabase';
 import { fetchCurrentUser, fetchPlatformUsage, signOut } from './lib/db';
 import { LEDGER_MATCHING } from './lib/features';
@@ -57,7 +57,7 @@ export default function App() {
   const [allReceiptTransactions, setAllReceiptTransactions] = useState<Record<string, Transaction[]>>(savedState.receiptTransactions || {});
   const [isDark, setIsDark] = useState<boolean>(true);
   const [platformUsage, setPlatformUsage] = useState<PlatformUsage | null>(null);
-  const [platformUsageError, setPlatformUsageError] = useState<string | null>(null);
+  const [capacityConnection, setCapacityConnection] = useState<CapacityConnectionState>('connecting');
 
   useEffect(() => {
     document.body.classList.toggle('light', !isDark);
@@ -130,10 +130,10 @@ export default function App() {
       const usage = await fetchPlatformUsage();
       if (signal.aborted) return;
       setPlatformUsage(usage);
-      setPlatformUsageError(null);
-    } catch (err: any) {
+      setCapacityConnection('live');
+    } catch (err) {
       if (signal.aborted) return;
-      setPlatformUsageError(err?.message || 'Could not load Supabase capacity.');
+      setCapacityConnection('retrying');
       throw err;
     }
   };
@@ -143,24 +143,26 @@ export default function App() {
   useEffect(() => {
     if (!currentUser) {
       setPlatformUsage(null);
-      setPlatformUsageError(null);
+      setCapacityConnection('connecting');
       return;
     }
 
+    setPlatformUsage(null);
+    setCapacityConnection('connecting');
     const controller = new AbortController();
     refreshPlatformUsage(controller.signal).catch(() => {
-      // The Super Admin dashboard surfaces setup errors. Other roles should not
-      // see an alarming banner merely because monitoring itself is unavailable.
+      // Monitoring is supplemental. Polling retries in the background, while a
+      // deployment/configuration problem stays out of the user-facing dashboard.
     });
     return () => controller.abort();
   }, [currentUser?.id]);
 
-  // Capacity changes much more slowly than extraction status. One minute keeps
-  // warnings timely without turning a simple aggregate into noisy traffic.
+  // A 30-second snapshot is near-real-time for an aggregate capacity metric.
+  // The polling hook prevents overlap and backs off while Supabase is unavailable.
   usePolling(async ({ signal }) => refreshPlatformUsage(signal), {
     enabled: Boolean(currentUser),
-    intervalMs: 60000,
-    maxIntervalMs: 300000,
+    intervalMs: 30000,
+    maxIntervalMs: 120000,
     resetKey: currentUser?.id || '',
   });
 
@@ -272,7 +274,7 @@ export default function App() {
             onBack={() => setCurrentView('batches')}
           />
         ) : currentUser.role === 'Super Admin' ? (
-          <SuperAdminDashboard usage={platformUsage} usageError={platformUsageError} />
+          <SuperAdminDashboard usage={platformUsage} connectionState={capacityConnection} />
         ) : currentView === 'ledgers' && LEDGER_MATCHING ? (
           <LedgerManager
             currentUser={currentUser}

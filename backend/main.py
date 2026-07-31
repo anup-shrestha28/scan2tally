@@ -11,6 +11,7 @@ from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
+from urllib.parse import quote
 import httpx
 import ledger_matching
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
@@ -42,8 +43,10 @@ if supabase_admin_available:
 else:
     print("⚠️ Supabase admin API not configured — user creation endpoint disabled")
 
-BYTES_PER_MIB = 1024 ** 2
-BYTES_PER_GIB = 1024 ** 3
+# Supabase's plan card reports decimal MB/GB. Keep quota percentages and the UI
+# in those same units (1 MB = 1,000,000 bytes) so the figures compare directly.
+BYTES_PER_MB = 1000 ** 2
+BYTES_PER_GB = 1000 ** 3
 
 
 def _positive_env_number(name: str, default: float) -> float:
@@ -70,16 +73,25 @@ def _percent_env(name: str, default: float) -> float:
 # live values below come from this project; deployments with multiple projects
 # can therefore assign this app the capacity budget they actually want it to use.
 STORAGE_QUOTA_BYTES = int(
-    _positive_env_number("SUPABASE_STORAGE_QUOTA_GB", 1.0) * BYTES_PER_GIB
+    _positive_env_number("SUPABASE_STORAGE_QUOTA_GB", 1.0) * BYTES_PER_GB
 )
 DATABASE_QUOTA_BYTES = int(
-    _positive_env_number("SUPABASE_DATABASE_QUOTA_MB", 500.0) * BYTES_PER_MIB
+    _positive_env_number("SUPABASE_DATABASE_QUOTA_MB", 500.0) * BYTES_PER_MB
 )
 USAGE_WARNING_PERCENT = min(99.0, _percent_env("SUPABASE_USAGE_WARNING_PERCENT", 80.0))
 USAGE_CRITICAL_PERCENT = max(
     USAGE_WARNING_PERCENT,
     _percent_env("SUPABASE_USAGE_CRITICAL_PERCENT", 95.0),
 )
+STORAGE_LIST_PAGE_SIZE = 100
+STORAGE_LIST_MAX_REQUESTS = 5_000
+CAPACITY_CACHE_SECONDS = max(
+    5.0,
+    _positive_env_number("SUPABASE_CAPACITY_CACHE_SECONDS", 25.0),
+)
+_capacity_snapshot_cache: Optional[dict] = None
+_capacity_snapshot_expires_at = 0.0
+_capacity_snapshot_lock = asyncio.Lock()
 
 
 def _usage_metric(used_bytes: int, quota_bytes: int) -> dict:
@@ -92,14 +104,18 @@ def _usage_metric(used_bytes: int, quota_bytes: int) -> dict:
     }
 
 
-def build_capacity_status(storage_bytes: int, database_bytes: int) -> dict:
-    """Builds the role-independent warning state from live byte counts."""
+def build_capacity_status(storage_bytes: int, database_bytes: Optional[int]) -> dict:
+    """Builds the warning state from every capacity metric currently available."""
     storage = _usage_metric(storage_bytes, STORAGE_QUOTA_BYTES)
-    database = _usage_metric(database_bytes, DATABASE_QUOTA_BYTES)
-    resource, limiting = max(
-        (("storage", storage), ("database", database)),
-        key=lambda item: item[1]["percent"],
+    database = (
+        _usage_metric(database_bytes, DATABASE_QUOTA_BYTES)
+        if database_bytes is not None
+        else None
     )
+    available_metrics = [("storage", storage)]
+    if database is not None:
+        available_metrics.append(("database", database))
+    resource, limiting = max(available_metrics, key=lambda item: item[1]["percent"])
     percent = limiting["percent"]
 
     if percent >= 100:
@@ -116,7 +132,9 @@ def build_capacity_status(storage_bytes: int, database_bytes: int) -> dict:
         lead = "is within its configured capacity"
 
     label = "File storage" if resource == "storage" else "Database storage"
-    if level == "healthy":
+    if level == "healthy" and database is None:
+        message = "Supabase file storage is within its configured limit."
+    elif level == "healthy":
         message = "Supabase project capacity is within the configured limits."
     else:
         message = (
@@ -124,7 +142,7 @@ def build_capacity_status(storage_bytes: int, database_bytes: int) -> dict:
             "Contact the Super Admin to free space or increase the configured quota."
         )
 
-    return {
+    status = {
         "level": level,
         "resource": resource,
         "percent": percent,
@@ -132,15 +150,18 @@ def build_capacity_status(storage_bytes: int, database_bytes: int) -> dict:
         "warningThresholdPercent": USAGE_WARNING_PERCENT,
         "criticalThresholdPercent": USAGE_CRITICAL_PERCENT,
         "storage": storage,
-        "database": database,
     }
+    if database is not None:
+        status["database"] = database
+    return status
 
 
 def build_platform_usage_response(snapshot: dict, caller_role: str) -> dict:
     """Filters a raw service-role snapshot to the caller's permitted detail."""
+    database_bytes = snapshot.get("database_bytes")
     status = build_capacity_status(
         storage_bytes=snapshot.get("storage_bytes") or 0,
-        database_bytes=snapshot.get("database_bytes") or 0,
+        database_bytes=(int(database_bytes) if database_bytes is not None else None),
     )
     response = {
         key: status[key]
@@ -149,7 +170,8 @@ def build_platform_usage_response(snapshot: dict, caller_role: str) -> dict:
             "warningThresholdPercent", "criticalThresholdPercent",
         )
     }
-    response["checkedAt"] = datetime.now(timezone.utc).isoformat()
+    response["checkedAt"] = snapshot.get("checked_at") or datetime.now(timezone.utc).isoformat()
+    response["monitoringMode"] = "full" if "database" in status else "storage-only"
 
     if caller_role == "Super Admin":
         bucket_values = snapshot.get("storage_by_bucket") or {}
@@ -159,7 +181,8 @@ def build_platform_usage_response(snapshot: dict, caller_role: str) -> dict:
             for bucket, value in bucket_values.items()
         } if isinstance(bucket_values, dict) else {}
         response["storage"] = status["storage"]
-        response["database"] = status["database"]
+        if "database" in status:
+            response["database"] = status["database"]
 
     return response
 
@@ -751,6 +774,151 @@ def _svc_headers() -> dict:
     }
 
 
+def _storage_object_bytes(item: dict) -> int:
+    """Returns an object's byte size from the Storage API metadata."""
+    metadata = item.get("metadata") if isinstance(item, dict) else None
+    if not isinstance(metadata, dict):
+        return 0
+    raw_size = metadata.get("size", metadata.get("contentLength", 0))
+    try:
+        return max(0, int(raw_size or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+async def fetch_storage_usage_via_api(client: httpx.AsyncClient) -> dict:
+    """Collects current Storage usage when the optional SQL metric is absent.
+
+    Supabase's list endpoint is folder-scoped, so every discovered prefix is
+    traversed and paginated. The request cap prevents malformed folder data from
+    turning a monitoring request into an unbounded crawl.
+    """
+    bucket_result = await client.get(
+        f"{SUPABASE_URL}/storage/v1/bucket",
+        headers=_svc_headers(),
+    )
+    if bucket_result.status_code != 200:
+        raise RuntimeError("Supabase Storage did not return its buckets.")
+
+    buckets = bucket_result.json()
+    if not isinstance(buckets, list):
+        raise RuntimeError("Supabase Storage returned an invalid bucket list.")
+
+    total_bytes = 0
+    total_objects = 0
+    by_bucket = {}
+    request_count = 1
+
+    for bucket in buckets:
+        bucket_id = bucket.get("id") if isinstance(bucket, dict) else None
+        if not bucket_id:
+            continue
+
+        bucket_bytes = 0
+        pending_prefixes = [""]
+        seen_prefixes = {""}
+        prefix_index = 0
+
+        while prefix_index < len(pending_prefixes):
+            prefix = pending_prefixes[prefix_index]
+            prefix_index += 1
+            offset = 0
+
+            while True:
+                request_count += 1
+                if request_count > STORAGE_LIST_MAX_REQUESTS:
+                    raise RuntimeError("Supabase Storage contains too many folders to scan safely.")
+
+                object_result = await client.post(
+                    f"{SUPABASE_URL}/storage/v1/object/list/{quote(str(bucket_id), safe='')}",
+                    headers=_svc_headers(),
+                    json={
+                        "prefix": prefix,
+                        "limit": STORAGE_LIST_PAGE_SIZE,
+                        "offset": offset,
+                        "sortBy": {"column": "name", "order": "asc"},
+                    },
+                )
+                if object_result.status_code != 200:
+                    raise RuntimeError("Supabase Storage did not return its objects.")
+
+                items = object_result.json()
+                if not isinstance(items, list):
+                    raise RuntimeError("Supabase Storage returned an invalid object list.")
+
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    name = str(item.get("name") or "").strip("/")
+                    if not name:
+                        continue
+                    object_path = f"{prefix}/{name}".strip("/")
+                    if item.get("id") is None:
+                        if object_path not in seen_prefixes:
+                            seen_prefixes.add(object_path)
+                            pending_prefixes.append(object_path)
+                        continue
+
+                    total_objects += 1
+                    bucket_bytes += _storage_object_bytes(item)
+
+                if len(items) < STORAGE_LIST_PAGE_SIZE:
+                    break
+                offset += len(items)
+
+        by_bucket[str(bucket_id)] = bucket_bytes
+        total_bytes += bucket_bytes
+
+    return {
+        "database_bytes": None,
+        "storage_bytes": total_bytes,
+        "storage_objects": total_objects,
+        "storage_by_bucket": by_bucket,
+    }
+
+
+async def fetch_platform_usage_snapshot() -> dict:
+    """Returns one shared, short-lived snapshot for every signed-in role."""
+    global _capacity_snapshot_cache, _capacity_snapshot_expires_at
+
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    if _capacity_snapshot_cache is not None and now < _capacity_snapshot_expires_at:
+        return _capacity_snapshot_cache
+
+    async with _capacity_snapshot_lock:
+        now = loop.time()
+        if _capacity_snapshot_cache is not None and now < _capacity_snapshot_expires_at:
+            return _capacity_snapshot_cache
+
+        async with httpx.AsyncClient(timeout=20) as client:
+            result = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/get_platform_usage",
+                headers=_svc_headers(),
+                json={},
+            )
+            snapshot = None
+            if result.status_code == 200:
+                try:
+                    rows = result.json() or []
+                except ValueError:
+                    rows = []
+                if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+                    snapshot = rows[0]
+
+            # Migration 004 is the preferred single-query source because it
+            # also includes database size. The API fallback still gives an
+            # exact file-storage snapshot during deployment or local setup.
+            if snapshot is None:
+                snapshot = await fetch_storage_usage_via_api(client)
+
+        snapshot = dict(snapshot)
+        snapshot["checked_at"] = datetime.now(timezone.utc).isoformat()
+        _capacity_snapshot_cache = snapshot
+        _capacity_snapshot_expires_at = loop.time() + CAPACITY_CACHE_SECONDS
+        return snapshot
+
+
 async def resolve_caller(authorization: Optional[str]) -> dict:
     """Identify who is making the request, from their own session token.
 
@@ -798,26 +966,15 @@ async def get_platform_usage(authorization: Optional[str] = Header(None)):
         raise HTTPException(status_code=503, detail="Capacity monitoring is not configured on this server.")
 
     caller = await resolve_caller(authorization)
-    async with httpx.AsyncClient(timeout=20) as client:
-        result = await client.post(
-            f"{SUPABASE_URL}/rest/v1/rpc/get_platform_usage",
-            headers=_svc_headers(),
-            json={},
-        )
-
-    if result.status_code != 200:
-        # Do not return PostgREST internals or SQL details to a browser. The
-        # actionable deployment fix is the migration, regardless of its code.
+    try:
+        snapshot = await fetch_platform_usage_snapshot()
+    except (RuntimeError, httpx.HTTPError, ValueError):
         raise HTTPException(
             status_code=503,
-            detail="Capacity metrics are unavailable. Apply database migration 004_platform_capacity_usage.sql.",
+            detail="Live Supabase capacity is temporarily unavailable.",
         )
 
-    rows = result.json() or []
-    if not rows:
-        raise HTTPException(status_code=503, detail="Supabase returned no capacity metrics.")
-
-    return build_platform_usage_response(rows[0], caller.get("role") or "")
+    return build_platform_usage_response(snapshot, caller.get("role") or "")
 
 
 @app.post("/api/users")

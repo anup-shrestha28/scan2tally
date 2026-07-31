@@ -451,7 +451,10 @@ AS $$
         GROUP BY bucket_id
     )
     SELECT
-        pg_database_size(current_database())::BIGINT,
+        (
+            SELECT COALESCE(SUM(pg_database_size(pg_database.datname)), 0)::BIGINT
+            FROM pg_database
+        ),
         COALESCE(SUM(bucket_bytes), 0)::BIGINT,
         COALESCE(SUM(object_count), 0)::BIGINT,
         COALESCE(jsonb_object_agg(bucket_id, bucket_bytes), '{}'::JSONB)
