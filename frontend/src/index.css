@@ -1802,7 +1802,68 @@ input[type='number']::-webkit-inner-spin-button {
    Receipt list
    ============================================================ */
 
+.receipt-table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.receipt-table-toolbar .section-title { margin-bottom: 0; }
+.receipt-table-toolbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 .file-cell { display: flex; align-items: center; gap: 10px; }
+.receipt-status-stack { align-items: flex-start; }
+.receipt-status-badge {
+  --receipt-status-accent: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: max-content;
+  min-width: 112px;
+  min-height: 28px;
+  padding: 3px 10px 3px 4px;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--bg-input) 82%, var(--bg-card));
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 650;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+.receipt-status-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  color: var(--receipt-status-accent);
+  background: color-mix(in srgb, var(--receipt-status-accent) 13%, transparent);
+  border-radius: 50%;
+}
+.receipt-status-pending { --receipt-status-accent: var(--accent-amber); }
+.receipt-status-queued { --receipt-status-accent: #0ea5e9; }
+.receipt-status-processing { --receipt-status-accent: var(--primary); }
+.receipt-status-extracted { --receipt-status-accent: var(--accent-emerald); }
+.receipt-status-failed { --receipt-status-accent: var(--accent-rose); }
+
+@media (max-width: 640px) {
+  .receipt-table-toolbar-actions { width: 100%; }
+  .receipt-table-toolbar-actions .status-filter {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
 .file-warning {
   display: flex;
   gap: 4px;

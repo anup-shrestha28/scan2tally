@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, MoreHorizontal, ChevronLeft, ChevronRight } from 'lucide-react';
 import { ScanBatch, Receipt, ReceiptDisplayStatus, User, Transaction } from '../types';
+import StatusFilter from './StatusFilter';
 import { supabase } from '../lib/supabase';
 import { usePolling } from '../lib/usePolling';
 import {
@@ -77,6 +78,78 @@ function isReceiptQueued(receipt: Receipt): boolean {
 
 function receiptDisplayStatus(receipt: Receipt): ReceiptDisplayStatus {
   return isReceiptQueued(receipt) ? 'Queued' : receipt.status;
+}
+
+type ReceiptStatusTone = 'pending' | 'queued' | 'processing' | 'extracted' | 'failed';
+type ReceiptFilterStatus = ReceiptDisplayStatus | 'Waiting to upload' | 'Uploading';
+type ReceiptStatusFilter = 'All' | ReceiptFilterStatus;
+
+const RECEIPT_FILTER_STATUSES: ReceiptFilterStatus[] = [
+  'Waiting to upload',
+  'Uploading',
+  'Pending',
+  'Queued',
+  'Processing',
+  'Extracted',
+  'Failed',
+];
+
+function receiptFilterStatus(receipt: Receipt): ReceiptFilterStatus {
+  if (receipt.upload_state === 'waiting') return 'Waiting to upload';
+  if (receipt.upload_state === 'uploading') return 'Uploading';
+  if (receipt.upload_state === 'failed') return 'Failed';
+  return receiptDisplayStatus(receipt);
+}
+
+function ReceiptStatusBadge({ receipt }: { receipt: Receipt }) {
+  const displayStatus = receiptDisplayStatus(receipt);
+  let label: string;
+  let tone: ReceiptStatusTone;
+  let icon: React.ReactNode;
+
+  if (receipt.upload_state === 'waiting') {
+    label = 'Waiting to upload';
+    tone = 'queued';
+    icon = <Clock size={12} />;
+  } else if (receipt.upload_state === 'uploading') {
+    label = 'Uploading';
+    tone = 'processing';
+    icon = <Loader2 size={12} className="animate-spin" />;
+  } else if (receipt.upload_state === 'failed') {
+    label = 'Upload failed';
+    tone = 'failed';
+    icon = <AlertCircle size={12} />;
+  } else if (displayStatus === 'Extracted') {
+    label = displayStatus;
+    tone = 'extracted';
+    icon = <CheckCircle2 size={12} />;
+  } else if (displayStatus === 'Processing') {
+    label = displayStatus;
+    tone = 'processing';
+    icon = <Loader2 size={12} className="animate-spin" />;
+  } else if (displayStatus === 'Queued') {
+    label = displayStatus;
+    tone = 'queued';
+    icon = <Clock size={12} />;
+  } else if (displayStatus === 'Failed') {
+    label = displayStatus;
+    tone = 'failed';
+    icon = <AlertCircle size={12} />;
+  } else {
+    label = displayStatus;
+    tone = 'pending';
+    icon = <Clock size={12} />;
+  }
+
+  return (
+    <span
+      className={`receipt-status-badge receipt-status-${tone}`}
+      aria-label={`File processing status: ${label}`}
+    >
+      <span className="receipt-status-icon" aria-hidden="true">{icon}</span>
+      <span>{label}</span>
+    </span>
+  );
 }
 
 function uploadIsBusy(receipt: Receipt): boolean {
@@ -178,6 +251,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const [openBatchMenuId, setOpenBatchMenuId] = useState<string | null>(null);
   const [batchMenuPosition, setBatchMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const [receiptPage, setReceiptPage] = useState(1);
+  const [receiptStatusFilter, setReceiptStatusFilter] = useState<ReceiptStatusFilter>('All');
   const [previewReceipt, setPreviewReceipt] = useState<Receipt | null>(null);
   const [previewRotation, setPreviewRotation] = useState(0);
   const [dragOver, setDragOver] = useState<boolean>(false);
@@ -246,10 +320,29 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const activeBatch: ScanBatch | undefined =
     visibleBatches.find(b => b.id === activeBatchId) || visibleBatches[0];
   const activeReceipts = activeBatch?.receipts ?? [];
-  const receiptPageCount = Math.max(1, Math.ceil(activeReceipts.length / RECEIPTS_PER_PAGE));
-  const paginatedReceipts = activeReceipts.slice(
-    (receiptPage - 1) * RECEIPTS_PER_PAGE,
-    receiptPage * RECEIPTS_PER_PAGE
+  const receiptStatusCounts = activeReceipts.reduce<Record<ReceiptFilterStatus, number>>(
+    (counts, receipt) => {
+      counts[receiptFilterStatus(receipt)] += 1;
+      return counts;
+    },
+    {
+      'Waiting to upload': 0,
+      Uploading: 0,
+      Pending: 0,
+      Queued: 0,
+      Processing: 0,
+      Extracted: 0,
+      Failed: 0,
+    }
+  );
+  const filteredReceipts = receiptStatusFilter === 'All'
+    ? activeReceipts
+    : activeReceipts.filter(receipt => receiptFilterStatus(receipt) === receiptStatusFilter);
+  const receiptPageCount = Math.max(1, Math.ceil(filteredReceipts.length / RECEIPTS_PER_PAGE));
+  const visibleReceiptPage = Math.min(receiptPage, receiptPageCount);
+  const paginatedReceipts = filteredReceipts.slice(
+    (visibleReceiptPage - 1) * RECEIPTS_PER_PAGE,
+    visibleReceiptPage * RECEIPTS_PER_PAGE
   );
   // An archived batch is a record, not a workspace. It stays fully readable and
   // exportable; what stops is adding to it.
@@ -1323,22 +1416,39 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
           </div>
 
           <div className="card">
-            <div className="row row-between row-wrap">
+            <div className="receipt-table-toolbar">
               <h4 className="section-title">
                 Files in {activeBatch.name} ({activeBatch.receipts.length})
               </h4>
-              {exportHistory[0]?.file_path && (
-                <button
-                  className="btn btn-secondary btn-sm"
-                  onClick={() => handleDownloadExport(exportHistory[0])}
-                  disabled={downloadingExportId === exportHistory[0].id}
-                  title="Download the latest Excel export for this batch"
-                >
-                  {downloadingExportId === exportHistory[0].id
-                    ? <Loader2 size={13} className="animate-spin" />
-                    : <FileSpreadsheet size={13} />} Download latest Excel
-                </button>
-              )}
+              <div className="receipt-table-toolbar-actions">
+                {exportHistory[0]?.file_path && (
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => handleDownloadExport(exportHistory[0])}
+                    disabled={downloadingExportId === exportHistory[0].id}
+                    title="Download the latest Excel export for this batch"
+                  >
+                    {downloadingExportId === exportHistory[0].id
+                      ? <Loader2 size={13} className="animate-spin" />
+                      : <FileSpreadsheet size={13} />} Download latest Excel
+                  </button>
+                )}
+                <StatusFilter
+                  value={receiptStatusFilter}
+                  onChange={value => {
+                    setReceiptStatusFilter(value);
+                    setReceiptPage(1);
+                  }}
+                  ariaLabel="Filter receipt files by status"
+                  options={[
+                    { value: 'All', label: `All statuses (${activeReceipts.length})` },
+                    ...RECEIPT_FILTER_STATUSES.map(status => ({
+                      value: status,
+                      label: `${status} (${receiptStatusCounts[status]})`,
+                    })),
+                  ]}
+                />
+              </div>
             </div>
 
             {!activeBatch.receipts.length ? (
@@ -1356,7 +1466,13 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                     </tr>
                   </thead>
                   <tbody>
-                    {paginatedReceipts.map(rcpt => (
+                    {paginatedReceipts.length === 0 ? (
+                      <tr>
+                        <td colSpan={3} className="table-empty">
+                          No receipts match this status.
+                        </td>
+                      </tr>
+                    ) : paginatedReceipts.map(rcpt => (
                       <tr key={rcpt.id}>
                         <td style={{ fontWeight: 500 }}>
                           <div className="file-cell">
@@ -1376,28 +1492,8 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                           )}
                         </td>
                         <td>
-                          <div className="stack-xs">
-                            <span className={`status-pill ${
-                              rcpt.upload_state === 'waiting' ? 'status-queued' :
-                              rcpt.upload_state === 'uploading' ? 'status-processing' :
-                              rcpt.upload_state === 'failed' ? 'status-failed' :
-                              receiptDisplayStatus(rcpt) === 'Extracted' ? 'status-extracted' :
-                              receiptDisplayStatus(rcpt) === 'Processing' ? 'status-processing' :
-                              receiptDisplayStatus(rcpt) === 'Queued' ? 'status-queued' :
-                              receiptDisplayStatus(rcpt) === 'Failed' ? 'status-failed' : 'status-pending'
-                            }`}>
-                              {rcpt.upload_state === 'failed' || receiptDisplayStatus(rcpt) === 'Failed'
-                                ? <AlertCircle size={12} />
-                                : receiptDisplayStatus(rcpt) === 'Extracted'
-                                  ? <CheckCircle2 size={12} />
-                                  : rcpt.upload_state === 'uploading'
-                                    ? <Loader2 size={12} className="animate-spin" />
-                                    : <Clock size={12} />}
-                              {rcpt.upload_state === 'waiting' ? 'Waiting to upload' :
-                               rcpt.upload_state === 'uploading' ? 'Uploading' :
-                               rcpt.upload_state === 'failed' ? 'Upload failed' :
-                               receiptDisplayStatus(rcpt)}
-                            </span>
+                          <div className="stack-xs receipt-status-stack">
+                            <ReceiptStatusBadge receipt={rcpt} />
                             {rcpt.upload_state === 'failed' && rcpt.upload_error && (
                               <span className="receipt-error">{rcpt.upload_error}</span>
                             )}
@@ -1472,14 +1568,14 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                 {receiptPageCount > 1 && (
                   <div className="files-pagination" aria-label="Receipt file pages">
                     <span className="pagination-summary">
-                      Showing {(receiptPage - 1) * RECEIPTS_PER_PAGE + 1}–{Math.min(receiptPage * RECEIPTS_PER_PAGE, activeReceipts.length)} of {activeReceipts.length}
+                      Showing {(visibleReceiptPage - 1) * RECEIPTS_PER_PAGE + 1}–{Math.min(visibleReceiptPage * RECEIPTS_PER_PAGE, filteredReceipts.length)} of {filteredReceipts.length}
                     </span>
                     <div className="pagination-controls">
                       <button
                         type="button"
                         className="pagination-arrow"
                         onClick={() => setReceiptPage(page => Math.max(1, page - 1))}
-                        disabled={receiptPage === 1}
+                        disabled={visibleReceiptPage === 1}
                         aria-label="Previous receipt page"
                       >
                         <ChevronLeft size={15} />
@@ -1488,9 +1584,9 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                         <button
                           type="button"
                           key={page}
-                          className={`pagination-page${receiptPage === page ? ' pagination-page-active' : ''}`}
+                          className={`pagination-page${visibleReceiptPage === page ? ' pagination-page-active' : ''}`}
                           onClick={() => setReceiptPage(page)}
-                          aria-current={receiptPage === page ? 'page' : undefined}
+                          aria-current={visibleReceiptPage === page ? 'page' : undefined}
                         >
                           {page}
                         </button>
@@ -1499,7 +1595,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                         type="button"
                         className="pagination-arrow"
                         onClick={() => setReceiptPage(page => Math.min(receiptPageCount, page + 1))}
-                        disabled={receiptPage === receiptPageCount}
+                        disabled={visibleReceiptPage === receiptPageCount}
                         aria-label="Next receipt page"
                       >
                         <ChevronRight size={15} />
