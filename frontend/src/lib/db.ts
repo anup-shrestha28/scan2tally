@@ -464,6 +464,19 @@ export async function fetchBatches(): Promise<ScanBatch[]> {
     for (const creator of creators || []) {
       if (creator?.id && creator?.name) creatorNames.set(creator.id, creator.name);
     }
+
+    // Admins already have same-organisation user-directory access. This keeps
+    // the display useful if the RPC is temporarily unavailable or PostgREST
+    // has not refreshed its function schema cache after migration 009.
+    if (creatorNames.size === 0) {
+      const { data: fallbackCreators } = await supabase
+        .from('users')
+        .select('id, name')
+        .in('id', creatorIds);
+      for (const creator of fallbackCreators || []) {
+        if (creator?.id && creator?.name) creatorNames.set(creator.id, creator.name);
+      }
+    }
   }
 
   return (data || []).map((b: any) => ({

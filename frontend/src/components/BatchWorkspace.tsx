@@ -1367,7 +1367,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
               <div
                 key={b.id}
                 ref={editingBatchId === b.id ? editingBatchRef : undefined}
-                className={`batch-item${b.id === activeBatchId ? ' batch-item-active' : ''}`}
+                className={`batch-item${b.id === activeBatchId ? ' batch-item-active' : ''}${b.created_by !== currentUser.id && b.created_by ? ' batch-item-with-creator' : ''}`}
               >
                 {editingBatchId === b.id ? (
                   <div className="row-xs" onClick={e => e.stopPropagation()}>
@@ -1420,14 +1420,13 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                           <span>{b.receipts.length} {b.receipts.length === 1 ? 'receipt' : 'receipts'}</span>
                           <span>•</span>
                           <span>{formatBatchDate(b.created_at)}</span>
-                          {b.created_by !== currentUser.id && b.created_by && (
-                            <>
-                              <span>•</span>
-                              <span title={b.created_by}>Created by {b.created_by_name || `ID ${b.created_by}`}</span>
-                            </>
-                          )}
                           {b.id === activeBatchId && <span className="batch-current-badge">Current</span>}
                         </span>
+                        {b.created_by !== currentUser.id && b.created_by && (
+                          <span className="batch-item-creator" title={b.created_by}>
+                            Created by {b.created_by_name || `ID ${b.created_by}`}
+                          </span>
+                        )}
                       </span>
                     </button>
 
