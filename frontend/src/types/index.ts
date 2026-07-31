@@ -141,6 +141,8 @@ export interface ScanBatch {
   id: string;
   name: string;
   status: BatchStatus;
+  hidden_from_users?: boolean;
+  hidden_by?: string | null;
   created_at: string;
   receipts: Receipt[];
 }

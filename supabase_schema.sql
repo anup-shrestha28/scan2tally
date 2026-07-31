@@ -51,6 +51,8 @@ CREATE TABLE IF NOT EXISTS public.scan_batches (
     created_by UUID NOT NULL REFERENCES public.users(id),
     name TEXT NOT NULL,
     status batch_status DEFAULT 'Active',
+    hidden_from_users BOOLEAN NOT NULL DEFAULT FALSE,
+    hidden_by UUID REFERENCES public.users(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -309,9 +311,20 @@ CREATE POLICY "Admins Update Users in Own Org" ON public.users
     );
 
 CREATE POLICY "Users Access Org Scan Batches" ON public.scan_batches
-    FOR ALL USING (
+    FOR ALL
+    USING (
         organization_id = public.get_auth_user_org_id() AND
-        (public.get_auth_user_role() = 'Admin' OR created_by = auth.uid())
+        (
+            (hidden_from_users = FALSE AND
+                (created_by = auth.uid() OR public.get_auth_user_role() = 'Admin'))
+            OR (hidden_from_users = TRUE AND hidden_by = auth.uid())
+        )
+    )
+    WITH CHECK (
+        organization_id = public.get_auth_user_org_id() AND
+        (created_by = auth.uid() OR public.get_auth_user_role() = 'Admin') AND
+        (hidden_from_users = FALSE OR
+            (public.get_auth_user_role() = 'Admin' AND hidden_by = auth.uid()))
     );
 
 CREATE POLICY "Users Access Receipts in Org Batches" ON public.receipts

@@ -23,6 +23,7 @@ import { usePolling } from './lib/usePolling';
 type AppView = 'batches' | 'reviewer' | 'exporter' | 'users' | 'overview' | 'ledgers';
 const APP_VIEW_STORAGE_KEY = 'scan2tally-current-view';
 const APP_STATE_STORAGE_KEY = 'scan2tally-current-state';
+const THEME_STORAGE_KEY = 'scan2tally-theme';
 const CAPACITY_SEVERITY: Record<CapacityAlert['level'], number> = {
   healthy: 0,
   warning: 1,
@@ -86,13 +87,26 @@ export default function App() {
   const [liveExtractedTransactions, setLiveExtractedTransactions] = useState<Transaction[]>(savedState.liveTransactions || []);
   const [activeTransactions, setActiveTransactions] = useState<Transaction[]>(savedState.activeTransactions || []);
   const [allReceiptTransactions, setAllReceiptTransactions] = useState<Record<string, Transaction[]>>(savedState.receiptTransactions || {});
-  const [isDark, setIsDark] = useState<boolean>(true);
+  const [reviewOnlyImbalanced, setReviewOnlyImbalanced] = useState(false);
+  const [focusedImbalancedReceiptIds, setFocusedImbalancedReceiptIds] = useState<string[]>([]);
+  const [isDark, setIsDark] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(THEME_STORAGE_KEY) !== 'light';
+    } catch {
+      return true;
+    }
+  });
   const [platformUsage, setPlatformUsage] = useState<PlatformUsage | null>(null);
   const [capacityConnection, setCapacityConnection] = useState<CapacityConnectionState>('connecting');
   const [capacityAlerts, setCapacityAlerts] = useState<CapacityAlert[]>([]);
 
   useEffect(() => {
     document.body.classList.toggle('light', !isDark);
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, isDark ? 'dark' : 'light');
+    } catch {
+      // Private browsing or restricted storage should not prevent login.
+    }
   }, [isDark]);
 
   useEffect(() => {
@@ -263,7 +277,9 @@ export default function App() {
     setAuthError(null);
   };
 
-  const handleSelectBatch = (batch: ScanBatch, receipt?: Receipt, extractedTx?: Transaction[], txMap?: Record<string, Transaction[]>) => {
+  const handleSelectBatch = (batch: ScanBatch, receipt?: Receipt, extractedTx?: Transaction[], txMap?: Record<string, Transaction[]>, focusImbalanced = false, focusReceiptIds: string[] = []) => {
+    setReviewOnlyImbalanced(focusImbalanced);
+    setFocusedImbalancedReceiptIds(focusImbalanced ? focusReceiptIds : []);
     setActiveBatch(batch);
     if (receipt) {
       setSelectedReceipt(receipt);
@@ -287,6 +303,31 @@ export default function App() {
   const handleExportExcel = (transactions: Transaction[]) => {
     setActiveTransactions(transactions);
     setCurrentView('exporter');
+  };
+
+  const handleFixImbalanced = (receiptIds: string[]) => {
+    if (!activeBatch) return;
+    const receipt = activeBatch.receipts.find(item => item.id === receiptIds[0]);
+    if (!receipt) return;
+    // The export screen contains the latest saved reviewer values. Rebuild the
+    // map from that data so focused review does not resurrect an older balanced
+    // or imbalanced state from the original batch load.
+    const latestTransactions = { ...allReceiptTransactions };
+    for (const transaction of activeTransactions) {
+      if (!transaction.receipt_id) continue;
+      latestTransactions[transaction.receipt_id] = [
+        ...(latestTransactions[transaction.receipt_id] || []).filter(row => row.id !== transaction.id),
+        transaction,
+      ];
+    }
+    handleSelectBatch(
+      activeBatch,
+      receipt,
+      latestTransactions[receipt.id] || [],
+      latestTransactions,
+      true,
+      receiptIds,
+    );
   };
 
   return (
@@ -401,6 +442,8 @@ export default function App() {
             selectedReceipt={selectedReceipt}
             initialTransactions={liveExtractedTransactions}
             allReceiptTransactions={allReceiptTransactions}
+            reviewOnlyImbalanced={reviewOnlyImbalanced}
+            focusedImbalancedReceiptIds={focusedImbalancedReceiptIds}
             onBack={() => setCurrentView('batches')}
             onExportExcel={handleExportExcel}
           />
@@ -411,6 +454,7 @@ export default function App() {
             batch={activeBatch}
             currentUser={currentUser}
             onBack={() => setCurrentView('reviewer')}
+            onFixImbalanced={handleFixImbalanced}
           />
         )}
       </main>

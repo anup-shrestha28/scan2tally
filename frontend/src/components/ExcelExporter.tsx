@@ -11,6 +11,7 @@ interface ExcelExporterProps {
   currentUser: User;
   receiptNames?: Record<string, string>;
   onBack: () => void;
+  onFixImbalanced: (receiptIds: string[]) => void;
 }
 
 const normalizeNarration = (raw: string | undefined): string => {
@@ -41,7 +42,10 @@ const formatAmt = (n: number | undefined | null): string => {
   return Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 
-export default function ExcelExporter({ transactions, receiptNames = {}, batch, currentUser, onBack }: ExcelExporterProps) {
+const safeFilePart = (value: string): string =>
+  value.trim().replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').replace(/[. ]+$/g, '');
+
+export default function ExcelExporter({ transactions, receiptNames = {}, batch, currentUser, onBack, onFixImbalanced }: ExcelExporterProps) {
   const [downloading, setDownloading] = useState(false);
   const [recordError, setRecordError] = useState<string | null>(null);
   const [showImbalanceWarning, setShowImbalanceWarning] = useState(false);
@@ -69,12 +73,18 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
     const difference = Math.round((debit - credit) * 100) / 100;
     const receiptId = groupTxs[0]?.receipt_id || 'default';
     return {
+      receiptId,
       name: receiptNames[receiptId] || `Journal ${index + 1}`,
       debit,
       credit,
       difference,
     };
-  }).filter(group => Math.abs(group.difference) >= 0.01);
+  // Keep this identical to the reviewer: only vouchers that visibly show
+  // "Voucher out of balance" belong in the focused-fix workflow.
+  }).filter(group => Math.abs(group.difference) >= 0.05);
+  const imbalancedReceiptIds = imbalancedGroups
+    .map(group => group.receiptId)
+    .filter((receiptId): receiptId is string => receiptId !== 'default');
 
   // An unbalanced voucher is not blocked, but it is never exported silently:
   // the confirmation names which ones, so the decision is made knowingly.
@@ -182,7 +192,10 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
       }
     });
 
-    const fileName = `Tally_Goshwara_Import_${new Date().toISOString().split('T')[0]}.xlsx`;
+    const now = new Date();
+    const date = [now.getFullYear(), String(now.getMonth() + 1).padStart(2, '0'), String(now.getDate()).padStart(2, '0')].join('-');
+    const batchPart = safeFilePart(batch?.name || 'Scan2Tally Batch') || 'Scan2Tally Batch';
+    const fileName = `${batchPart}_${date}.xlsx`;
 
     const buffer = await workbook.xlsx.writeBuffer();
     const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
@@ -370,13 +383,24 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
               <h3 className="modal-title">Imbalance Detected</h3>
             </div>
             <p className="modal-text">
-              Debit / Credit Imbalance Detected in one or more receipts.<br />
-              Are you sure you want to download Excel?
+              Debit / Credit imbalance detected in {imbalancedGroups.length === 1 ? 'one receipt' : `${imbalancedGroups.length} receipts`}.
+              <br />Would you like to fix the affected receipts first?
             </p>
             <div className="modal-actions">
               <button className="btn btn-secondary" onClick={() => setShowImbalanceWarning(false)}>
                 Cancel
               </button>
+              {imbalancedReceiptIds.length > 0 && (
+                <button
+                  className="btn btn-primary"
+                  onClick={() => {
+                    setShowImbalanceWarning(false);
+                    onFixImbalanced(imbalancedReceiptIds);
+                  }}
+                >
+                  Fix imbalanced receipts
+                </button>
+              )}
               <button className="btn btn-warning" onClick={generateAndDownloadExcel}>
                 Download Anyway
               </button>

@@ -21,6 +21,8 @@ interface SideBySideReviewerProps {
   selectedReceipt?: Receipt | null;
   initialTransactions?: Transaction[];
   allReceiptTransactions?: Record<string, Transaction[]>;
+  reviewOnlyImbalanced?: boolean;
+  focusedImbalancedReceiptIds?: string[];
   onBack: () => void;
   onExportExcel: (transactions: Transaction[]) => void;
 }
@@ -90,17 +92,12 @@ export default function SideBySideReviewer({
   selectedReceipt,
   initialTransactions,
   allReceiptTransactions = {},
+  reviewOnlyImbalanced = false,
+  focusedImbalancedReceiptIds = [],
   onBack,
   onExportExcel
 }: SideBySideReviewerProps) {
   const receipts = batch?.receipts || [];
-
-  // Find the starting index based on selectedReceipt
-  const startIndex = selectedReceipt
-    ? receipts.findIndex(r => r.id === selectedReceipt.id)
-    : 0;
-
-  const [currentIndex, setCurrentIndex] = useState(Math.max(0, startIndex));
 
   // Per-receipt transaction memory: receiptId → Transaction[]
   const [txMap, setTxMap] = useState<Record<string, Transaction[]>>(() => {
@@ -126,11 +123,40 @@ export default function SideBySideReviewer({
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deletingReceipt, setDeletingReceipt] = useState(false);
   const [deletedReceiptIds, setDeletedReceiptIds] = useState<Set<string>>(new Set());
+  // Set when the user chooses the fix option from this reviewer's own
+  // imbalance dialog. The exporter path supplies the same list through App.
+  const [localFocusedReceiptIds, setLocalFocusedReceiptIds] = useState<string[] | null>(null);
   // The organisation's real ledgers, so a name can be picked rather than typed
   // and so the reviewer is told when one will not survive the trip into Tally.
   const [ledgers, setLedgers] = useState<Ledger[]>([]);
 
-  const visibleReceipts = receipts.filter(receipt => !deletedReceiptIds.has(receipt.id));
+  const allVisibleReceipts = receipts.filter(receipt => !deletedReceiptIds.has(receipt.id));
+  const rowsForReceipt = (receiptId: string): Transaction[] => {
+    return txMap[receiptId] || allReceiptTransactions[receiptId] ||
+      (receiptId === selectedReceipt?.id ? initialTransactions || [] : []);
+  };
+  const focusedReceiptIds = reviewOnlyImbalanced
+    ? focusedImbalancedReceiptIds
+    : (localFocusedReceiptIds || []);
+  const visibleReceipts = (reviewOnlyImbalanced || localFocusedReceiptIds !== null)
+    ? allVisibleReceipts.filter(receipt => {
+        const rows = rowsForReceipt(receipt.id);
+        const debit = rows.reduce((sum, row) => sum + (Number(row.debit_amount) || 0), 0);
+        const credit = rows.reduce((sum, row) => sum + (Number(row.credit_amount) || 0), 0);
+        const isOutOfBalance = rows.length > 0 && Math.abs(debit - credit) >= 0.05;
+        return isOutOfBalance && (
+          focusedReceiptIds.length === 0 || focusedReceiptIds.includes(receipt.id)
+        );
+      })
+    : allVisibleReceipts;
+
+  // Find the starting index inside the currently visible set. In focused mode
+  // this prevents the image panel from opening on a non-imbalanced receipt.
+  const startIndex = selectedReceipt
+    ? visibleReceipts.findIndex(r => r.id === selectedReceipt.id)
+    : 0;
+
+  const [currentIndex, setCurrentIndex] = useState(Math.max(0, startIndex));
   const currentReceipt = visibleReceipts[currentIndex] || null;
 
   // Get transactions for the currently viewed receipt
@@ -390,10 +416,14 @@ export default function SideBySideReviewer({
     }
   };
 
-  // Export collects all receipts' transactions merged
+  // In focused imbalance mode, keep the workflow limited to the affected
+  // receipts. Normal review mode still exports the complete batch.
   const handleExportAll = () => {
     const saved = currentReceipt ? { ...txMap, [currentReceipt.id]: transactions } : txMap;
-    const all = visibleReceipts.flatMap(r => (saved[r.id] || []).map(t => ({ ...t, receipt_id: r.id })));
+    const exportReceipts = (reviewOnlyImbalanced || localFocusedReceiptIds !== null)
+      ? visibleReceipts
+      : allVisibleReceipts;
+    const all = exportReceipts.flatMap(r => (saved[r.id] || []).map(t => ({ ...t, receipt_id: r.id })));
     const exportData = all.length > 0 ? all : transactions.map(t => ({ ...t, receipt_id: currentReceipt?.id }));
 
     // Check for imbalance across all receipts being exported
@@ -439,6 +469,21 @@ export default function SideBySideReviewer({
   const totalDebit = transactions.reduce((acc, curr) => acc + (Number(curr.debit_amount) || 0), 0);
   const totalCredit = transactions.reduce((acc, curr) => acc + (Number(curr.credit_amount) || 0), 0);
   const isBalanced = Math.abs(totalDebit - totalCredit) < 0.05;
+
+  const imbalancedReceiptIds = visibleReceipts.filter(receipt => {
+    // The currently open voucher may have unsaved edits; use the live grid.
+    const rows = receipt.id === currentReceipt?.id ? transactions : rowsForReceipt(receipt.id);
+    const debit = rows.reduce((sum, row) => sum + (Number(row.debit_amount) || 0), 0);
+    const credit = rows.reduce((sum, row) => sum + (Number(row.credit_amount) || 0), 0);
+    return rows.length > 0 && Math.abs(debit - credit) >= 0.05;
+  }).map(receipt => receipt.id);
+
+  const focusFirstImbalancedReceipt = () => {
+    if (!imbalancedReceiptIds.length) return;
+    setLocalFocusedReceiptIds(imbalancedReceiptIds);
+    setCurrentIndex(0);
+    setShowImbalanceModal(false);
+  };
 
   // Rows whose ledger Tally would not recognise. Only meaningful once the
   // organisation actually has a chart of accounts to be measured against.
@@ -792,6 +837,11 @@ export default function SideBySideReviewer({
               <button className="btn btn-secondary" onClick={cancelExport}>
                 Cancel
               </button>
+              {imbalancedReceiptIds.length > 0 && (
+                <button className="btn btn-primary" onClick={focusFirstImbalancedReceipt}>
+                  Fix imbalanced receipts
+                </button>
+              )}
               <button className="btn btn-warning" onClick={confirmExport}>
                 Proceed to Export
               </button>

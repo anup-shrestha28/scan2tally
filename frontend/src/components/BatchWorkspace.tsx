@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, MoreHorizontal, ChevronLeft, ChevronRight, Search } from 'lucide-react';
+import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, Download, Eye, EyeOff, MoreHorizontal, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import { ScanBatch, Receipt, ReceiptDisplayStatus, User, Transaction } from '../types';
 import SearchInput from './SearchInput';
 import StatusFilter from './StatusFilter';
@@ -13,6 +13,7 @@ import {
   renameBatch,
   deleteBatch,
   setBatchStatus,
+  setBatchHidden,
   createReceipt,
   updateReceiptRow,
   deleteReceipt,
@@ -253,6 +254,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const [pendingDeleteReceiptIds, setPendingDeleteReceiptIds] = useState<string[]>([]);
   const [openBatchMenuId, setOpenBatchMenuId] = useState<string | null>(null);
   const [batchMenuPosition, setBatchMenuPosition] = useState<{ top: number; left: number } | null>(null);
+  const [batchPage, setBatchPage] = useState(1);
   const [receiptPage, setReceiptPage] = useState(1);
   const [receiptStatusFilter, setReceiptStatusFilter] = useState<ReceiptStatusFilter>('All');
   const [batchSearch, setBatchSearch] = useState('');
@@ -327,6 +329,13 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     `${batch.receipts.length} ${batch.receipts.length === 1 ? 'receipt' : 'receipts'}`,
     ...batch.receipts.map(receipt => receipt.filename),
   ]);
+  const BATCHES_PER_PAGE = 10;
+  const batchPageCount = Math.max(1, Math.ceil(visibleBatches.length / BATCHES_PER_PAGE));
+  const visibleBatchPage = Math.min(batchPage, batchPageCount);
+  const paginatedBatches = visibleBatches.slice(
+    (visibleBatchPage - 1) * BATCHES_PER_PAGE,
+    visibleBatchPage * BATCHES_PER_PAGE
+  );
   const archivedCount = batches.filter(b => b.status === 'Archived').length;
 
   // May be undefined before the first load finishes, or when the user has no
@@ -409,9 +418,14 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   }, [receiptPageCount]);
 
   useEffect(() => {
+    setBatchPage(page => Math.min(page, batchPageCount));
+  }, [batchPageCount]);
+
+  useEffect(() => {
     setReceiptPage(1);
+    setBatchPage(1);
     setSelectedReceiptIds(new Set());
-  }, [activeBatch?.id, receiptStatusFilter, receiptSearch]);
+  }, [activeBatch?.id, receiptStatusFilter, receiptSearch, batchSearch, showArchived]);
 
   useEffect(() => {
     if (!previewReceipt) return;
@@ -840,6 +854,21 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     } catch (err: any) {
       setBatches(snapshot);
       setSaveError(err?.message || 'Could not update that batch.');
+    }
+  };
+
+  const handleToggleBatchVisibility = async (batch: ScanBatch) => {
+    if (currentUser.role !== 'Admin') return;
+    const hidden = !batch.hidden_from_users;
+    const snapshot = batches;
+    setBatches(prev => prev.map(item => item.id === batch.id ? { ...item, hidden_from_users: hidden } : item));
+    setOpenBatchMenuId(null);
+    try {
+      await setBatchHidden(batch.id, hidden, currentUser.id);
+      setSaveError(null);
+    } catch (err: any) {
+      setBatches(snapshot);
+      setSaveError(err?.message || 'Could not update batch visibility.');
     }
   };
 
@@ -1334,7 +1363,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                   : `No batches match “${batchSearch.trim()}”.`}
               </div>
             )}
-            {visibleBatches.map(b => (
+            {paginatedBatches.map(b => (
               <div
                 key={b.id}
                 ref={editingBatchId === b.id ? editingBatchRef : undefined}
@@ -1427,6 +1456,16 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                           >
                             <Edit2 size={14} /> Rename
                           </button>
+                          {currentUser.role === 'Admin' && (
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={() => handleToggleBatchVisibility(b)}
+                            >
+                              {b.hidden_from_users ? <Eye size={14} /> : <EyeOff size={14} />}
+                              {b.hidden_from_users ? 'Show to other users' : 'Hide from other users'}
+                            </button>
+                          )}
                           <button
                             type="button"
                             role="menuitem"
@@ -1459,6 +1498,44 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                 )}
               </div>
             ))}
+            {batchPageCount > 1 && (
+              <div className="files-pagination batch-pagination" aria-label="Batch pages">
+                <span className="pagination-summary">
+                  Showing {(visibleBatchPage - 1) * BATCHES_PER_PAGE + 1}–{Math.min(visibleBatchPage * BATCHES_PER_PAGE, visibleBatches.length)} of {visibleBatches.length}
+                </span>
+                <div className="pagination-controls">
+                  <button
+                    type="button"
+                    className="pagination-arrow"
+                    onClick={() => setBatchPage(page => Math.max(1, page - 1))}
+                    disabled={visibleBatchPage === 1}
+                    aria-label="Previous batch page"
+                  >
+                    <ChevronLeft size={15} />
+                  </button>
+                  {Array.from({ length: batchPageCount }, (_, index) => index + 1).map(page => (
+                    <button
+                      type="button"
+                      key={page}
+                      className={`pagination-page${visibleBatchPage === page ? ' pagination-page-active' : ''}`}
+                      onClick={() => setBatchPage(page)}
+                      aria-current={visibleBatchPage === page ? 'page' : undefined}
+                    >
+                      {page}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    className="pagination-arrow"
+                    onClick={() => setBatchPage(page => Math.min(batchPageCount, page + 1))}
+                    disabled={visibleBatchPage === batchPageCount}
+                    aria-label="Next batch page"
+                  >
+                    <ChevronRight size={15} />
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
@@ -1496,9 +1573,10 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
               )}
             </div>
 
-            <button
-              className="btn btn-primary"
-              onClick={allReceiptsExtracted ? handleContinueReview : handleTriggerExtraction}
+            <div className="row-sm" style={{ gap: '8px' }}>
+              <button
+                className="btn btn-primary"
+                onClick={allReceiptsExtracted ? handleContinueReview : handleTriggerExtraction}
               // Archiving stops new work, not access to old work: a fully
               // extracted archived batch can still be opened and exported, so
               // the archive guard applies to extraction only.
@@ -1511,7 +1589,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
               title={isArchived && !allReceiptsExtracted
                 ? 'This batch is archived. Restore it to extract more receipts.'
                 : undefined}
-            >
+              >
               {openingReview ? (
                 <>
                   <Loader2 size={16} className="animate-spin" />
@@ -1536,7 +1614,22 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                     : <><Play size={16} /> Extract Receipts</>}
                 </>
               )}
-            </button>
+              </button>
+              {allReceiptsExtracted && exportHistory[0]?.file_path && (
+                <button
+                  type="button"
+                  className="btn btn-icon latest-export-download"
+                  onClick={() => handleDownloadExport(exportHistory[0])}
+                  disabled={downloadingExportId === exportHistory[0].id}
+                  title="Download the latest Excel export for this batch"
+                  aria-label="Download the latest Excel export for this batch"
+                >
+                  {downloadingExportId === exportHistory[0].id
+                    ? <Loader2 size={16} className="animate-spin" />
+                    : <Download size={16} />}
+                </button>
+              )}
+            </div>
           </div>
 
           <div
@@ -1607,18 +1700,6 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                     aria-label="Search files in this batch"
                   />
                 </label>
-                {exportHistory[0]?.file_path && (
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => handleDownloadExport(exportHistory[0])}
-                    disabled={downloadingExportId === exportHistory[0].id}
-                    title="Download the latest Excel export for this batch"
-                  >
-                    {downloadingExportId === exportHistory[0].id
-                      ? <Loader2 size={13} className="animate-spin" />
-                      : <FileSpreadsheet size={13} />} Download latest Excel
-                  </button>
-                )}
                 <StatusFilter
                   value={receiptStatusFilter}
                   onChange={value => {
@@ -1827,18 +1908,17 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
             <div className="card">
               <h4 className="section-title">
                 <FileSpreadsheet size={17} color="var(--primary)" />
-                Tally exports from this batch ({exportHistory.length})
+                Tally Exported
               </h4>
               <div className="table-container">
                 <table className="custom-table">
                   <thead>
-                    <tr><th>File Name</th><th>Rows</th><th>Generated By</th><th>When</th><th>Actions</th></tr>
+                    <tr><th>File Name</th><th>Generated By</th><th>When</th><th>Actions</th></tr>
                   </thead>
                   <tbody>
                     {exportHistory.map(record => (
                       <tr key={record.id}>
                         <td style={{ fontWeight: 500 }}>{record.file_name}</td>
-                        <td>{record.record_count}</td>
                         <td className="text-muted">{record.generated_by_name || '—'}</td>
                         <td className="text-muted text-xs">{record.created_at}</td>
                         <td>

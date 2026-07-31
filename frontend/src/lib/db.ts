@@ -436,7 +436,7 @@ export async function fetchBatches(): Promise<ScanBatch[]> {
   const query = (includeQueue: boolean) => supabase
       .from('scan_batches')
       .select(`
-        id, name, status, created_at,
+        id, name, status, hidden_from_users, hidden_by, created_at,
         receipts (
           id, filename, file_path, status, error_message,
           image_width, image_height, verification_warnings, created_at, updated_at
@@ -461,6 +461,8 @@ export async function fetchBatches(): Promise<ScanBatch[]> {
     id: b.id,
     name: b.name,
     status: b.status,
+    hidden_from_users: Boolean(b.hidden_from_users),
+    hidden_by: b.hidden_by || null,
     created_at: new Date(b.created_at).toLocaleString(),
     receipts: (b.receipts || [])
       .slice()
@@ -535,6 +537,14 @@ export async function deleteBatch(id: string): Promise<void> {
  */
 export async function setBatchStatus(id: string, status: BatchStatus): Promise<void> {
   const { error } = await supabase.from('scan_batches').update({ status }).eq('id', id);
+  if (error) throw new Error(error.message);
+}
+
+export async function setBatchHidden(id: string, hidden: boolean, userId: string): Promise<void> {
+  const { error } = await supabase
+    .from('scan_batches')
+    .update({ hidden_from_users: hidden, hidden_by: hidden ? userId : null })
+    .eq('id', id);
   if (error) throw new Error(error.message);
 }
 

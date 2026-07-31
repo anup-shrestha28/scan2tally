@@ -109,12 +109,18 @@ export default function Navbar({
   return (
     <nav className={`navbar${currentUser ? '' : ' login-navbar'}`}>
       {currentUser && (
-        <div className="brand">
+        <button
+          type="button"
+          className="brand"
+          onClick={onGoToWorkspace}
+          aria-label="Go to Scan2Tally main workspace"
+          title="Go to main workspace"
+        >
           <div className="brand-icon">
             <Layers size={20} />
           </div>
           <span>Scan2Tally</span>
-        </div>
+        </button>
       )}
 
       <div className="nav-right">

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { KeyRound, Layers, AlertCircle, Loader2, Mail, LockKeyhole } from 'lucide-react';
+import { KeyRound, Layers, AlertCircle, Loader2, Mail, LockKeyhole, Eye, EyeOff } from 'lucide-react';
 import { signIn } from '../lib/db';
 
 interface LoginModalProps {
@@ -10,6 +10,7 @@ interface LoginModalProps {
 export default function LoginModal({ onAuthenticated }: LoginModalProps) {
   const [email, setEmail] = useState(() => localStorage.getItem('scan2tally-remembered-email') || '');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(() => Boolean(localStorage.getItem('scan2tally-remembered-email')));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -74,7 +75,7 @@ export default function LoginModal({ onAuthenticated }: LoginModalProps) {
             <div className="login-input-wrap">
               <LockKeyhole size={17} />
               <input
-                type="password"
+                type={showPassword ? 'text' : 'password'}
                 className="form-input login-input"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
@@ -83,6 +84,16 @@ export default function LoginModal({ onAuthenticated }: LoginModalProps) {
                 disabled={busy}
                 required
               />
+              <button
+                type="button"
+                className="login-password-toggle"
+                onClick={() => setShowPassword(value => !value)}
+                disabled={busy}
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+                title={showPassword ? 'Hide password' : 'Show password'}
+              >
+                {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+              </button>
             </div>
           </div>
 
