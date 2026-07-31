@@ -22,6 +22,11 @@
   --text-main: #f8fafc;
   --text-muted: #94a3b8;
   --text-dim: #64748b;
+
+  /* Batch cards have a tuned dark palette; light mode replaces only the two
+     accents that need different contrast while shared surfaces use tokens. */
+  --batch-item-hover-border: #475569;
+  --batch-current-text: #a5b4fc;
   
   --radius-sm: 6px;
   --radius-md: 10px;
@@ -48,6 +53,9 @@ body.light {
   --text-main: #0f172a;
   --text-muted: #475569;
   --text-dim: #94a3b8;
+
+  --batch-item-hover-border: color-mix(in srgb, var(--primary) 55%, var(--border-color));
+  --batch-current-text: var(--primary-hover);
 
   --shadow-sm: 0 2px 4px rgba(0,0,0,0.06);
   --shadow-md: 0 4px 12px rgba(0,0,0,0.1);
@@ -2659,33 +2667,33 @@ body:not(.light) .theme-toggle { color: var(--accent-amber); }
   height: 72px;
   padding: 14px;
   box-sizing: border-box;
-  background: #0f172a;
-  border: 1px solid #334155;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
   border-radius: 12px;
   box-shadow: none;
   transform: none;
 }
 
 .batch-item:hover {
-  background: #0f172a;
-  border-color: #475569;
+  background: var(--bg-input);
+  border-color: var(--batch-item-hover-border);
   transform: none;
 }
 
 .batch-item.batch-item-active {
   background: rgba(99, 102, 241, 0.14);
-  border-color: #6366f1;
+  border-color: var(--primary);
   box-shadow: none;
 }
 
 .batch-item-select {
   height: 42px;
   padding: 0;
-  color: #f8fafc;
+  color: var(--text-main);
 }
 
 .batch-item-name {
-  color: #f8fafc;
+  color: var(--text-main);
   font-size: 15px;
   font-weight: 700;
   line-height: 19px;
@@ -2694,14 +2702,14 @@ body:not(.light) .theme-toggle { color: var(--accent-amber); }
 .batch-item-meta {
   gap: 6px;
   margin-top: 4px;
-  color: #94a3b8;
+  color: var(--text-muted);
   font-size: 12px;
   line-height: 16px;
 }
 
 .batch-current-badge {
   padding: 2px 7px;
-  color: #a5b4fc;
+  color: var(--batch-current-text);
   background: rgba(99, 102, 241, 0.22);
   font-size: 10px;
 }
@@ -2716,14 +2724,14 @@ body:not(.light) .theme-toggle { color: var(--accent-amber); }
   width: 28px;
   height: 28px;
   padding: 0;
-  color: #f8fafc;
+  color: var(--text-main);
   background: transparent;
   border: 0;
 }
 
 .batch-menu-trigger:hover,
 .batch-menu-trigger[aria-expanded='true'] {
-  color: #f8fafc;
-  background: rgba(51, 65, 85, 0.65);
+  color: var(--text-main);
+  background: color-mix(in srgb, var(--bg-card-hover) 65%, transparent);
   border: 0;
 }
