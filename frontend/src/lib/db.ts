@@ -202,6 +202,18 @@ export async function changeUserPassword(userId: string, password: string): Prom
   await callUserApi(userId, 'PATCH', { password }, '/password');
 }
 
+/** Verifies the current password before allowing a user to change their own. */
+export async function changeOwnPassword(email: string, currentPassword: string, newPassword: string): Promise<void> {
+  const { error: verifyError } = await supabase.auth.signInWithPassword({
+    email,
+    password: currentPassword,
+  });
+  if (verifyError) throw new Error('Current password is incorrect.');
+
+  const { error } = await supabase.auth.updateUser({ password: newPassword });
+  if (error) throw new Error(error.message);
+}
+
 export async function deleteUserAccount(userId: string): Promise<void> {
   await callUserApi(userId, 'DELETE');
 }

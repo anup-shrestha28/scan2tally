@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Layers, User as UserIcon, LogOut, Building2, Sun, Moon, Users, LayoutGrid, BookOpen, PieChart, ChevronDown } from 'lucide-react';
+import { Layers, User as UserIcon, LogOut, Building2, Sun, Moon, Users, LayoutGrid, BookOpen, PieChart, ChevronDown, LockKeyhole, Loader2, AlertCircle, Eye, EyeOff } from 'lucide-react';
 import { User, UserRole } from '../types';
+import { changeOwnPassword } from '../lib/db';
 
 interface NavbarProps {
   currentUser: User | null;
@@ -23,6 +24,54 @@ export default function Navbar({
 }: NavbarProps) {
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
+  const [showPasswordChange, setShowPasswordChange] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordBusy, setPasswordBusy] = useState(false);
+
+  const openPasswordChange = () => {
+    setCurrentPassword('');
+    setNewPassword('');
+    setConfirmPassword('');
+    setShowCurrentPassword(false);
+    setShowNewPassword(false);
+    setShowConfirmPassword(false);
+    setPasswordError(null);
+    setShowPasswordChange(true);
+    setAccountMenuOpen(false);
+  };
+
+  const handlePasswordChange = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!currentUser) return;
+    setPasswordError(null);
+    if (!currentPassword) {
+      setPasswordError('Enter your current password.');
+      return;
+    }
+    if (newPassword.length < 8) {
+      setPasswordError('New password must be at least 8 characters.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordError('New passwords do not match.');
+      return;
+    }
+    setPasswordBusy(true);
+    try {
+      await changeOwnPassword(currentUser.email, currentPassword, newPassword);
+      setShowPasswordChange(false);
+    } catch (error: any) {
+      setPasswordError(error?.message || 'Could not change your password.');
+    } finally {
+      setPasswordBusy(false);
+    }
+  };
 
   useEffect(() => {
     if (!accountMenuOpen) return;
@@ -152,6 +201,16 @@ export default function Navbar({
 
                   <button
                     type="button"
+                    className="account-menu-item"
+                    role="menuitem"
+                    onClick={openPasswordChange}
+                  >
+                    <LockKeyhole size={15} />
+                    Change password
+                  </button>
+
+                  <button
+                    type="button"
                     className="account-menu-item account-logout"
                     role="menuitem"
                     onClick={() => {
@@ -168,6 +227,60 @@ export default function Navbar({
           </div>
         )}
       </div>
+      {showPasswordChange && currentUser && (
+        <div className="modal-overlay" onClick={() => !passwordBusy && setShowPasswordChange(false)}>
+          <div className="modal modal-prompt" role="dialog" aria-modal="true" aria-labelledby="navbar-change-password-title" onClick={event => event.stopPropagation()}>
+            <div>
+              <h3 className="modal-title" id="navbar-change-password-title">Change password</h3>
+            </div>
+            <form onSubmit={handlePasswordChange}>
+              <div className="form-group">
+                <label className="form-label">Current password</label>
+                <div className="input-affix">
+                  <input type={showCurrentPassword ? 'text' : 'password'} className="form-input" value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} autoComplete="current-password" disabled={passwordBusy} required />
+                  <button type="button" className="input-affix-btn" onClick={() => setShowCurrentPassword(value => !value)} title={showCurrentPassword ? 'Hide password' : 'Show password'}>
+                    {showCurrentPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
+                </div>
+              </div>
+              <div className="form-group">
+                <label className="form-label">New password</label>
+                <div className="input-affix">
+                  <input type={showNewPassword ? 'text' : 'password'} className="form-input" value={newPassword} onChange={event => setNewPassword(event.target.value)} placeholder="At least 8 characters" autoComplete="new-password" minLength={8} disabled={passwordBusy} required />
+                  <button type="button" className="input-affix-btn" onClick={() => setShowNewPassword(value => !value)} title={showNewPassword ? 'Hide password' : 'Show password'}>
+                    {showNewPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
+                </div>
+              </div>
+              <div className="form-group">
+                <label className="form-label">Confirm new password</label>
+                <div className="input-affix">
+                  <input type={showConfirmPassword ? 'text' : 'password'} className="form-input" value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)} autoComplete="new-password" minLength={8} disabled={passwordBusy} required />
+                  <button type="button" className="input-affix-btn" onClick={() => setShowConfirmPassword(value => !value)} title={showConfirmPassword ? 'Hide password' : 'Show password'}>
+                    {showConfirmPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="password-help-link"
+                title={currentUser.role === 'Super Admin'
+                  ? 'If you don’t remember your current password, please contact Super Admin.'
+                  : 'If you don’t remember your current password, please contact your administrator.'}
+              >
+                Forgot Password?
+              </button>
+              {passwordError && <div className="alert alert-error alert-top"><AlertCircle size={15} className="alert-icon" /><span>{passwordError}</span></div>}
+              <div className="modal-actions" style={{ justifyContent: 'flex-end', marginTop: '18px' }}>
+                <button type="button" className="btn btn-secondary" disabled={passwordBusy} onClick={() => setShowPasswordChange(false)}>Cancel</button>
+                <button type="submit" className="btn btn-primary" disabled={passwordBusy}>
+                  {passwordBusy ? <><Loader2 size={16} className="animate-spin" /> Saving...</> : <><LockKeyhole size={16} /> Save password</>}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </nav>
   );
 }

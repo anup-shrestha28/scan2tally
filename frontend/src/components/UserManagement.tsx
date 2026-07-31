@@ -4,7 +4,7 @@ import {
   AlertCircle, CheckCircle2, XCircle, ArrowLeft, Eye, EyeOff
 } from 'lucide-react';
 import { User, UserRole, UserStatus } from '../types';
-import { fetchOrgUsers, createUserAccount, updateUserAccount, changeUserPassword, deleteUserAccount, setUserStatus, fetchOrganizations } from '../lib/db';
+import { fetchOrgUsers, createUserAccount, updateUserAccount, changeUserPassword, changeOwnPassword, deleteUserAccount, setUserStatus, fetchOrganizations } from '../lib/db';
 import StatusFilter from './StatusFilter';
 
 interface UserManagementProps {
@@ -44,6 +44,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [showPasswordChange, setShowPasswordChange] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showNewPassword, setShowNewPassword] = useState(false);
@@ -56,6 +57,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
   const [orgId, setOrgId] = useState('');
 
   const [busy, setBusy] = useState(false);
+  const [pendingDeleteUser, setPendingDeleteUser] = useState<User | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -104,6 +106,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
   };
 
   const openPasswordChange = () => {
+    setCurrentPassword('');
     setNewPassword('');
     setConfirmPassword('');
     setPasswordError(null);
@@ -127,7 +130,16 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
 
     setPasswordBusy(true);
     try {
-      await changeUserPassword(selectedUser.id, newPassword);
+      if (selectedUser.id === currentUser.id) {
+        if (!currentPassword) {
+          setPasswordError('Enter your current password.');
+          setPasswordBusy(false);
+          return;
+        }
+        await changeOwnPassword(currentUser.email, currentPassword, newPassword);
+      } else {
+        await changeUserPassword(selectedUser.id, newPassword);
+      }
       setShowPasswordChange(false);
       setNotice(`${selectedUser.name}'s password was changed successfully.`);
       setTimeout(() => setNotice(null), 5000);
@@ -173,20 +185,50 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
 
   const removeUser = async (user: User) => {
     if (user.id === currentUser.id) return;
-    if (!window.confirm(`Delete ${user.name}'s account permanently? This cannot be undone.`)) return;
+    setPendingDeleteUser(user);
+  };
+
+  const confirmRemoveUser = async () => {
+    if (!pendingDeleteUser) return;
+    const user = pendingDeleteUser;
     setBusy(true);
     try {
       await deleteUserAccount(user.id);
       setUsers(prev => prev.filter(u => u.id !== user.id));
       setSelectedUser(null);
+      setPendingDeleteUser(null);
       setNotice(`${user.name}'s account was deleted.`);
       setTimeout(() => setNotice(null), 5000);
     } catch (err: any) {
-      setLoadError(err?.message || 'Could not delete that user.');
+      setPendingDeleteUser(null);
+      const errorMessage = err?.message || '';
+      setLoadError(
+        /foreign key|scan_batches_created_by_fkey/i.test(errorMessage)
+          ? 'This account has batches or other records linked to it, so it cannot be deleted. Deactivate the account instead to keep its history safe.'
+          : errorMessage || 'Could not delete that user.'
+      );
     } finally {
       setBusy(false);
     }
   };
+
+  const deleteModal = pendingDeleteUser && (
+    <div className="modal-overlay modal-overlay-top" onClick={() => !busy && setPendingDeleteUser(null)}>
+      <div className="modal modal-confirm" role="dialog" aria-modal="true" aria-labelledby="delete-member-title" onClick={event => event.stopPropagation()}>
+        <div className="modal-icon modal-icon-danger"><Trash2 size={22} /></div>
+        <h3 className="modal-title" id="delete-member-title">Delete account?</h3>
+        <p className="modal-text">
+          Delete <strong>{pendingDeleteUser.name}</strong> permanently? This action cannot be undone.
+        </p>
+        <div className="modal-actions">
+          <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => setPendingDeleteUser(null)}>Cancel</button>
+          <button type="button" className="btn btn-danger-solid" disabled={busy} onClick={confirmRemoveUser}>
+            {busy ? <><Loader2 size={16} className="animate-spin" /> Deleting...</> : <><Trash2 size={16} /> Delete</>}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 
   const toggleStatus = async (user: User) => {
     const next = user.status === 'Active' ? 'Inactive' : 'Active';
@@ -248,7 +290,11 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
             <div className="detail-item"><span className="text-dim text-xs"><Briefcase size={13} /> Designation</span><strong>{selectedUser.designation || 'Not provided'}</strong></div>
             <div className="detail-item"><span className="text-dim text-xs">Organization</span><strong>{detailOrg}</strong></div>
           </div>
-          {selectedUser.id !== currentUser.id && selectedUser.role !== 'Super Admin' && <div className="form-actions member-detail-actions">
+          {selectedUser.id === currentUser.id ? (
+            <div className="form-actions member-detail-actions">
+              <button className="btn btn-secondary" onClick={openPasswordChange}><LockKeyhole size={15} /> Change password</button>
+            </div>
+          ) : selectedUser.role !== 'Super Admin' && <div className="form-actions member-detail-actions">
             <button className="btn btn-primary" onClick={() => beginEdit(selectedUser)}><Pencil size={15} /> Edit member</button>
             <button className="btn btn-secondary" onClick={openPasswordChange}><LockKeyhole size={15} /> Change password</button>
             <button className="btn btn-danger" onClick={() => removeUser(selectedUser)} disabled={busy}><Trash2 size={15} /> Delete account</button>
@@ -264,6 +310,13 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
                 </p>
               </div>
               <form onSubmit={handlePasswordChange}>
+                {selectedUser.id === currentUser.id && (
+                  <div className="form-group">
+                    <label className="form-label">Current password</label>
+                    <input type="password" className="form-input" value={currentPassword}
+                      onChange={e => setCurrentPassword(e.target.value)} placeholder="Enter your current password" autoComplete="current-password" disabled={passwordBusy} required />
+                  </div>
+                )}
                 <div className="form-group">
                   <label className="form-label">New password</label>
                   <div className="input-affix">
@@ -295,6 +348,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
             </div>
           </div>
         )}
+        {deleteModal}
       </div>
     );
   }
@@ -550,6 +604,7 @@ export default function UserManagement({ currentUser, onBack }: UserManagementPr
           </table>
         </div>
       </div>
+      {deleteModal}
     </div>
   );
 }
