@@ -1581,6 +1581,30 @@ EXTRACTION_QUEUE_MAX_ATTEMPTS = max(
     int(_positive_env_number("EXTRACTION_QUEUE_MAX_ATTEMPTS", 3.0)),
 )
 
+# How long the slot's holder may go silent before its voucher is handed back.
+#
+# The visibility window above is sized for how long an extraction may legitimately
+# take. It is the wrong instrument for asking whether anyone is still there, and
+# using it for that is what makes a crashed backend stall the entire platform —
+# extraction is one voucher at a time — for the full window. The heartbeat answers
+# the liveness question far sooner, so this is measured in heartbeats.
+#
+# Four missed beats, never under the database function's own 60s floor. Being
+# generous costs only recovery latency, while being tight would take a voucher
+# away from a worker that was merely between beats.
+EXTRACTION_QUEUE_STALE_RECLAIM_SECONDS = max(
+    60,
+    int(_positive_env_number(
+        "EXTRACTION_QUEUE_STALE_RECLAIM_SECONDS",
+        max(120.0, EXTRACTION_QUEUE_HEARTBEAT_SECONDS * 4),
+    )),
+)
+
+# Set False the first time the RPC turns out to be missing, so a database still
+# on migration 009 keeps working exactly as before instead of logging an error
+# every poll. Recovery there simply falls back to the visibility timeout.
+stale_reclaim_available: Optional[bool] = None
+
 DEFAULT_EXTRACTION_ERROR = "No transaction data could be extracted from this receipt."
 INTERRUPTED_NO_IMAGE_ERROR = (
     "Extraction was interrupted and the original image is no longer available. "
@@ -1916,6 +1940,36 @@ async def claim_next_extraction_job(client: httpx.AsyncClient) -> Optional[dict]
         "p_visibility_seconds": EXTRACTION_QUEUE_VISIBILITY_SECONDS,
         "p_max_attempts": EXTRACTION_QUEUE_MAX_ATTEMPTS,
     }))
+
+
+async def reclaim_stale_extraction_job(client: httpx.AsyncClient) -> Optional[dict]:
+    """Frees the slot if its holder has stopped heartbeating.
+
+    Returns what was reclaimed, or None when the slot is free, its holder is
+    still alive, or the database has not had migration 010 applied.
+    """
+    global stale_reclaim_available
+    if stale_reclaim_available is False:
+        return None
+    try:
+        result = await _queue_rpc(client, "reclaim_stale_receipt_extraction", {
+            "p_stale_after_seconds": EXTRACTION_QUEUE_STALE_RECLAIM_SECONDS,
+        })
+    except RuntimeError as err:
+        # PostgREST answers an unknown function with 404. Anything else is a
+        # real fault and must stay noisy rather than silently disabling recovery.
+        if "status 404" not in str(err):
+            raise
+        stale_reclaim_available = False
+        print(
+            "ℹ️ Stale-extraction reclaim is unavailable (migration 010 not applied). "
+            "An interrupted extraction will still recover, but only once its "
+            f"{EXTRACTION_QUEUE_VISIBILITY_SECONDS:.0f}s visibility window expires."
+        )
+        return None
+
+    stale_reclaim_available = True
+    return result if isinstance(result, dict) else None
 
 
 async def heartbeat_extraction_job(client: httpx.AsyncClient, job: dict) -> bool:
@@ -2445,8 +2499,38 @@ async def consume_extraction_queue() -> None:
     if extraction_queue_ready is not True:
         return
 
+    # A quarter of the silence threshold, so a slot that goes stale is noticed
+    # within roughly one extra check rather than a whole threshold late.
+    reclaim_interval = max(5.0, EXTRACTION_QUEUE_STALE_RECLAIM_SECONDS / 4)
+
     async with httpx.AsyncClient(timeout=30) as client:
+        # Zero means the first pass always checks. A backend that has just come
+        # back from a crash is precisely when the slot is most likely to be held
+        # by the process it replaced, so that check must not wait an interval.
+        next_reclaim_check = 0.0
+
         while True:
+            # Runs before the claim, not after a failed one: the claim returns
+            # empty while a dead worker still holds the slot, so checking first
+            # is what lets the freed voucher start in this same pass.
+            if time.monotonic() >= next_reclaim_check:
+                next_reclaim_check = time.monotonic() + reclaim_interval
+                try:
+                    reclaimed = await reclaim_stale_extraction_job(client)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as err:
+                    # Never fatal. Losing this check only costs recovery speed;
+                    # the visibility timeout still returns the work eventually.
+                    print(f"⚠️ Could not check for a stale extraction lease: {err}")
+                else:
+                    if reclaimed:
+                        print(
+                            f"♻️ Reclaimed receipt {reclaimed.get('receipt_id')} from worker "
+                            f"{reclaimed.get('worker_id')}, silent for "
+                            f"{reclaimed.get('silent_for_seconds')}s. Requeued for extraction."
+                        )
+
             try:
                 job = await claim_next_extraction_job(client)
             except asyncio.CancelledError:
