@@ -218,6 +218,23 @@ VISION_PROVIDER_TIMEOUT_SECONDS = min(
 # this costs extra tokens rather than extra wall-clock. 1 disables the check.
 OCR_CONSENSUS_RUNS = max(1, int(os.getenv("OCR_CONSENSUS_RUNS", "3")))
 
+# Output budget for one vision request on a gpt-5.x model.
+#
+# These are reasoning models: the tokens they spend thinking are billed against
+# this same ceiling, and the voucher JSON is only written afterwards. Hit the
+# ceiling mid-thought and the API returns finish_reason="length" with the content
+# field EMPTY — not truncated JSON, nothing at all.
+#
+# A dense 11-row voucher measured 5,258 completion tokens, 4,606 of which were
+# reasoning. The old 8,000 ceiling left barely any headroom above that, and going
+# over produced "The uploaded image is not a journal entry" against a perfectly
+# good voucher. This is only a ceiling, not a reservation — a simple voucher
+# still costs what it costs, so the headroom is free.
+OPENAI_MAX_COMPLETION_TOKENS = max(
+    2000,
+    int(_positive_env_number("OPENAI_MAX_COMPLETION_TOKENS", 32000.0)),
+)
+
 
 def openai_sampling_params(model: str) -> dict:
     """Per-model request params.
@@ -231,7 +248,7 @@ def openai_sampling_params(model: str) -> dict:
     is sent wherever it is actually permitted rather than assumed everywhere.
     """
     if model.startswith("gpt-5"):
-        return {"max_completion_tokens": 8000}
+        return {"max_completion_tokens": OPENAI_MAX_COMPLETION_TOKENS}
     return {"max_tokens": 3000, "temperature": 0}
 
 
@@ -327,7 +344,26 @@ UNSUPPORTED_VISION_IMAGE_ERROR = (
     "upload the voucher as a JPG, JPEG, PNG, or WEBP image."
 )
 
+VISION_RESPONSE_TRUNCATED_ERROR = (
+    "This voucher needed more room to read than the model was given. Raise "
+    "OPENAI_MAX_COMPLETION_TOKENS and retry the extraction."
+)
+
+
+class VisionResponseTruncated(RuntimeError):
+    """The model hit its output ceiling before it finished answering.
+
+    Kept distinct from an unreadable image on purpose. A reasoning model that
+    runs out of budget returns an EMPTY content field, which is indistinguishable
+    by shape from "I found nothing here" — and reporting a legible voucher as
+    "not a journal entry" sends the reviewer looking at the scan instead of at
+    the setting that actually caused it.
+    """
+
+
 def extraction_error_message(engine: str, err: Exception) -> str:
+    if isinstance(err, VisionResponseTruncated):
+        return VISION_RESPONSE_TRUNCATED_ERROR
     err_text = str(err)
     if "invalid_image_format" in err_text or "unsupported image" in err_text.lower():
         return UNSUPPORTED_VISION_IMAGE_ERROR
@@ -424,7 +460,21 @@ def _openai_vision_json(prompt: str, base64_image: str, media_type: str) -> dict
         }],
         **openai_sampling_params(OPENAI_VISION_MODEL)
     )
-    content = response.choices[0].message.content
+    choice = response.choices[0]
+
+    # Checked before the content is looked at. On a reasoning model this arrives
+    # with content empty rather than half-written, so parsing cannot tell the
+    # difference and the run would otherwise be discarded as "read nothing".
+    if choice.finish_reason == "length":
+        usage = getattr(response, "usage", None)
+        details = getattr(usage, "completion_tokens_details", None)
+        raise VisionResponseTruncated(
+            f"the model reached its {OPENAI_MAX_COMPLETION_TOKENS}-token output ceiling "
+            f"(used {getattr(usage, 'completion_tokens', '?')}, of which "
+            f"{getattr(details, 'reasoning_tokens', '?')} were reasoning)"
+        )
+
+    content = choice.message.content
     if not content or not content.strip():
         return {}
     return json.loads(content.strip())
@@ -730,6 +780,22 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
                 print("❌ OpenAI returned no readable journal entry content")
             else:
                 extracted_transactions, consensus_notes = build_consensus(transcripts)
+
+                # Comparing independent passes is what catches an invented
+                # amount, so losing passes quietly weakens the one check the
+                # reviewer is relying on. Say it in the receipt's warnings, not
+                # just in the server log nobody is reading.
+                if len(transcripts) < OCR_CONSENSUS_RUNS:
+                    detail = extraction_error_message("OpenAI Vision", failures[0]) if failures else ""
+                    consensus_notes = [
+                        f"Only {len(transcripts)} of {OCR_CONSENSUS_RUNS} transcription passes completed"
+                        + (f" ({detail})" if detail else "")
+                        + (". Amounts on this voucher were not cross-checked between passes, "
+                           "so please verify every row against the original."
+                           if len(transcripts) == 1 else
+                           ". Cross-checking was weaker than usual — please verify the amounts.")
+                    ] + consensus_notes
+
                 if isinstance(totals_result, Exception):
                     # Never fail the extraction over this — but say so, otherwise
                     # a broken totals call silently disables the whole check.

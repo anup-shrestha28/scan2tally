@@ -42,6 +42,12 @@ services:
         value: gpt-5.5
       - key: OCR_CONSENSUS_RUNS
         value: "3"
+      # Reasoning tokens count against this ceiling and are spent BEFORE the JSON
+      # is written, so a ceiling that is merely tight returns an empty response
+      # rather than a truncated one. Generous by design: it is a cap, not a
+      # reservation, so a simple voucher still costs only what it uses.
+      - key: OPENAI_MAX_COMPLETION_TOKENS
+        value: "32000"
       - key: VISION_PROVIDER_TIMEOUT_SECONDS
         value: "300"
       - key: EXTRACTION_QUEUE_POLL_SECONDS
