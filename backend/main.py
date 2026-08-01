@@ -317,9 +317,14 @@ app.add_middleware(
 )
 
 INVALID_JOURNAL_IMAGE_ERROR = "The uploaded image is not a journal entry. Please check."
+# PDFs are split into one image per page in the browser at upload time, so a
+# receipt whose stored object is still a PDF was uploaded before that existed.
+# Re-uploading it is the fix, and it also turns a multi-voucher PDF into the one
+# receipt per voucher the exporter expects — which retrying here never could.
 UNSUPPORTED_VISION_IMAGE_ERROR = (
-    "This file format cannot be read for extraction. Please upload the voucher as "
-    "a JPG, JPEG, PNG, or WEBP image. PDF files are not supported for Vision extraction yet."
+    "This file could not be read for extraction. If it was uploaded as a PDF, delete this "
+    "row and upload the PDF again — each page is now split into its own voucher. Otherwise "
+    "upload the voucher as a JPG, JPEG, PNG, or WEBP image."
 )
 
 def extraction_error_message(engine: str, err: Exception) -> str:

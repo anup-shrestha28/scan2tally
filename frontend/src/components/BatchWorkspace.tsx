@@ -31,6 +31,7 @@ import {
   downloadExportFile,
   ExportRecord,
 } from '../lib/db';
+import { isPdfFile, splitPdfIntoPageImages } from '../lib/pdf';
 
 /**
  * How often to re-check receipts the server is still working on.
@@ -261,6 +262,10 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [uploadValidationError, setUploadValidationError] = useState<string | null>(null);
+  // Rendering a PDF's pages happens before any receipt row exists, so it has no
+  // per-receipt status to report through. Without this the dropzone simply sits
+  // still for several seconds on a long scan and looks broken.
+  const [pdfConversion, setPdfConversion] = useState<{ name: string; page: number; total: number } | null>(null);
 
   const [activeBatchId, setActiveBatchId] = useState<string>('');
   const [editingBatchId, setEditingBatchId] = useState<string | null>(null);
@@ -995,25 +1000,53 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     void drainUploadQueue();
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement> | { target: { files: FileList | File[] } }) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement> | { target: { files: FileList | File[] } }) => {
     const selectedFiles = Array.from(e.target.files || []);
+    // Reset before the first await: React pools nothing here, but the input is
+    // reused, and re-picking the same file must still fire onChange.
+    if ('value' in e.target) (e.target as HTMLInputElement).value = '';
     if (!selectedFiles.length || !activeBatch || !currentUser.organization_id) return;
 
     const invalidFiles = selectedFiles.filter(file => validateReceiptUploadFile(file));
-    const files = selectedFiles.filter(file => !validateReceiptUploadFile(file));
+    const accepted = selectedFiles.filter(file => !validateReceiptUploadFile(file));
+
+    const problems: string[] = [];
     if (invalidFiles.length) {
       const names = invalidFiles.slice(0, 3).map(file => file.name).join(', ');
       const remainder = invalidFiles.length > 3 ? ` and ${invalidFiles.length - 3} more` : '';
-      setUploadValidationError(
+      problems.push(
         `${invalidFiles.length === 1 ? 'This file was' : 'These files were'} skipped: ${names}${remainder}. ` +
         'Only JPG, JPEG, PNG, WEBP, and PDF files are supported.'
       );
-    } else {
-      setUploadValidationError(null);
     }
 
-    // Selecting the exact same file again should still trigger onChange.
-    if ('value' in e.target) (e.target as HTMLInputElement).value = '';
+    // A PDF is a stack of vouchers, not one voucher. Each page becomes its own
+    // receipt here so it keeps its own date, its own जम्मा totals and its own
+    // block in the Excel export — see lib/pdf.ts for why this happens in the
+    // browser rather than in the extraction worker.
+    const files: File[] = [];
+    for (const file of accepted) {
+      if (!isPdfFile(file)) {
+        files.push(file);
+        continue;
+      }
+      try {
+        setPdfConversion({ name: file.name, page: 0, total: 0 });
+        const pages = await splitPdfIntoPageImages(file, (page, total) =>
+          setPdfConversion({ name: file.name, page, total })
+        );
+        // An empty render is not a partial success — treat it as a skipped file
+        // rather than quietly uploading nothing for it.
+        if (!pages.length) throw new Error('No pages could be read from it.');
+        files.push(...pages);
+      } catch (err: any) {
+        problems.push(`${file.name} was skipped. ${err?.message || 'This PDF could not be read.'}`);
+      } finally {
+        setPdfConversion(null);
+      }
+    }
+
+    setUploadValidationError(problems.length ? problems.join(' ') : null);
     if (!files.length) return;
 
     const batchId = activeBatch.id;
@@ -1719,8 +1752,8 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
             onDrop={(e) => {
               e.preventDefault();
               setDragOver(false);
-              if (uploadsLocked) return;
-              handleFileUpload({ target: { files: e.dataTransfer.files } });
+              if (uploadsLocked || pdfConversion) return;
+              void handleFileUpload({ target: { files: e.dataTransfer.files } });
             }}
           >
             <input
@@ -1728,21 +1761,29 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
               className="dropzone-input"
               multiple
               accept={RECEIPT_UPLOAD_ACCEPT}
-              onChange={handleFileUpload}
-              disabled={uploadsLocked}
+              onChange={(e) => void handleFileUpload(e)}
+              disabled={uploadsLocked || pdfConversion !== null}
             />
             <div className="dropzone-icon">
               <UploadCloud size={28} />
             </div>
 
             <h4 className="dropzone-title">
-              {isArchived ? 'This Batch is Archived'
+              {pdfConversion ? 'Reading PDF Pages'
+                : isArchived ? 'This Batch is Archived'
                 : isProcessing ? 'Extraction in Progress — Uploads Locked'
                 : isUploading ? 'Uploading Receipts One at a Time'
                 : `Upload to ${activeBatch.name}`}
             </h4>
             <p className="dropzone-text">
-              {isArchived ? 'Everything in it is still readable and exportable. Restore it to add more receipts.'
+              {pdfConversion ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" />{' '}
+                  {pdfConversion.total
+                    ? `${pdfConversion.name} — page ${pdfConversion.page} of ${pdfConversion.total}. Each page becomes its own voucher.`
+                    : `Opening ${pdfConversion.name}…`}
+                </>
+              ) : isArchived ? 'Everything in it is still readable and exportable. Restore it to add more receipts.'
                 : isProcessing ? 'Please wait for the current batch to finish processing before adding more receipts.'
                 : isUploading ? 'New files can be added here and will join the end of the upload queue.'
                 : 'Drag and drop handwritten vouchers here, or browse your files'}
