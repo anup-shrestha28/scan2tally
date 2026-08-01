@@ -317,9 +317,15 @@ app.add_middleware(
 )
 
 INVALID_JOURNAL_IMAGE_ERROR = "The uploaded image is not a journal entry. Please check."
+UNSUPPORTED_VISION_IMAGE_ERROR = (
+    "This file format cannot be read for extraction. Please upload the voucher as "
+    "a JPG, JPEG, PNG, or WEBP image. PDF files are not supported for Vision extraction yet."
+)
 
 def extraction_error_message(engine: str, err: Exception) -> str:
     err_text = str(err)
+    if "invalid_image_format" in err_text or "unsupported image" in err_text.lower():
+        return UNSUPPORTED_VISION_IMAGE_ERROR
     if "'NoneType' object has no attribute 'strip'" in err_text:
         return INVALID_JOURNAL_IMAGE_ERROR
     return f"{engine} Extraction Exception: {err}"

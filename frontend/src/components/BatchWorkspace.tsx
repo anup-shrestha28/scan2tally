@@ -86,6 +86,7 @@ function receiptDisplayStatus(receipt: Receipt): ReceiptDisplayStatus {
 type ReceiptStatusTone = 'pending' | 'queued' | 'processing' | 'extracted' | 'failed';
 type ReceiptFilterStatus = ReceiptDisplayStatus | 'Waiting to upload' | 'Uploading';
 type ReceiptStatusFilter = 'All' | ReceiptFilterStatus;
+type BatchCreatorFilter = 'all' | 'mine' | 'others';
 
 const RECEIPT_FILTER_STATUSES: ReceiptFilterStatus[] = [
   'Waiting to upload',
@@ -218,6 +219,21 @@ function isLowResolution(receipt: Receipt): boolean {
   return Math.min(receipt.image_width, receipt.image_height) < MIN_IMAGE_SHORT_EDGE;
 }
 
+function receiptHasImageIssue(receipt: Receipt): boolean {
+  return isLowResolution(receipt)
+    || receipt.upload_state === 'failed'
+    || Boolean(receipt.upload_error || receipt.enqueue_error || receipt.error_message)
+    || receipt.status === 'Failed';
+}
+
+function readableReceiptError(message?: string): string | undefined {
+  if (!message) return undefined;
+  if (/invalid_image_format|unsupported image/i.test(message)) {
+    return 'Unsupported image format. Upload the voucher as JPG, JPEG, PNG, or WEBP. PDF files cannot be extracted yet.';
+  }
+  return message;
+}
+
 function formatBatchDate(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
@@ -258,6 +274,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const [receiptPage, setReceiptPage] = useState(1);
   const [receiptStatusFilter, setReceiptStatusFilter] = useState<ReceiptStatusFilter>('All');
   const [batchSearch, setBatchSearch] = useState('');
+  const [batchCreatorFilter, setBatchCreatorFilter] = useState<BatchCreatorFilter>('all');
   const [receiptSearch, setReceiptSearch] = useState('');
   const [selectedReceiptIds, setSelectedReceiptIds] = useState<Set<string>>(new Set());
   const [previewReceipt, setPreviewReceipt] = useState<Receipt | null>(null);
@@ -322,8 +339,15 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
 
   const wantedStatus = showArchived ? 'Archived' : 'Active';
   const statusScopedBatches = batches.filter(b => b.status === wantedStatus);
+  const myBatchCount = statusScopedBatches.filter(batch => batch.created_by === currentUser.id).length;
+  const otherBatchCount = statusScopedBatches.filter(batch => batch.created_by && batch.created_by !== currentUser.id).length;
+  const creatorScopedBatches = statusScopedBatches.filter(batch =>
+    batchCreatorFilter === 'all'
+    || (batchCreatorFilter === 'mine' && batch.created_by === currentUser.id)
+    || (batchCreatorFilter === 'others' && Boolean(batch.created_by) && batch.created_by !== currentUser.id)
+  );
   const hasBatchSearch = Boolean(normalizeSearchText(batchSearch));
-  const visibleBatches = filterBySearch(statusScopedBatches, batchSearch, batch => [
+  const visibleBatches = filterBySearch(creatorScopedBatches, batchSearch, batch => [
     batch.name,
     batch.created_at,
     formatBatchDate(batch.created_at),
@@ -693,11 +717,19 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     }
     if (batch.receipts.some(r => r.status === 'Processing' || isReceiptQueued(r))) return;
 
+    const runReceipts = batch.receipts.filter(r => pending.receiptIds.includes(r.id));
+    // Keep the user on the batch workspace when any uploaded image needs
+    // attention. The warning, failed status, retry action, and image preview
+    // are all available there; opening the reviewer would hide that context.
+    if (runReceipts.some(receiptHasImageIssue) || !runReceipts.every(r => r.status === 'Extracted')) {
+      autoOpenRef.current = null;
+      return;
+    }
+
     autoOpenRef.current = null;
-    const firstExtracted = batch.receipts.find(
+    const firstExtracted = runReceipts.find(
       r => pending.receiptIds.includes(r.id) && r.status === 'Extracted'
     );
-    // If every receipt failed, stay here so the Failed rows and Retry are visible.
     if (firstExtracted) {
       onSelectBatch(
         batch,
@@ -1202,6 +1234,10 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
 
   const handleOpenReviewer = (receipt: Receipt) => {
     if (!activeBatch) return;
+    if (receiptHasImageIssue(receipt)) {
+      setSaveError('This image has an issue. Review the warning or preview the image before opening extracted rows.');
+      return;
+    }
     if (!allReceiptsExtracted) {
       setSaveError('Review & Edit becomes available after every file in this batch has finished extraction.');
       return;
@@ -1222,6 +1258,10 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
 
   const handleContinueReview = async () => {
     if (!activeBatch || openingReview) return;
+    if (activeBatch.receipts.some(receiptHasImageIssue)) {
+      setSaveError('One or more uploaded images have an issue. Review or retry them before continuing.');
+      return;
+    }
     if (!allReceiptsExtracted) {
       setSaveError('Review & Edit becomes available after every file in this batch has finished extraction.');
       return;
@@ -1332,6 +1372,27 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
             placeholder="Search batches or file names…"
             fullWidth
           />
+          <div className="batch-creator-filter" role="group" aria-label="Filter batches by creator">
+            {([
+              ['all', `All (${statusScopedBatches.length})`],
+              ['mine', `Mine (${myBatchCount})`],
+              ['others', `Others (${otherBatchCount})`],
+            ] as const).map(([filter, label]) => (
+              <button
+                key={filter}
+                type="button"
+                className={batchCreatorFilter === filter ? 'batch-creator-filter-active' : ''}
+                aria-pressed={batchCreatorFilter === filter}
+                onClick={() => {
+                  setBatchCreatorFilter(filter);
+                  setBatchPage(1);
+                  setOpenBatchMenuId(null);
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           {activeBatchHiddenBySearch && (
             <div className="batch-search-note" role="status">
               <span>Current batch is hidden by this search.</span>
@@ -1363,7 +1424,11 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
               <div className="batch-list-empty" role="status">
                 {statusScopedBatches.length === 0
                   ? (showArchived ? 'Nothing archived yet.' : 'No active batches.')
-                  : `No batches match “${batchSearch.trim()}”.`}
+                  : hasBatchSearch
+                    ? `No batches match “${batchSearch.trim()}”.`
+                    : batchCreatorFilter === 'mine'
+                      ? 'You have not created any batches here.'
+                      : 'No batches were created by other users.'}
               </div>
             )}
             {paginatedBatches.map(b => (
@@ -1804,13 +1869,13 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                           <div className="stack-xs receipt-status-stack">
                             <ReceiptStatusBadge receipt={rcpt} />
                             {rcpt.upload_state === 'failed' && rcpt.upload_error && (
-                              <span className="receipt-error">{rcpt.upload_error}</span>
+                              <span className="receipt-error">{readableReceiptError(rcpt.upload_error)}</span>
                             )}
                             {rcpt.enqueue_error && (
-                              <span className="receipt-error">{rcpt.enqueue_error}</span>
+                              <span className="receipt-error">{readableReceiptError(rcpt.enqueue_error)}</span>
                             )}
                             {rcpt.status === 'Failed' && rcpt.error_message && (
-                              <span className="receipt-error">{rcpt.error_message}</span>
+                              <span className="receipt-error">{readableReceiptError(rcpt.error_message)}</span>
                             )}
                           </div>
                         </td>

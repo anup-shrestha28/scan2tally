@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2, RotateCcw, RotateCw, ZoomIn, ChevronLeft, ChevronRight, Loader2, HelpCircle } from 'lucide-react';
+import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2, RotateCcw, RotateCw, Undo2, Redo2, ZoomIn, ChevronLeft, ChevronRight, Loader2, HelpCircle } from 'lucide-react';
 import { ScanBatch, Receipt, Transaction, User, Ledger } from '../types';
 import { saveTransactionsForReceipt, getReceiptImageUrl, deleteReceipt, fetchLedgers, resolveLedgerName } from '../lib/db';
 import { LEDGER_MATCHING } from '../lib/features';
@@ -7,6 +7,12 @@ import { LEDGER_MATCHING } from '../lib/features';
 /** Ties the ledger inputs to the single datalist rendered at the bottom. */
 const LEDGER_OPTIONS_ID = 'chart-of-accounts';
 type ReceiptPageItem = number | 'start-ellipsis' | 'end-ellipsis';
+
+interface TransactionHistoryEntry {
+  receiptId: string;
+  before: Transaction[];
+  after: Transaction[];
+}
 
 function getReceiptPageItems(currentPage: number, pageCount: number): ReceiptPageItem[] {
   if (pageCount <= 6) return Array.from({ length: pageCount }, (_, index) => index + 1);
@@ -38,12 +44,14 @@ function AmountInput({
   value,
   tone,
   uncertain,
-  onChange
+  onChange,
+  onEnter
 }: {
   value: number;
   tone: 'debit' | 'credit';
   uncertain?: boolean;
   onChange: (amount: number) => void;
+  onEnter?: () => void;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
 
@@ -68,6 +76,12 @@ function AmountInput({
         const raw = e.target.value.replace(/[^0-9.]/g, '');
         setDraft(raw);
         onChange(parseFloat(raw) || 0);
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        event.currentTarget.blur();
+        onEnter?.();
       }}
     />
   );
@@ -117,6 +131,9 @@ export default function SideBySideReviewer({
   const [imageUrl, setImageUrl] = useState<string>('');
   const dirtyRef = useRef(false);
   const changeVersionRef = useRef(0);
+  // Transaction saves replace all rows. Serialize them so a later undo cannot
+  // be overwritten by an earlier delete save that finishes out of order.
+  const transactionSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [rotation, setRotation] = useState(0);
   const [zoom, setZoom] = useState(1);
   const [showImbalanceModal, setShowImbalanceModal] = useState(false);
@@ -124,6 +141,9 @@ export default function SideBySideReviewer({
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deletingReceipt, setDeletingReceipt] = useState(false);
   const [deletedReceiptIds, setDeletedReceiptIds] = useState<Set<string>>(new Set());
+  const undoStacksRef = useRef<Record<string, TransactionHistoryEntry[]>>({});
+  const redoStacksRef = useRef<Record<string, TransactionHistoryEntry[]>>({});
+  const [, setHistoryVersion] = useState(0);
   // Set when the user chooses the fix option from this reviewer's own
   // imbalance dialog. The exporter path supplies the same list through App.
   const [localFocusedReceiptIds, setLocalFocusedReceiptIds] = useState<string[] | null>(null);
@@ -171,6 +191,53 @@ export default function SideBySideReviewer({
     getTxForReceipt(currentReceipt)
   );
 
+  const applyTransactionHistory = (direction: 'undo' | 'redo'): boolean => {
+    if (!currentReceipt) return false;
+    const sourceHistory = direction === 'undo' ? undoStacksRef.current : redoStacksRef.current;
+    const source = sourceHistory[currentReceipt.id] || [];
+    const entry = source[source.length - 1];
+    if (!entry) return false;
+
+    source.pop();
+    const destinationHistory = direction === 'undo' ? redoStacksRef.current : undoStacksRef.current;
+    const destination = destinationHistory[currentReceipt.id] || [];
+    destination.push(entry);
+    sourceHistory[currentReceipt.id] = source;
+    destinationHistory[currentReceipt.id] = destination;
+    dirtyRef.current = true;
+    changeVersionRef.current += 1;
+    const restoredRows = direction === 'undo' ? entry.before : entry.after;
+    // AmountInput keeps an unformatted draft while focused. Blur it before
+    // restoring a snapshot so the restored amount is shown immediately.
+    const activeElement = document.activeElement as HTMLElement | null;
+    if (activeElement?.matches('input, textarea, select, [contenteditable="true"]')) {
+      activeElement.blur();
+    }
+    setTransactions(restoredRows);
+    setHistoryVersion(version => version + 1);
+
+    // The delete autosave may already have removed the row from Supabase. Put
+    // the snapshot back immediately instead of waiting for the next debounce.
+    if (batch && currentUser.organization_id) {
+      setSaveState('saving');
+      queueTransactionSave(
+        currentReceipt.id,
+        { batchId: batch.id, organizationId: currentUser.organization_id, userId: currentUser.id },
+        restoredRows
+      )
+        .then(() => {
+          setSaveState('saved');
+          setSaveError(null);
+          window.setTimeout(() => setSaveState('idle'), 2500);
+        })
+        .catch((err: any) => {
+          setSaveState('error');
+          setSaveError(err?.message || 'Undo could not be saved.');
+        });
+    }
+    return true;
+  };
+
   // Save current transactions into the map before navigating
   const saveCurrentTx = (nextIndex: number) => {
     if (currentReceipt) {
@@ -197,6 +264,38 @@ export default function SideBySideReviewer({
     window.addEventListener('keydown', handleReceiptArrow);
     return () => window.removeEventListener('keydown', handleReceiptArrow);
   }, [currentIndex, visibleReceipts.length, currentReceipt?.id, transactions]);
+
+  // Keep row deletion undo separate from the browser's text-edit undo. This
+  // lets Ctrl/Cmd+Z restore a deleted Dr/Cr row even when the last focus was
+  // inside one of the voucher inputs.
+  useEffect(() => {
+    const handleTransactionHistory = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) return;
+
+      // Use the physical Z key so this works consistently across keyboard
+      // layouts: Ctrl/Cmd+Z undoes and Ctrl/Cmd+Shift+Z redoes.
+      const isZ = event.code === 'KeyZ' || event.key.toLowerCase() === 'z';
+      const isUndo = isZ && !event.shiftKey;
+      const isRedo = isZ && event.shiftKey;
+      if (!isUndo && !isRedo || !currentReceipt) return;
+
+      if (!applyTransactionHistory(isUndo ? 'undo' : 'redo')) return;
+      event.preventDefault();
+    };
+
+    // Capture before the focused input/browser default undo handler runs.
+    document.addEventListener('keydown', handleTransactionHistory, true);
+    const handleNativeUndo = (event: InputEvent) => {
+      if (event.inputType !== 'historyUndo' && event.inputType !== 'historyRedo') return;
+      if (!applyTransactionHistory(event.inputType === 'historyUndo' ? 'undo' : 'redo')) return;
+      event.preventDefault();
+    };
+    document.addEventListener('beforeinput', handleNativeUndo, true);
+    return () => {
+      document.removeEventListener('keydown', handleTransactionHistory, true);
+      document.removeEventListener('beforeinput', handleNativeUndo, true);
+    };
+  }, [currentReceipt?.id]);
 
   // When currentIndex changes, load that receipt's transactions
   useEffect(() => {
@@ -237,7 +336,7 @@ export default function SideBySideReviewer({
     const changeVersion = changeVersionRef.current;
     const timer = setTimeout(() => {
       setSaveState('saving');
-      saveTransactionsForReceipt(
+      queueTransactionSave(
         receiptId,
         { batchId: batch.id, organizationId: currentUser.organization_id!, userId: currentUser.id },
         rows
@@ -291,10 +390,31 @@ export default function SideBySideReviewer({
   const rotateLeft = () => setRotation(r => r - 90);
   const rotateRight = () => setRotation(r => r + 90);
 
+  const recordTransactionChange = (before: Transaction[], after: Transaction[]) => {
+    if (!currentReceipt) return;
+    const undoStack = undoStacksRef.current[currentReceipt.id] || [];
+    undoStack.push({ receiptId: currentReceipt.id, before, after });
+    undoStacksRef.current[currentReceipt.id] = undoStack;
+    // A new edit after undo starts a new branch, just like native editors.
+    redoStacksRef.current[currentReceipt.id] = [];
+    setHistoryVersion(version => version + 1);
+  };
+
+  const queueTransactionSave = (
+    receiptId: string,
+    ids: { batchId: string; organizationId: string; userId: string },
+    rows: Transaction[]
+  ): Promise<void> => {
+    const save = transactionSaveQueueRef.current.then(() =>
+      saveTransactionsForReceipt(receiptId, ids, rows)
+    );
+    transactionSaveQueueRef.current = save.catch(() => undefined);
+    return save;
+  };
+
   const handleUpdateTransaction = (id: string, field: keyof Transaction, value: any) => {
-    dirtyRef.current = true;
-    changeVersionRef.current += 1;
-    setTransactions(transactions.map(t => {
+    const before = transactions;
+    const after = transactions.map(t => {
       if (t.id === id) {
         const updated = { ...t, [field]: value };
         if (field === 'ledger_name') {
@@ -321,7 +441,11 @@ export default function SideBySideReviewer({
         return updated;
       }
       return t;
-    }));
+    });
+    recordTransactionChange(before, after);
+    dirtyRef.current = true;
+    changeVersionRef.current += 1;
+    setTransactions(after);
   };
 
   /**
@@ -338,8 +462,6 @@ export default function SideBySideReviewer({
   };
 
   const handleAddTransaction = (entryType: 'Dr' | 'Cr' = 'Dr') => {
-    dirtyRef.current = true;
-    changeVersionRef.current += 1;
     const newTx: Transaction = {
       id: `tx-${Date.now()}`,
       voucher_date: transactions[0]?.voucher_date || new Date().toISOString().split('T')[0],
@@ -350,13 +472,22 @@ export default function SideBySideReviewer({
       credit_amount: 0,
       narration: ''
     };
-    setTransactions([...transactions, newTx]);
+    const after = [...transactions, newTx];
+    recordTransactionChange(transactions, after);
+    dirtyRef.current = true;
+    changeVersionRef.current += 1;
+    setTransactions(after);
   };
 
   const handleDeleteTransaction = (id: string) => {
+    if (!currentReceipt) return;
+    const before = transactions;
+    const after = transactions.filter(t => t.id !== id);
+    if (before.length === after.length) return;
+    recordTransactionChange(before, after);
     dirtyRef.current = true;
     changeVersionRef.current += 1;
-    setTransactions(transactions.filter(t => t.id !== id));
+    setTransactions(after);
   };
 
   const handleSaveProgress = async () => {
@@ -369,7 +500,7 @@ export default function SideBySideReviewer({
     if (currentReceipt && batch && currentUser.organization_id) {
       setSaveState('saving');
       try {
-        await saveTransactionsForReceipt(
+        await queueTransactionSave(
           currentReceipt.id,
           { batchId: batch.id, organizationId: currentUser.organization_id, userId: currentUser.id },
           transactions
@@ -497,9 +628,11 @@ export default function SideBySideReviewer({
   const narration = transactions[0]?.narration || 'Being Expenses paid via cheque no.';
 
   const handleUpdateNarration = (value: string) => {
+    const after = transactions.map(t => ({ ...t, narration: value }));
+    recordTransactionChange(transactions, after);
     dirtyRef.current = true;
     changeVersionRef.current += 1;
-    setTransactions(prev => prev.map(t => ({ ...t, narration: value })));
+    setTransactions(after);
   };
 
   const hasPrev = currentIndex > 0;
@@ -665,6 +798,28 @@ export default function SideBySideReviewer({
                 </span>
               )}
             </div>
+            <div className="row-xs" style={{ marginLeft: 'auto' }} aria-label="Transaction history">
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm btn-icon"
+                onClick={() => applyTransactionHistory('undo')}
+                disabled={!currentReceipt || !(undoStacksRef.current[currentReceipt?.id || ''] || []).length}
+                title="Undo deleted row (Ctrl/Cmd+Z)"
+                aria-label="Undo deleted row"
+              >
+                <Undo2 size={14} />
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm btn-icon"
+                onClick={() => applyTransactionHistory('redo')}
+                disabled={!currentReceipt || !(redoStacksRef.current[currentReceipt?.id || ''] || []).length}
+                title="Redo deleted row (Ctrl/Cmd+Shift+Z)"
+                aria-label="Redo deleted row"
+              >
+                <Redo2 size={14} />
+              </button>
+            </div>
             <span className={`balance-pill ${isBalanced ? 'balance-ok' : 'balance-warn'}`}>
               {isBalanced ? (
                 <><CheckCircle2 size={14} /> Voucher balanced</>
@@ -716,6 +871,12 @@ export default function SideBySideReviewer({
                           value={tx.ledger_name || tx.debit_ledger || tx.credit_ledger || ''}
                           title={tx.ledger_name || tx.debit_ledger || tx.credit_ledger || ''}
                           onChange={(e) => handleUpdateTransaction(tx.id, 'ledger_name', e.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key !== 'Enter') return;
+                            event.preventDefault();
+                            event.currentTarget.blur();
+                            void handleSaveProgress();
+                          }}
                         />
 
                         {/* Nothing is said when there is no chart of accounts to
@@ -749,6 +910,7 @@ export default function SideBySideReviewer({
                             uncertain={tx.needs_review}
                             value={tx.debit_amount || 0}
                             onChange={(amount) => handleUpdateTransaction(tx.id, 'debit_amount', amount)}
+                            onEnter={() => void handleSaveProgress()}
                           />
                         ) : (
                           <span className="amount-empty">–</span>
@@ -761,6 +923,7 @@ export default function SideBySideReviewer({
                             uncertain={tx.needs_review}
                             value={tx.credit_amount || 0}
                             onChange={(amount) => handleUpdateTransaction(tx.id, 'credit_amount', amount)}
+                            onEnter={() => void handleSaveProgress()}
                           />
                         ) : (
                           <span className="amount-empty">–</span>
@@ -770,7 +933,8 @@ export default function SideBySideReviewer({
                         <button
                           className="btn btn-danger btn-sm btn-icon"
                           onClick={() => handleDeleteTransaction(tx.id)}
-                          title="Delete Row"
+                          title="Delete Row (Ctrl/Cmd+Z to undo)"
+                          aria-label="Delete row"
                         >
                           <Trash2 size={13} />
                         </button>

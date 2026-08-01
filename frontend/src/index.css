@@ -326,7 +326,7 @@ body {
 .batch-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 3px;
   flex: 1 1 auto;
   min-height: 0;
   /* Heading + create/search/archive controls stay visible; only results scroll. */
@@ -511,22 +511,23 @@ body {
 .batch-item {
   position: relative;
   min-height: 72px;
-  padding: 14px;
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
-  background: var(--bg-input);
+  padding: 12px 10px 12px 12px;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 8px;
+  background: transparent;
   cursor: default;
   box-shadow: none;
-  transition: border-color 0.2s ease, background 0.2s ease;
+  transition: border-color 0.18s ease, background 0.18s ease;
 }
 
 .batch-item:hover {
-  border-color: color-mix(in srgb, var(--primary) 55%, var(--border-color));
+  background: color-mix(in srgb, var(--primary) 7%, transparent);
 }
 
 .batch-item-active {
-  border-color: var(--primary);
-  background: rgba(99, 102, 241, 0.14);
+  border-left-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 13%, transparent);
   box-shadow: none;
 }
 
@@ -577,7 +578,7 @@ body {
 .batch-item-creator {
   display: block;
   margin-top: 3px;
-  padding-bottom: 10px;
+  padding-bottom: 2px;
   color: var(--text-muted);
   font-size: 0.72rem;
   line-height: 1.2;
@@ -2395,6 +2396,46 @@ body.light .user-form-card .form-label {
 
 .batch-search-note button:hover { text-decoration: underline; }
 .batch-search-note button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+.batch-creator-filter {
+  display: flex;
+  align-items: stretch;
+  gap: 16px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.batch-creator-filter button {
+  position: relative;
+  border: 0;
+  padding: 5px 0 7px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.batch-creator-filter button:hover,
+.batch-creator-filter button:focus-visible {
+  color: var(--text-main);
+  outline: none;
+}
+
+.batch-creator-filter .batch-creator-filter-active {
+  color: var(--primary);
+}
+
+.batch-creator-filter .batch-creator-filter-active::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 2px;
+  border-radius: 999px;
+  background: currentColor;
+  content: '';
+}
 
 .batch-lowres-warning {
   display: flex;
