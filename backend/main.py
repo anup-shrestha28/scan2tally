@@ -382,7 +382,7 @@ def extraction_error_message(engine: str, err: Exception) -> str:
         return UNSUPPORTED_VISION_IMAGE_ERROR
     if "'NoneType' object has no attribute 'strip'" in err_text:
         return INVALID_JOURNAL_IMAGE_ERROR
-    return f"{engine} Extraction Exception: {err}"
+    return f"{engine} Extraction Exception: {_describe_error(err)}"
 
 MISREAD_RISK_NOTE = (
     "The handwriting in one or more amount cells could not be read consistently. "
@@ -1618,6 +1618,12 @@ EXTRACTION_QUEUE_STALE_RECLAIM_SECONDS = max(
 # every poll. Recovery there simply falls back to the visibility timeout.
 stale_reclaim_available: Optional[bool] = None
 
+LEDGER_MATCHING_UNAVAILABLE_WARNING = (
+    "The chart of accounts could not be reached, so the ledger names on this "
+    "voucher were not matched against it. The amounts are unaffected — check the "
+    "names before exporting, or retry the extraction."
+)
+
 DEFAULT_EXTRACTION_ERROR = "No transaction data could be extracted from this receipt."
 INTERRUPTED_NO_IMAGE_ERROR = (
     "Extraction was interrupted and the original image is no longer available. "
@@ -2274,10 +2280,24 @@ async def _prepare_extraction(receipt: dict, user_id: Optional[str]) -> dict:
     # Resolve each name against the organisation's real chart of accounts.
     # Only certain matches rewrite the extracted name; suggestions remain for a
     # person to confirm.
+    #
+    # Never allowed to fail the receipt. Matching is an enrichment step that runs
+    # after the voucher has already been read, checked against its own जम्मा
+    # totals, and turned into rows — and a failure here used to propagate out of
+    # this function, so the queue worker marked the whole extraction Failed and
+    # discarded transactions that were complete and correct. Observed with a
+    # blank message, because httpx raises its timeouts with no text.
     if ledger_matching_ready:
-        async with httpx.AsyncClient(timeout=30) as client:
-            ledgers = await _load_org_ledgers(client, receipt["organization_id"])
-        warnings = warnings + ledger_matching.apply_to_rows(rows, ledgers)
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                ledgers = await _load_org_ledgers(client, receipt["organization_id"])
+        except Exception as err:
+            # CancelledError is a BaseException and deliberately not caught here:
+            # an extraction being cancelled must still unwind.
+            print(f"⚠️ Could not load the chart of accounts: {_describe_error(err)}")
+            warnings = warnings + [LEDGER_MATCHING_UNAVAILABLE_WARNING]
+        else:
+            warnings = warnings + ledger_matching.apply_to_rows(rows, ledgers)
 
     return {
         "error": None,
@@ -2458,7 +2478,7 @@ async def _run_queued_extraction_job(job: dict) -> None:
                 job,
                 extraction_error_message("Extraction", err),
             )
-            print(f"❌ Queued extraction for receipt {receipt_id} failed: {err}")
+            print(f"❌ Queued extraction for receipt {receipt_id} failed: {_describe_error(err)}")
             return
 
         if lease_lost.is_set():
@@ -2603,7 +2623,7 @@ async def _run_extraction_job(receipt: dict, user_id: Optional[str]) -> None:
         )
     except Exception as err:
         await _fail_receipt(receipt_id, extraction_error_message("Extraction", err))
-        print(f"❌ Extraction job for receipt {receipt_id} failed: {err}")
+        print(f"❌ Extraction job for receipt {receipt_id} failed: {_describe_error(err)}")
     finally:
         _jobs_in_flight.discard(receipt_id)
 
