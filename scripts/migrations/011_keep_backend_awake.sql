@@ -68,7 +68,16 @@ BEGIN
             -- A short timeout on purpose: this only has to arrive, not to be
             -- answered. A cold start takes far longer than any sensible wait,
             -- and the request itself is what does the waking.
-            $cmd$SELECT net.http_get(url := %L, timeout_milliseconds := 5000)$cmd$,
+            --
+            -- The header is what makes the ping legible in the backend log.
+            -- Render's own health probe hits this same path, so without it the
+            -- access log is a mix of two things that look identical and nobody
+            -- can tell whether the keepalive is actually running.
+            $cmd$SELECT net.http_get(
+                url := %L,
+                headers := '{"X-Keepalive-Source": "supabase-pg-cron"}'::jsonb,
+                timeout_milliseconds := 5000
+            )$cmd$,
             p_health_url
         )
     );

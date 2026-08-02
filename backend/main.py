@@ -1,11 +1,13 @@
 import os
 import io
 import json
+import logging
 import re
 import base64
 import hashlib
 import asyncio
 import socket
+import sys
 import time
 import uuid
 from collections import Counter
@@ -22,6 +24,104 @@ from PIL import Image
 import numpy as np
 import cv2
 from dotenv import load_dotenv
+
+# ---------------------------------------------------------------- logging
+#
+# Every line this file emits is timestamped, and so is every line uvicorn emits.
+#
+# Extraction is a background activity nobody watches live: the questions asked of
+# these logs afterwards are "when did this voucher start", "how long was the gap
+# before the next one", and "was the backend even awake at 09:40". A bare line of
+# text answers none of them. The keepalive ping in migration 011 is the clearest
+# case — as untimestamped access-log lines it is indistinguishable from ordinary
+# traffic, but at 10-minute intervals it is obviously the cron.
+#
+# Going through logging rather than print() also fixes a second problem: print()
+# to a pipe is block-buffered, so output appeared in bursts and the last line
+# before a hang was routinely still sitting in the buffer. Handlers flush per
+# record.
+LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+_logger = logging.getLogger("scan2tally")
+
+
+class _StdoutHandler(logging.StreamHandler):
+    """Writes to whatever sys.stdout is at the moment, exactly as print() did.
+
+    A plain StreamHandler captures the stream object when it is constructed. This
+    module is imported before anything that legitimately replaces stdout — pytest
+    capture, contextlib.redirect_stdout, a supervisor rebinding it — and the
+    handler would then keep writing to a file object nobody is reading any more.
+    Late binding is what print() does, and swapping print() for logging should
+    not quietly change where the output lands.
+    """
+
+    @property
+    def stream(self):
+        return sys.stdout
+
+    @stream.setter
+    def stream(self, _value):
+        # StreamHandler's constructor assigns here; the property is the source
+        # of truth, so the assignment is deliberately ignored.
+        pass
+
+
+def _configure_app_logger() -> None:
+    """Own handler, so app output does not depend on uvicorn's configuration.
+
+    Under `uvicorn main:app` the server sets logging up before importing this
+    module; under `python main.py` it happens after. Attaching a handler here
+    rather than calling basicConfig keeps both identical and leaves any handler
+    the host process already installed alone.
+    """
+    if _logger.handlers:
+        return
+    # stdout, as print() used: these are the record of normal operation, not
+    # diagnostics, and anything already scraping stdout should keep working.
+    handler = _StdoutHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s", LOG_DATE_FORMAT))
+    _logger.addHandler(handler)
+    _logger.setLevel(logging.INFO)
+    # These lines are the record of what was read and stored; they should not
+    # also appear via the root logger if the host configures one.
+    _logger.propagate = False
+
+
+_configure_app_logger()
+
+
+def log(*parts) -> None:
+    """Timestamped stdout, with print()'s signature so call sites read the same."""
+    _logger.info(" ".join(str(part) for part in parts))
+
+
+def _install_uvicorn_timestamps() -> None:
+    """Prepends the same timestamp to uvicorn's own lines, including access logs.
+
+    Called once the server has installed its handlers, because uvicorn applies
+    its logging config itself and would otherwise overwrite anything set at
+    import time. Access lines are the ones that matter here: they are where a
+    keepalive ping actually shows up.
+
+    Best effort by design — reformatting a log line is never worth failing a
+    startup over, so an unfamiliar uvicorn simply keeps its usual format.
+    """
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        for handler in logging.getLogger(name).handlers:
+            formatter = handler.formatter
+            if formatter is None or getattr(formatter, "_scan2tally_stamped", False):
+                continue
+            try:
+                existing = formatter._style._fmt
+                if "%(asctime)s" in existing:
+                    continue
+                stamped = type(formatter)(f"%(asctime)s {existing}", LOG_DATE_FORMAT)
+                stamped._scan2tally_stamped = True
+                handler.setFormatter(stamped)
+            except Exception:
+                continue
+
 
 # Load environment variables
 load_dotenv(override=True)
@@ -40,9 +140,9 @@ supabase_admin_available = bool(
     and "placeholder" not in SUPABASE_SERVICE_ROLE_KEY.lower()
 )
 if supabase_admin_available:
-    print("✅ Supabase admin API configured (user creation enabled)")
+    log("✅ Supabase admin API configured (user creation enabled)")
 else:
-    print("⚠️ Supabase admin API not configured — user creation endpoint disabled")
+    log("⚠️ Supabase admin API not configured — user creation endpoint disabled")
 
 # Supabase's plan card reports decimal MB/GB. Keep quota percentages and the UI
 # in those same units (1 MB = 1,000,000 bytes) so the figures compare directly.
@@ -61,7 +161,7 @@ def _positive_env_number(name: str, default: float) -> float:
             return value
     except (TypeError, ValueError):
         pass
-    print(f"⚠️ {name} must be a positive number; using {default} instead")
+    log(f"⚠️ {name} must be a positive number; using {default} instead")
     return default
 
 
@@ -283,9 +383,9 @@ if OPENAI_API_KEY and OPENAI_API_KEY != "placeholder-openai-api-key":
         from openai import OpenAI
         openai_client = _create_openai_client(OpenAI)
         openai_available = True
-        print(f"✅ OpenAI Vision AI engine activated! (model: {OPENAI_VISION_MODEL})")
+        log(f"✅ OpenAI Vision AI engine activated! (model: {OPENAI_VISION_MODEL})")
     except Exception as e:
-        print(f"Warning: Could not configure OpenAI: {e}")
+        log(f"Warning: Could not configure OpenAI: {e}")
 
 # Check Gemini Availability
 genai_available = False
@@ -294,12 +394,15 @@ if not openai_available and GEMINI_API_KEY and GEMINI_API_KEY != "placeholder-ge
         import google.generativeai as genai
         genai.configure(api_key=GEMINI_API_KEY)
         genai_available = True
-        print("✅ Gemini Vision AI engine activated!")
+        log("✅ Gemini Vision AI engine activated!")
     except Exception as e:
-        print(f"Warning: Could not configure Gemini AI: {e}")
+        log(f"Warning: Could not configure Gemini AI: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Only now are uvicorn's handlers in place to be restamped.
+    _install_uvicorn_timestamps()
+
     # Ledger matching and job claiming both need columns that arrived in
     # migration 002, so find out whether this database actually has them before
     # anything tries to write one.
@@ -734,8 +837,35 @@ def classify_voucher_image_content(image_bytes: bytes, filename: str) -> List[di
     # For any unrecognized file, return an empty list so the UI gives a clean slate
     return []
 
+_last_keepalive_ping: Optional[float] = None
+
+
+def _note_keepalive_ping(source: str) -> None:
+    """Logs a keepalive ping, and how long it had been since the previous one.
+
+    The interval is the useful half. A ping on its own only says the request
+    arrived; the gap says whether the schedule is firing as configured, and a gap
+    far longer than the interval is how a suspended cron job, or a night the
+    service was allowed to sleep, becomes visible without leaving the log.
+    """
+    global _last_keepalive_ping
+    now = time.monotonic()
+    gap = "" if _last_keepalive_ping is None else f" ({now - _last_keepalive_ping:.0f}s since the last one)"
+    _last_keepalive_ping = now
+    log(f"💓 Keepalive ping from {source[:60]}{gap}")
+
+
 @app.get("/api/health")
-def health_check():
+def health_check(x_keepalive_source: Optional[str] = Header(None)):
+    # The keepalive scheduled by migration 011 announces itself, because the
+    # platform's own health probe hits this same path and the two are otherwise
+    # indistinguishable in the access log. Saying so once per ping is what makes
+    # "was the backend kept awake last night?" answerable from the log alone,
+    # and the gap between consecutive lines is the answer to "did the schedule
+    # actually fire?".
+    if x_keepalive_source:
+        _note_keepalive_ping(x_keepalive_source)
+
     active_engine = f"OpenAI Vision ({OPENAI_VISION_MODEL})" if openai_available else ("Gemini 1.5 Flash" if genai_available else "Goshwara Dr/Cr Accounting Engine")
     return {
         "status": "online",
@@ -763,7 +893,7 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
 
     # 1. Live OpenAI Extraction
     if openai_available:
-        print(f"🤖 Sending image to OpenAI {OPENAI_VISION_MODEL}... (size: {len(raw_bytes)} bytes)")
+        log(f"🤖 Sending image to OpenAI {OPENAI_VISION_MODEL}... (size: {len(raw_bytes)} bytes)")
         try:
             base64_image = base64.b64encode(raw_bytes).decode('utf-8')
             media_type = content_type if content_type.startswith("image/") else "image/jpeg"
@@ -790,7 +920,7 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
 
             if not transcripts:
                 error_msg = INVALID_JOURNAL_IMAGE_ERROR
-                print("❌ OpenAI returned no readable journal entry content")
+                log("❌ OpenAI returned no readable journal entry content")
             else:
                 extracted_transactions, consensus_notes = build_consensus(transcripts)
 
@@ -812,22 +942,22 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
                 if isinstance(totals_result, Exception):
                     # Never fail the extraction over this — but say so, otherwise
                     # a broken totals call silently disables the whole check.
-                    print(f"⚠️ Could not read the जम्मा total row: {_describe_error(totals_result)}")
+                    log(f"⚠️ Could not read the जम्मा total row: {_describe_error(totals_result)}")
                 elif totals_result:
                     stated_totals = totals_result
-                print(f"✅ Extracted {len(extracted_transactions)} transactions from OpenAI "
+                log(f"✅ Extracted {len(extracted_transactions)} transactions from OpenAI "
                       f"({len(transcripts)}/{OCR_CONSENSUS_RUNS} transcription runs agreed on structure)")
                 for note in consensus_notes:
-                    print(f"⚠️ Consensus: {note}")
+                    log(f"⚠️ Consensus: {note}")
         except Exception as err:
             error_msg = extraction_error_message("OpenAI Vision", err)
-            print(f"❌ {error_msg}")
+            log(f"❌ {error_msg}")
     else:
-        print("⚠️ OpenAI not available (key missing or invalid)")
+        log("⚠️ OpenAI not available (key missing or invalid)")
 
     # 2. Live Gemini Extraction
     if not extracted_transactions and genai_available:
-        print(f"🤖 Falling back to Gemini Vision...")
+        log(f"🤖 Falling back to Gemini Vision...")
         try:
             import google.generativeai as genai
             pil_img = Image.open(io.BytesIO(raw_bytes))
@@ -835,10 +965,10 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
             response = await _gemini_generate_content(model, prompt, pil_img)
             if not response.text or not response.text.strip():
                 error_msg = INVALID_JOURNAL_IMAGE_ERROR
-                print(f"❌ Gemini returned no readable journal entry content")
+                log(f"❌ Gemini returned no readable journal entry content")
             else:
                 raw_text = response.text.strip()
-                print(f"📥 Gemini raw response:\n{raw_text}")
+                log(f"📥 Gemini raw response:\n{raw_text}")
                 cleaned_text = re.sub(r'^```json\s*', '', raw_text)
                 cleaned_text = re.sub(r'\s*```$', '', cleaned_text)
                 parsed_json = json.loads(cleaned_text)
@@ -847,10 +977,10 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
                     stated_totals = read_stated_totals(parsed_json)
                 elif isinstance(parsed_json, list):
                     extracted_transactions = parsed_json
-                print(f"✅ Extracted {len(extracted_transactions)} transactions from Gemini")
+                log(f"✅ Extracted {len(extracted_transactions)} transactions from Gemini")
         except Exception as err:
             error_msg = extraction_error_message("Gemini", err)
-            print(f"❌ {error_msg}")
+            log(f"❌ {error_msg}")
 
     # 3. Goshwara Accounting Classification Engine (offline demo fallback only —
     # never used once a real Vision AI engine is configured, so genuine
@@ -858,9 +988,9 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
     if not extracted_transactions and not openai_available and not genai_available:
         extracted_transactions = classify_voucher_image_content(raw_bytes, filename)
         if extracted_transactions:
-            print(f"📋 Using demo classification engine: {len(extracted_transactions)} rows")
+            log(f"📋 Using demo classification engine: {len(extracted_transactions)} rows")
 
-    print(f"🔚 Final result: {len(extracted_transactions)} transactions, error={error_msg}")
+    log(f"🔚 Final result: {len(extracted_transactions)} transactions, error={error_msg}")
 
     # Reconcile against the voucher's own printed totals. Reporting only —
     # a discrepancy never rewrites an amount, it just tells the reviewer where
@@ -880,9 +1010,9 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
 
     if verification["warnings"]:
         for warning in verification["warnings"]:
-            print(f"⚠️ Verification: {warning}")
+            log(f"⚠️ Verification: {warning}")
     elif verification["checked_against_voucher"]:
-        print("✅ Verification: line items reconcile with the voucher's जम्मा totals")
+        log("✅ Verification: line items reconcile with the voucher's जम्मा totals")
 
     return {
         "filename": filename,
@@ -1135,7 +1265,7 @@ async def publish_capacity_alerts() -> None:
             try:
                 await publish_capacity_alerts_once(client)
                 if previous_error is not None:
-                    print("✅ Supabase capacity alert publisher reconnected")
+                    log("✅ Supabase capacity alert publisher reconnected")
                 previous_error = None
             except asyncio.CancelledError:
                 raise
@@ -1145,7 +1275,7 @@ async def publish_capacity_alerts() -> None:
                 # Log only when the failure changes, rather than every interval.
                 error_text = str(err)
                 if error_text != previous_error:
-                    print(f"⚠️ Could not refresh capacity alerts: {error_text}")
+                    log(f"⚠️ Could not refresh capacity alerts: {error_text}")
                 previous_error = error_text
             await asyncio.sleep(CAPACITY_ALERT_INTERVAL_SECONDS)
 
@@ -1843,18 +1973,18 @@ async def detect_schema_features() -> None:
     except Exception as err:
         extraction_queue_absence_first_seen = None
         extraction_queue_absence_confirmations = 0
-        print(f"⚠️ Could not check the database schema: {_describe_error(err)}")
+        log(f"⚠️ Could not check the database schema: {_describe_error(err)}")
         return
 
     if extraction_queue_configuration_error:
-        print(f"❌ {extraction_queue_configuration_error}")
+        log(f"❌ {extraction_queue_configuration_error}")
     elif ledger_matching_ready and job_claiming_ready:
-        print("✅ Chart-of-accounts matching and job claiming enabled")
+        log("✅ Chart-of-accounts matching and job claiming enabled")
     else:
         # Not a fault: everything works. This is a note about one deployment
         # constraint, so it says what to do and when rather than sounding alarmed
         # on every single start-up.
-        print(
+        log(
             "ℹ️ Running in single-process mode (migration 002 not applied). "
             "Fine for development. Before running more than one backend instance, "
             "apply scripts/migrations/002_ledgers_claiming_audit.sql — without it "
@@ -1864,14 +1994,14 @@ async def detect_schema_features() -> None:
     if extraction_queue_configuration_error:
         return
     if extraction_queue_ready is True:
-        print("✅ Durable global sequential extraction queue enabled")
+        log("✅ Durable global sequential extraction queue enabled")
     elif extraction_queue_ready is False:
-        print(
+        log(
             "ℹ️ Durable extraction queue unavailable (migration 007 not applied). "
             "Using the concurrency-one compatibility worker."
         )
     else:
-        print(
+        log(
             "⚠️ Durable extraction queue availability could not be confirmed. "
             "Extraction is paused until Supabase answers the health probe."
         )
@@ -1980,7 +2110,7 @@ async def reclaim_stale_extraction_job(client: httpx.AsyncClient) -> Optional[di
         if "status 404" not in str(err):
             raise
         stale_reclaim_available = False
-        print(
+        log(
             "ℹ️ Stale-extraction reclaim is unavailable (migration 010 not applied). "
             "An interrupted extraction will still recover, but only once its "
             f"{EXTRACTION_QUEUE_VISIBILITY_SECONDS:.0f}s visibility window expires."
@@ -2142,7 +2272,7 @@ async def refresh_extraction_claims() -> None:
                     json={"extraction_claimed_at": _now()},
                 )
         except Exception as err:
-            print(f"⚠️ Could not refresh extraction claims: {_describe_error(err)}")
+            log(f"⚠️ Could not refresh extraction claims: {_describe_error(err)}")
 
 
 async def _fail_receipt(receipt_id: str, message: str) -> None:
@@ -2155,7 +2285,7 @@ async def _fail_receipt(receipt_id: str, message: str) -> None:
                 "verification_warnings": [],
             }))
     except Exception as err:
-        print(f"⚠️ Could not record failure for receipt {receipt_id}: {_describe_error(err)}")
+        log(f"⚠️ Could not record failure for receipt {receipt_id}: {_describe_error(err)}")
 
 
 def normalize_transaction_rows(
@@ -2294,7 +2424,7 @@ async def _prepare_extraction(receipt: dict, user_id: Optional[str]) -> dict:
         except Exception as err:
             # CancelledError is a BaseException and deliberately not caught here:
             # an extraction being cancelled must still unwind.
-            print(f"⚠️ Could not load the chart of accounts: {_describe_error(err)}")
+            log(f"⚠️ Could not load the chart of accounts: {_describe_error(err)}")
             warnings = warnings + [LEDGER_MATCHING_UNAVAILABLE_WARNING]
         else:
             warnings = warnings + ledger_matching.apply_to_rows(rows, ledgers)
@@ -2329,7 +2459,7 @@ async def _extract_and_store(receipt: dict, user_id: Optional[str]) -> None:
                 "verification_warnings": [],
                 **audit,
             }))
-            print(f"❌ Extraction failed for {filename}: {prepared['error']}")
+            log(f"❌ Extraction failed for {filename}: {prepared['error']}")
             return
 
         rows = prepared["rows"]
@@ -2359,7 +2489,7 @@ async def _extract_and_store(receipt: dict, user_id: Optional[str]) -> None:
             **audit,
         }))
 
-    print(f"✅ Stored {len(rows)} transactions for {filename} (receipt {receipt_id})")
+    log(f"✅ Stored {len(rows)} transactions for {filename} (receipt {receipt_id})")
 
 
 async def _load_org_ledgers(client: httpx.AsyncClient, organization_id: str) -> List[dict]:
@@ -2377,7 +2507,7 @@ async def _load_org_ledgers(client: httpx.AsyncClient, organization_id: str) -> 
         # Matching is an improvement on the extracted name, not a precondition
         # for having one, so a failure here leaves the rows unmatched rather
         # than losing a voucher that was read perfectly well.
-        print(f"⚠️ Could not load the chart of accounts: {res.text}")
+        log(f"⚠️ Could not load the chart of accounts: {res.text}")
         return []
     return res.json() or []
 
@@ -2396,7 +2526,7 @@ async def _heartbeat_queued_extraction(job: dict, lease_lost: asyncio.Event) -> 
             except Exception as err:
                 # A transport failure is not proof that the lease was lost. A
                 # later heartbeat or the fenced final RPC settles ownership.
-                print(f"⚠️ Could not heartbeat queued extraction: {_describe_error(err)}")
+                log(f"⚠️ Could not heartbeat queued extraction: {_describe_error(err)}")
 
 
 async def _record_queued_failure(
@@ -2406,14 +2536,14 @@ async def _record_queued_failure(
         async with httpx.AsyncClient(timeout=30) as client:
             accepted = await fail_extraction_job(client, job, message, raw_extraction)
         if not accepted:
-            print(
+            log(
                 f"ℹ️ Ignored stale failure for receipt {job.get('receipt_id')}; "
                 "its extraction lease is now owned elsewhere."
             )
     except Exception as err:
         # Do not issue an unfenced receipt patch here. If the RPC outcome is
         # unknown, PGMQ visibility expiry safely makes the job available again.
-        print(f"⚠️ Could not persist queued extraction failure: {_describe_error(err)}")
+        log(f"⚠️ Could not persist queued extraction failure: {_describe_error(err)}")
 
 
 async def _run_queued_extraction_job(job: dict) -> None:
@@ -2425,7 +2555,7 @@ async def _run_queued_extraction_job(job: dict) -> None:
         "organization_id", "file_path",
     )
     if any(job.get(field) in (None, "") for field in required):
-        print("⚠️ Supabase returned an incomplete queued extraction job; leaving it for retry.")
+        log("⚠️ Supabase returned an incomplete queued extraction job; leaving it for retry.")
         return
 
     receipt = {
@@ -2453,7 +2583,7 @@ async def _run_queued_extraction_job(job: dict) -> None:
         if lost_waiter in done and lease_lost.is_set():
             extraction.cancel()
             await asyncio.gather(extraction, return_exceptions=True)
-            print(f"ℹ️ Stopped stale extraction for receipt {receipt_id} after losing its lease.")
+            log(f"ℹ️ Stopped stale extraction for receipt {receipt_id} after losing its lease.")
             return
 
         if extraction not in done:
@@ -2478,7 +2608,7 @@ async def _run_queued_extraction_job(job: dict) -> None:
                 job,
                 extraction_error_message("Extraction", err),
             )
-            print(f"❌ Queued extraction for receipt {receipt_id} failed: {_describe_error(err)}")
+            log(f"❌ Queued extraction for receipt {receipt_id} failed: {_describe_error(err)}")
             return
 
         if lease_lost.is_set():
@@ -2490,7 +2620,7 @@ async def _run_queued_extraction_job(job: dict) -> None:
                 prepared["error"],
                 prepared.get("raw_extraction"),
             )
-            print(f"❌ Extraction failed for {filename}: {prepared['error']}")
+            log(f"❌ Extraction failed for {filename}: {prepared['error']}")
             return
 
         try:
@@ -2499,16 +2629,16 @@ async def _run_queued_extraction_job(job: dict) -> None:
         except Exception as err:
             # Completion may have committed even if its response was lost. Never
             # turn that ambiguity into an unfenced failure; redelivery is safe.
-            print(f"⚠️ Could not confirm queued extraction completion: {_describe_error(err)}")
+            log(f"⚠️ Could not confirm queued extraction completion: {_describe_error(err)}")
             return
 
         if accepted:
-            print(
+            log(
                 f"✅ Stored {len(prepared['rows'])} transactions for {filename} "
                 f"(receipt {receipt_id})"
             )
         else:
-            print(
+            log(
                 f"ℹ️ Discarded stale result for receipt {receipt_id}; "
                 "its extraction lease is now owned elsewhere."
             )
@@ -2555,10 +2685,10 @@ async def consume_extraction_queue() -> None:
                 except Exception as err:
                     # Never fatal. Losing this check only costs recovery speed;
                     # the visibility timeout still returns the work eventually.
-                    print(f"⚠️ Could not check for a stale extraction lease: {_describe_error(err)}")
+                    log(f"⚠️ Could not check for a stale extraction lease: {_describe_error(err)}")
                 else:
                     if reclaimed:
-                        print(
+                        log(
                             f"♻️ Reclaimed receipt {reclaimed.get('receipt_id')} from worker "
                             f"{reclaimed.get('worker_id')}, silent for "
                             f"{reclaimed.get('silent_for_seconds')}s. Requeued for extraction."
@@ -2569,7 +2699,7 @@ async def consume_extraction_queue() -> None:
             except asyncio.CancelledError:
                 raise
             except Exception as err:
-                print(f"⚠️ Could not claim the next queued extraction: {_describe_error(err)}")
+                log(f"⚠️ Could not claim the next queued extraction: {_describe_error(err)}")
                 await asyncio.sleep(EXTRACTION_QUEUE_POLL_SECONDS)
                 continue
 
@@ -2623,7 +2753,7 @@ async def _run_extraction_job(receipt: dict, user_id: Optional[str]) -> None:
         )
     except Exception as err:
         await _fail_receipt(receipt_id, extraction_error_message("Extraction", err))
-        print(f"❌ Extraction job for receipt {receipt_id} failed: {_describe_error(err)}")
+        log(f"❌ Extraction job for receipt {receipt_id} failed: {_describe_error(err)}")
     finally:
         _jobs_in_flight.discard(receipt_id)
 
@@ -2695,7 +2825,7 @@ async def start_receipt_extraction(receipt_id: str, authorization: Optional[str]
             async with httpx.AsyncClient(timeout=20) as client:
                 queued = await enqueue_extraction_job(client, receipt_id, caller["id"])
         except (RuntimeError, httpx.HTTPError) as err:
-            print(f"⚠️ Could not enqueue receipt {receipt_id}: {_describe_error(err)}")
+            log(f"⚠️ Could not enqueue receipt {receipt_id}: {_describe_error(err)}")
             raise HTTPException(
                 status_code=503,
                 detail="The extraction queue is temporarily unavailable. Please try again.",
@@ -2767,7 +2897,7 @@ async def resume_interrupted_extractions() -> None:
                 params={"select": receipt_job_select(), "status": "eq.Processing"},
             )
             if res.status_code != 200:
-                print(f"⚠️ Could not check for interrupted extractions: {res.text}")
+                log(f"⚠️ Could not check for interrupted extractions: {res.text}")
                 return
 
             stranded = res.json() or []
@@ -2793,9 +2923,9 @@ async def resume_interrupted_extractions() -> None:
                 resumed += 1
 
             if resumed:
-                print(f"↻ Resuming {resumed} extraction(s) interrupted by a restart")
+                log(f"↻ Resuming {resumed} extraction(s) interrupted by a restart")
     except Exception as err:
-        print(f"⚠️ Could not check for interrupted extractions: {_describe_error(err)}")
+        log(f"⚠️ Could not check for interrupted extractions: {_describe_error(err)}")
 
 
 async def run_legacy_extraction_maintenance() -> None:
