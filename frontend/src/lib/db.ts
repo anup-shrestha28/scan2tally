@@ -1080,6 +1080,42 @@ export async function importLedgers(
  * this batch already sent to Tally, and by whom?" — which is exactly the
  * question that comes up when someone suspects a voucher was posted twice.
  */
+/**
+ * Characters Supabase Storage will not accept anywhere in an object key.
+ *
+ * Storage validates the key against a restricted ASCII set and rejects the whole
+ * upload with "Invalid key" — it does not escape or substitute. Verified against
+ * the live bucket: the `·` in the default batch name ("Batch 6 · Aug 2, 2026")
+ * fails, and so does any Devanagari, which matters more — this app is used in
+ * Nepali, and a batch named भौचर would have failed for a reason nothing in the
+ * message explains.
+ *
+ * `/` is excluded deliberately: it is legal in a key but would silently push the
+ * file into a different folder, out from under the tenant prefix the storage
+ * policies are written against.
+ */
+const STORAGE_KEY_UNSAFE = /[^A-Za-z0-9!\-_.*'() &$@=;:+,?]/g;
+
+/**
+ * Makes a display file name safe to use as a storage key.
+ *
+ * Only the key is rewritten. The name shown in export history, and the name the
+ * browser saves it under, both keep the original text — the tidy key is an
+ * implementation detail of where the bytes live, and a Nepali batch name should
+ * not come back to its owner mangled into hyphens.
+ */
+export function storageSafeFileName(fileName: string): string {
+  const extension = /\.[A-Za-z0-9]{1,8}$/.exec(fileName)?.[0] ?? '';
+  const stem = fileName.slice(0, fileName.length - extension.length);
+  const safeStem = stem
+    .replace(STORAGE_KEY_UNSAFE, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^[-\s]+|[-\s]+$/g, '');
+  // A name with nothing ASCII in it sanitises away entirely. The uuid in front
+  // already makes the key unique, so a plain stem here loses nothing.
+  return `${safeStem || 'export'}${extension.replace(STORAGE_KEY_UNSAFE, '')}`;
+}
+
 export async function recordExport(input: {
   batchId: string;
   userId: string;
@@ -1088,7 +1124,8 @@ export async function recordExport(input: {
   recordCount: number;
   file: Blob;
 }): Promise<void> {
-  const filePath = `${input.organizationId}/${input.batchId}/${newId()}-${input.fileName}`;
+  const filePath =
+    `${input.organizationId}/${input.batchId}/${newId()}-${storageSafeFileName(input.fileName)}`;
   const { error: uploadError } = await supabase.storage.from('exports').upload(filePath, input.file, {
     contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     upsert: false,
