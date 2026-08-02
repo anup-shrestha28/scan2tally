@@ -262,3 +262,24 @@ def test_the_reclaim_check_resumes_once_its_interval_has_passed(monkeypatch):
         asyncio.run(main.consume_extraction_queue())
 
     assert len(reclaims) == 3
+
+
+# ------------------------------------------------- diagnosability of failures
+
+def test_a_network_failure_logs_something_identifiable():
+    """httpx raises timeouts with no message, which turned a real outage into
+    "Could not claim the next queued extraction: " and nothing more. The class
+    name is the whole diagnosis there, so it must survive into the log."""
+    assert main._describe_error(httpx.ReadTimeout("")) == "ReadTimeout"
+    assert main._describe_error(httpx.ConnectTimeout("")) == "ConnectTimeout"
+    assert main._describe_error(httpx.PoolTimeout("")) == "PoolTimeout"
+
+
+def test_an_explained_failure_keeps_its_message_and_gains_its_type():
+    described = main._describe_error(RuntimeError("Extraction queue RPC failed with status 404."))
+
+    assert described == "RuntimeError: Extraction queue RPC failed with status 404."
+
+
+def test_whitespace_only_messages_do_not_produce_a_dangling_colon():
+    assert main._describe_error(ValueError("   ")) == "ValueError"

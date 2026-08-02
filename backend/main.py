@@ -69,6 +69,19 @@ def _percent_env(name: str, default: float) -> float:
     return min(100.0, _positive_env_number(name, default))
 
 
+def _describe_error(err: BaseException) -> str:
+    """Formats a caught exception for the log, type first.
+
+    httpx raises its network failures with no message at all, so interpolating
+    one straight into a log line produces "Could not claim the next queued
+    extraction: " and nothing else — the operator is told something failed and
+    given no way to tell a timeout from a permission error. The class name is
+    the entire diagnosis in those cases, so it always goes in.
+    """
+    text = str(err).strip()
+    return f"{type(err).__name__}: {text}" if text else type(err).__name__
+
+
 # These are operational limits, deliberately configurable rather than inferred
 # from a plan name. Supabase storage quotas are organisation-wide, while the
 # live values below come from this project; deployments with multiple projects
@@ -799,7 +812,7 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
                 if isinstance(totals_result, Exception):
                     # Never fail the extraction over this — but say so, otherwise
                     # a broken totals call silently disables the whole check.
-                    print(f"⚠️ Could not read the जम्मा total row: {totals_result}")
+                    print(f"⚠️ Could not read the जम्मा total row: {_describe_error(totals_result)}")
                 elif totals_result:
                     stated_totals = totals_result
                 print(f"✅ Extracted {len(extracted_transactions)} transactions from OpenAI "
@@ -1824,7 +1837,7 @@ async def detect_schema_features() -> None:
     except Exception as err:
         extraction_queue_absence_first_seen = None
         extraction_queue_absence_confirmations = 0
-        print(f"⚠️ Could not check the database schema: {err}")
+        print(f"⚠️ Could not check the database schema: {_describe_error(err)}")
         return
 
     if extraction_queue_configuration_error:
@@ -2123,7 +2136,7 @@ async def refresh_extraction_claims() -> None:
                     json={"extraction_claimed_at": _now()},
                 )
         except Exception as err:
-            print(f"⚠️ Could not refresh extraction claims: {err}")
+            print(f"⚠️ Could not refresh extraction claims: {_describe_error(err)}")
 
 
 async def _fail_receipt(receipt_id: str, message: str) -> None:
@@ -2136,7 +2149,7 @@ async def _fail_receipt(receipt_id: str, message: str) -> None:
                 "verification_warnings": [],
             }))
     except Exception as err:
-        print(f"⚠️ Could not record failure for receipt {receipt_id}: {err}")
+        print(f"⚠️ Could not record failure for receipt {receipt_id}: {_describe_error(err)}")
 
 
 def normalize_transaction_rows(
@@ -2363,7 +2376,7 @@ async def _heartbeat_queued_extraction(job: dict, lease_lost: asyncio.Event) -> 
             except Exception as err:
                 # A transport failure is not proof that the lease was lost. A
                 # later heartbeat or the fenced final RPC settles ownership.
-                print(f"⚠️ Could not heartbeat queued extraction: {err}")
+                print(f"⚠️ Could not heartbeat queued extraction: {_describe_error(err)}")
 
 
 async def _record_queued_failure(
@@ -2380,7 +2393,7 @@ async def _record_queued_failure(
     except Exception as err:
         # Do not issue an unfenced receipt patch here. If the RPC outcome is
         # unknown, PGMQ visibility expiry safely makes the job available again.
-        print(f"⚠️ Could not persist queued extraction failure: {err}")
+        print(f"⚠️ Could not persist queued extraction failure: {_describe_error(err)}")
 
 
 async def _run_queued_extraction_job(job: dict) -> None:
@@ -2466,7 +2479,7 @@ async def _run_queued_extraction_job(job: dict) -> None:
         except Exception as err:
             # Completion may have committed even if its response was lost. Never
             # turn that ambiguity into an unfenced failure; redelivery is safe.
-            print(f"⚠️ Could not confirm queued extraction completion: {err}")
+            print(f"⚠️ Could not confirm queued extraction completion: {_describe_error(err)}")
             return
 
         if accepted:
@@ -2522,7 +2535,7 @@ async def consume_extraction_queue() -> None:
                 except Exception as err:
                     # Never fatal. Losing this check only costs recovery speed;
                     # the visibility timeout still returns the work eventually.
-                    print(f"⚠️ Could not check for a stale extraction lease: {err}")
+                    print(f"⚠️ Could not check for a stale extraction lease: {_describe_error(err)}")
                 else:
                     if reclaimed:
                         print(
@@ -2536,7 +2549,7 @@ async def consume_extraction_queue() -> None:
             except asyncio.CancelledError:
                 raise
             except Exception as err:
-                print(f"⚠️ Could not claim the next queued extraction: {err}")
+                print(f"⚠️ Could not claim the next queued extraction: {_describe_error(err)}")
                 await asyncio.sleep(EXTRACTION_QUEUE_POLL_SECONDS)
                 continue
 
@@ -2662,7 +2675,7 @@ async def start_receipt_extraction(receipt_id: str, authorization: Optional[str]
             async with httpx.AsyncClient(timeout=20) as client:
                 queued = await enqueue_extraction_job(client, receipt_id, caller["id"])
         except (RuntimeError, httpx.HTTPError) as err:
-            print(f"⚠️ Could not enqueue receipt {receipt_id}: {err}")
+            print(f"⚠️ Could not enqueue receipt {receipt_id}: {_describe_error(err)}")
             raise HTTPException(
                 status_code=503,
                 detail="The extraction queue is temporarily unavailable. Please try again.",
@@ -2762,7 +2775,7 @@ async def resume_interrupted_extractions() -> None:
             if resumed:
                 print(f"↻ Resuming {resumed} extraction(s) interrupted by a restart")
     except Exception as err:
-        print(f"⚠️ Could not check for interrupted extractions: {err}")
+        print(f"⚠️ Could not check for interrupted extractions: {_describe_error(err)}")
 
 
 async def run_legacy_extraction_maintenance() -> None:
