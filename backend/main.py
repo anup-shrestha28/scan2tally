@@ -398,6 +398,73 @@ if not openai_available and GEMINI_API_KEY and GEMINI_API_KEY != "placeholder-ge
     except Exception as e:
         log(f"Warning: Could not configure Gemini AI: {e}")
 
+# How long to wait before restarting a background worker that crashed, and the
+# ceiling that backoff climbs to. A worker that fails instantly and repeatedly —
+# Supabase unreachable, say — must not become a hot loop hammering a service that
+# is already struggling.
+WORKER_RESTART_DELAY_SECONDS = 5.0
+WORKER_RESTART_MAX_DELAY_SECONDS = 60.0
+# Run for this long without crashing and the next failure starts from the short
+# delay again, so an outage hours ago does not leave the worker slow to recover.
+WORKER_HEALTHY_RUN_SECONDS = 300.0
+
+# What the health endpoint reports, and the only place the supervisor's view of
+# each worker is recorded.
+_worker_state: dict = {}
+
+
+async def _supervise(name: str, factory) -> None:
+    """Keeps one background worker running for the life of the process.
+
+    These workers were started with create_task and never looked at again. An
+    unhandled exception in one therefore killed it silently: FastAPI carried on
+    serving, /api/health carried on returning 200, the platform saw a healthy
+    service — and nothing consumed the extraction queue, permanently. Extraction
+    is one voucher at a time platform-wide, so that is not a degraded service,
+    it is a stopped one, and nothing in the system would ever have said so.
+
+    A clean return is left alone. Some of these workers finish on purpose — the
+    queue consumer returns immediately when the schema is not ready — and
+    restarting a worker that chose to stop would spin.
+    """
+    delay = WORKER_RESTART_DELAY_SECONDS
+    restarts = 0
+    while True:
+        started = time.monotonic()
+        _worker_state[name] = {"status": "running", "restarts": restarts}
+        try:
+            await factory()
+        except asyncio.CancelledError:
+            _worker_state[name] = {"status": "stopped", "restarts": restarts}
+            raise
+        except Exception as err:
+            ran_for = time.monotonic() - started
+            restarts += 1
+            _worker_state[name] = {
+                "status": "restarting",
+                "restarts": restarts,
+                "last_error": _describe_error(err),
+            }
+            log(
+                f"❌ Background worker '{name}' crashed after {ran_for:.0f}s: "
+                f"{_describe_error(err)}. Restarting in {delay:.0f}s "
+                f"(restart #{restarts})."
+            )
+            await asyncio.sleep(delay)
+            # A worker that survived a good while was healthy; treat the next
+            # failure as fresh rather than carrying yesterday's backoff into it.
+            delay = (
+                WORKER_RESTART_DELAY_SECONDS
+                if ran_for >= WORKER_HEALTHY_RUN_SECONDS
+                else min(delay * 2, WORKER_RESTART_MAX_DELAY_SECONDS)
+            )
+            continue
+
+        _worker_state[name] = {"status": "finished", "restarts": restarts}
+        log(f"ℹ️ Background worker '{name}' finished normally and will not be restarted.")
+        return
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Only now are uvicorn's handlers in place to be restamped.
@@ -414,14 +481,21 @@ async def lifespan(app: FastAPI):
     if extraction_queue_ready is False:
         await resume_interrupted_extractions()
 
-    extraction_worker = asyncio.create_task(
-        consume_extraction_queue()
+    # Supervised rather than fired and forgotten. Passed as callables, because a
+    # restart needs a fresh coroutine — an already-awaited one cannot be re-run.
+    extraction_factory = (
+        consume_extraction_queue
         if extraction_queue_ready is True
-        else run_legacy_extraction_maintenance()
+        else run_legacy_extraction_maintenance
         if extraction_queue_ready is False
-        else wait_for_extraction_queue_schema()
+        else wait_for_extraction_queue_schema
     )
-    capacity_alert_publisher = asyncio.create_task(publish_capacity_alerts())
+    extraction_worker = asyncio.create_task(
+        _supervise("extraction-worker", extraction_factory)
+    )
+    capacity_alert_publisher = asyncio.create_task(
+        _supervise("capacity-alerts", publish_capacity_alerts)
+    )
     try:
         yield
     finally:
@@ -873,7 +947,14 @@ def health_check(x_keepalive_source: Optional[str] = Header(None)):
         "vision_ai_engine": active_engine,
         "openai_configured": openai_available,
         "gemini_configured": genai_available,
-        "opencv": "Enabled"
+        "opencv": "Enabled",
+        # Serving HTTP and extracting vouchers are separate things, and this
+        # endpoint used to report only the first. A dead queue consumer looked
+        # exactly like a healthy service, which is how a stopped platform could
+        # go unnoticed indefinitely. Reported rather than failed on purpose:
+        # turning this into a non-200 would have the host restart a backend that
+        # is still perfectly able to serve the app.
+        "workers": _worker_state,
     }
 
 async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> dict:
