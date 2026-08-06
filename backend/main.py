@@ -308,9 +308,25 @@ def build_platform_usage_response(snapshot: dict, caller_role: str) -> dict:
 
     return response
 
+# Which vision provider actually reads the vouchers. Explicit rather than
+# inferred from "whichever key happens to be set", so a deployment can hold
+# both an OPENAI_API_KEY and a GEMINI_API_KEY at once (e.g. while switching
+# providers) without the choice changing on its own. Unset defaults to
+# "openai" — the provider this app has always used — so an existing deploy's
+# behaviour does not change just because this variable now exists.
+_SUPPORTED_AI_PROVIDERS = {"openai", "gemini"}
+AI_PROVIDER = (os.getenv("AI_PROVIDER") or "openai").strip().lower()
+if AI_PROVIDER not in _SUPPORTED_AI_PROVIDERS:
+    log(
+        f"⚠️ AI_PROVIDER='{AI_PROVIDER}' is not supported (expected 'openai' or "
+        "'gemini'). Falling back to 'openai'."
+    )
+    AI_PROVIDER = "openai"
+
 # Vision model, overridable without a code change. gpt-5.5 reads marginal /
 # low-resolution vouchers noticeably better than gpt-4o in side-by-side tests.
 OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5.5")
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-3.6-flash")
 
 # The outer extraction deadline owns the whole receipt. Provider requests need
 # their own shorter finite deadline as well: cancelling asyncio.to_thread does
@@ -348,6 +364,14 @@ OPENAI_MAX_COMPLETION_TOKENS = max(
     int(_positive_env_number("OPENAI_MAX_COMPLETION_TOKENS", 32000.0)),
 )
 
+# Same idea, for Gemini. Gemini 1.5 Flash is not a reasoning model, so this is
+# a plain output budget rather than one shared with hidden "thinking" tokens
+# the way OPENAI_MAX_COMPLETION_TOKENS is.
+GEMINI_MAX_OUTPUT_TOKENS = max(
+    2000,
+    int(_positive_env_number("GEMINI_MAX_OUTPUT_TOKENS", 8192.0)),
+)
+
 
 def openai_sampling_params(model: str) -> dict:
     """Per-model request params.
@@ -378,25 +402,31 @@ def _create_openai_client(client_class):
     )
 
 
-if OPENAI_API_KEY and OPENAI_API_KEY != "placeholder-openai-api-key":
-    try:
-        from openai import OpenAI
-        openai_client = _create_openai_client(OpenAI)
-        openai_available = True
-        log(f"✅ OpenAI Vision AI engine activated! (model: {OPENAI_VISION_MODEL})")
-    except Exception as e:
-        log(f"Warning: Could not configure OpenAI: {e}")
+if AI_PROVIDER == "openai":
+    if OPENAI_API_KEY and OPENAI_API_KEY != "placeholder-openai-api-key":
+        try:
+            from openai import OpenAI
+            openai_client = _create_openai_client(OpenAI)
+            openai_available = True
+            log(f"✅ OpenAI Vision AI engine activated! (model: {OPENAI_VISION_MODEL})")
+        except Exception as e:
+            log(f"Warning: Could not configure OpenAI: {e}")
+    else:
+        log("⚠️ AI_PROVIDER is 'openai' but OPENAI_API_KEY is missing or a placeholder")
 
 # Check Gemini Availability
 genai_available = False
-if not openai_available and GEMINI_API_KEY and GEMINI_API_KEY != "placeholder-gemini-api-key":
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=GEMINI_API_KEY)
-        genai_available = True
-        log("✅ Gemini Vision AI engine activated!")
-    except Exception as e:
-        log(f"Warning: Could not configure Gemini AI: {e}")
+if AI_PROVIDER == "gemini":
+    if GEMINI_API_KEY and GEMINI_API_KEY != "placeholder-gemini-api-key":
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=GEMINI_API_KEY)
+            genai_available = True
+            log(f"✅ Gemini Vision AI engine activated! (model: {GEMINI_VISION_MODEL})")
+        except Exception as e:
+            log(f"Warning: Could not configure Gemini AI: {e}")
+    else:
+        log("⚠️ AI_PROVIDER is 'gemini' but GEMINI_API_KEY is missing or a placeholder")
 
 # How long to wait before restarting a background worker that crashed, and the
 # ceiling that backoff climbs to. A worker that fails instantly and repeatedly —
@@ -551,9 +581,82 @@ class VisionResponseTruncated(RuntimeError):
     """
 
 
+def _provider_name(engine: str) -> str:
+    """The plain product name a non-technical reviewer would recognise, e.g.
+    'OpenAI Vision (gpt-5.5)' -> 'OpenAI', 'Gemini Vision' -> 'Gemini'."""
+    return engine.split()[0] if engine else "The AI provider"
+
+
+def _friendly_provider_error(engine: str, err: Exception) -> Optional[str]:
+    """Turns a known provider SDK failure into something a reviewer can act on.
+
+    Both providers raise their own exception classes for the same handful of
+    situations — out of credit, bad key, rate limited, unreachable, temporarily
+    down — but the raw exception text is SDK internals (status codes, nested
+    JSON error bodies) that means nothing to someone reviewing vouchers, not
+    debugging a server. Returns None for anything unrecognised, so the caller
+    falls back to the existing raw-exception message rather than hiding a new
+    kind of failure behind a generic line.
+    """
+    provider = _provider_name(engine)
+    err_text = str(err)
+    lowered = err_text.lower()
+
+    try:
+        import openai as _openai_sdk
+        if isinstance(err, _openai_sdk.RateLimitError):
+            if any(
+                marker in lowered
+                for marker in ("insufficient_quota", "credit_balance_exhausted", "no credits remaining")
+            ):
+                return (
+                    f"{provider} has run out of API credit, so vouchers cannot be read right now. "
+                    f"Add credits to the {provider} account, then use Retry on this file."
+                )
+            return (
+                f"{provider} is receiving too many requests right now (rate limit reached). "
+                "Wait a minute, then use Retry on this file."
+            )
+        if isinstance(err, _openai_sdk.AuthenticationError):
+            return (
+                f"{provider}'s API key is missing, incorrect, or has been revoked. "
+                f"Check the {provider} API key in the backend configuration, then use Retry."
+            )
+        if isinstance(err, _openai_sdk.APITimeoutError):
+            return f"{provider} took too long to respond. Use Retry on this file."
+        if isinstance(err, _openai_sdk.APIConnectionError):
+            return f"Could not reach {provider} — check the server's internet connection, then use Retry."
+    except ImportError:
+        pass
+
+    try:
+        from google.api_core import exceptions as _google_exc
+        if isinstance(err, _google_exc.ResourceExhausted):
+            return (
+                f"{provider} has run out of API quota or credit for now. Add credits or wait for "
+                f"the quota to reset, then use Retry on this file."
+            )
+        if isinstance(err, (_google_exc.PermissionDenied, _google_exc.Unauthenticated)):
+            return (
+                f"{provider}'s API key is missing, incorrect, or does not have access. "
+                f"Check the {provider} API key in the backend configuration, then use Retry."
+            )
+        if isinstance(err, _google_exc.DeadlineExceeded):
+            return f"{provider} took too long to respond. Use Retry on this file."
+        if isinstance(err, _google_exc.ServiceUnavailable):
+            return f"{provider} is temporarily unavailable. Wait a minute, then use Retry on this file."
+    except ImportError:
+        pass
+
+    return None
+
+
 def extraction_error_message(engine: str, err: Exception) -> str:
     if isinstance(err, VisionResponseTruncated):
         return VISION_RESPONSE_TRUNCATED_ERROR
+    friendly = _friendly_provider_error(engine, err)
+    if friendly:
+        return friendly
     err_text = str(err)
     if "invalid_image_format" in err_text or "unsupported image" in err_text.lower():
         return UNSUPPORTED_VISION_IMAGE_ERROR
@@ -717,6 +820,76 @@ async def _gemini_generate_content(model, prompt: str, image):
     if isinstance(response, BaseException):
         raise response
     return response
+
+
+def _gemini_finish_reason_name(response) -> Optional[str]:
+    candidates = getattr(response, "candidates", None) or []
+    if not candidates:
+        return None
+    reason = getattr(candidates[0], "finish_reason", None)
+    if reason is None:
+        return None
+    return getattr(reason, "name", str(reason))
+
+
+def _gemini_vision_json(prompt: str, raw_bytes: bytes) -> dict:
+    """One vision request returning parsed JSON — Gemini's counterpart to
+    _openai_vision_json, deliberately kept to the same shape: a truncated
+    response raises the same VisionResponseTruncated rather than being
+    mistaken for an unreadable voucher, an empty response is an empty result
+    rather than an error, and this is a plain sync call so
+    _run_blocking_provider_calls can drive N of them concurrently exactly as
+    it already does for OpenAI.
+    """
+    import google.generativeai as genai
+
+    pil_img = Image.open(io.BytesIO(raw_bytes))
+    model = genai.GenerativeModel(
+        GEMINI_VISION_MODEL,
+        generation_config={
+            "response_mime_type": "application/json",
+            "max_output_tokens": GEMINI_MAX_OUTPUT_TOKENS,
+            "temperature": 0,
+        },
+    )
+    response = model.generate_content(
+        [prompt, pil_img],
+        request_options={"timeout": VISION_PROVIDER_TIMEOUT_SECONDS},
+    )
+
+    if _gemini_finish_reason_name(response) == "MAX_TOKENS":
+        raise VisionResponseTruncated(
+            f"the model reached its {GEMINI_MAX_OUTPUT_TOKENS}-token output ceiling"
+        )
+
+    try:
+        content = response.text
+    except ValueError:
+        # Raised rather than returned empty when a response has no usable
+        # candidate at all — e.g. blocked by a safety filter.
+        content = ""
+
+    if not content or not content.strip():
+        return {}
+
+    # Gemini sometimes wraps JSON in a markdown fence despite the JSON
+    # response_mime_type; stripping it is harmless when there is none.
+    cleaned = re.sub(r'^```json\s*', '', content.strip())
+    cleaned = re.sub(r'\s*```$', '', cleaned)
+    return json.loads(cleaned)
+
+
+def gemini_transcribe(raw_bytes: bytes) -> List[dict]:
+    parsed = _gemini_vision_json(TRANSCRIBE_PROMPT, raw_bytes)
+    if isinstance(parsed, dict):
+        return parsed.get("transactions") or []
+    if isinstance(parsed, list):
+        return parsed
+    return []
+
+
+def gemini_read_totals(raw_bytes: bytes) -> dict:
+    return read_stated_totals(_gemini_vision_json(TOTALS_PROMPT, raw_bytes))
 
 
 def _row_amount(row: dict) -> float:
@@ -940,11 +1113,12 @@ def health_check(x_keepalive_source: Optional[str] = Header(None)):
     if x_keepalive_source:
         _note_keepalive_ping(x_keepalive_source)
 
-    active_engine = f"OpenAI Vision ({OPENAI_VISION_MODEL})" if openai_available else ("Gemini 1.5 Flash" if genai_available else "Goshwara Dr/Cr Accounting Engine")
+    active_engine = f"OpenAI Vision ({OPENAI_VISION_MODEL})" if openai_available else (f"Gemini Vision ({GEMINI_VISION_MODEL})" if genai_available else "Goshwara Dr/Cr Accounting Engine")
     return {
         "status": "online",
         "service": "Scan2Tally FastAPI Server",
         "vision_ai_engine": active_engine,
+        "ai_provider": AI_PROVIDER,
         "openai_configured": openai_available,
         "gemini_configured": genai_available,
         "opencv": "Enabled",
@@ -969,8 +1143,6 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
     error_msg = None
     stated_totals = {}  # the voucher's own जम्मा row, when the engine could read it
     consensus_notes: List[str] = []
-
-    prompt = TRANSCRIBE_PROMPT
 
     # 1. Live OpenAI Extraction
     if openai_available:
@@ -1033,35 +1205,58 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
         except Exception as err:
             error_msg = extraction_error_message("OpenAI Vision", err)
             log(f"❌ {error_msg}")
-    else:
-        log("⚠️ OpenAI not available (key missing or invalid)")
-
-    # 2. Live Gemini Extraction
-    if not extracted_transactions and genai_available:
-        log(f"🤖 Falling back to Gemini Vision...")
+    elif genai_available:
+        # 2. Live Gemini Extraction — the AI_PROVIDER=gemini counterpart of the
+        # OpenAI block above. Deliberately built to the same shape (separate
+        # transcription and totals requests, OCR_CONSENSUS_RUNS independent
+        # passes reconciled by build_consensus) so the two providers produce
+        # equivalent output and neither one is checked less carefully than
+        # the other.
+        log(f"🤖 Sending image to Gemini {GEMINI_VISION_MODEL}... (size: {len(raw_bytes)} bytes)")
         try:
-            import google.generativeai as genai
-            pil_img = Image.open(io.BytesIO(raw_bytes))
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            response = await _gemini_generate_content(model, prompt, pil_img)
-            if not response.text or not response.text.strip():
+            calls = [
+                (gemini_transcribe, (raw_bytes,), {})
+                for _ in range(OCR_CONSENSUS_RUNS)
+            ]
+            calls.append((gemini_read_totals, (raw_bytes,), {}))
+            runs = await _run_blocking_provider_calls(calls)
+            transcripts = [r for r in runs[:-1] if not isinstance(r, Exception) and r]
+            totals_result = runs[-1]
+
+            failures = [r for r in runs if isinstance(r, Exception)]
+            if failures and not transcripts:
+                raise failures[0]
+
+            if not transcripts:
                 error_msg = INVALID_JOURNAL_IMAGE_ERROR
-                log(f"❌ Gemini returned no readable journal entry content")
+                log("❌ Gemini returned no readable journal entry content")
             else:
-                raw_text = response.text.strip()
-                log(f"📥 Gemini raw response:\n{raw_text}")
-                cleaned_text = re.sub(r'^```json\s*', '', raw_text)
-                cleaned_text = re.sub(r'\s*```$', '', cleaned_text)
-                parsed_json = json.loads(cleaned_text)
-                if isinstance(parsed_json, dict) and "transactions" in parsed_json:
-                    extracted_transactions = parsed_json["transactions"]
-                    stated_totals = read_stated_totals(parsed_json)
-                elif isinstance(parsed_json, list):
-                    extracted_transactions = parsed_json
-                log(f"✅ Extracted {len(extracted_transactions)} transactions from Gemini")
+                extracted_transactions, consensus_notes = build_consensus(transcripts)
+
+                if len(transcripts) < OCR_CONSENSUS_RUNS:
+                    detail = extraction_error_message("Gemini Vision", failures[0]) if failures else ""
+                    consensus_notes = [
+                        f"Only {len(transcripts)} of {OCR_CONSENSUS_RUNS} transcription passes completed"
+                        + (f" ({detail})" if detail else "")
+                        + (". Amounts on this voucher were not cross-checked between passes, "
+                           "so please verify every row against the original."
+                           if len(transcripts) == 1 else
+                           ". Cross-checking was weaker than usual — please verify the amounts.")
+                    ] + consensus_notes
+
+                if isinstance(totals_result, Exception):
+                    log(f"⚠️ Could not read the जम्मा total row: {_describe_error(totals_result)}")
+                elif totals_result:
+                    stated_totals = totals_result
+                log(f"✅ Extracted {len(extracted_transactions)} transactions from Gemini "
+                      f"({len(transcripts)}/{OCR_CONSENSUS_RUNS} transcription runs agreed on structure)")
+                for note in consensus_notes:
+                    log(f"⚠️ Consensus: {note}")
         except Exception as err:
-            error_msg = extraction_error_message("Gemini", err)
+            error_msg = extraction_error_message("Gemini Vision", err)
             log(f"❌ {error_msg}")
+    else:
+        log(f"⚠️ No AI vision engine available for AI_PROVIDER='{AI_PROVIDER}' (key missing or invalid)")
 
     # 3. Goshwara Accounting Classification Engine (offline demo fallback only —
     # never used once a real Vision AI engine is configured, so genuine
@@ -1099,7 +1294,7 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
         "filename": filename,
         "engine_used": (
             f"OpenAI {OPENAI_VISION_MODEL}" if openai_available
-            else ("Gemini Vision" if genai_available else "Dr/Cr Accounting Engine")
+            else (f"Gemini {GEMINI_VISION_MODEL}" if genai_available else "Dr/Cr Accounting Engine")
         ),
         "status": "Extracted" if not error_msg else "Failed",
         "transactions": extracted_transactions,
