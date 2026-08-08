@@ -159,17 +159,25 @@ export default function SideBySideReviewer({
   const focusedReceiptIds = reviewOnlyImbalanced
     ? focusedImbalancedReceiptIds
     : (localFocusedReceiptIds || []);
-  const visibleReceipts = (reviewOnlyImbalanced || localFocusedReceiptIds !== null)
-    ? allVisibleReceipts.filter(receipt => {
-        const rows = rowsForReceipt(receipt.id);
-        const debit = rows.reduce((sum, row) => sum + (Number(row.debit_amount) || 0), 0);
-        const credit = rows.reduce((sum, row) => sum + (Number(row.credit_amount) || 0), 0);
-        const isOutOfBalance = rows.length > 0 && Math.abs(debit - credit) >= 0.05;
-        return isOutOfBalance && (
-          focusedReceiptIds.length === 0 || focusedReceiptIds.includes(receipt.id)
-        );
-      })
-    : allVisibleReceipts;
+  const isFocusedMode = reviewOnlyImbalanced || localFocusedReceiptIds !== null;
+  const visibleReceipts = !isFocusedMode
+    ? allVisibleReceipts
+    : focusedReceiptIds.length > 0
+      // The focused set is decided once, when the reviewer chooses to fix the
+      // imbalance, and then held. Re-deriving it every render would drop the
+      // very voucher the user was sent here to fix: the open grid can hold
+      // edits txMap has not been given yet, so the recomputation can find it
+      // balanced (or find no rows at all) and filter it away, leaving an empty
+      // receipt list and a blank image panel. Holding the set also keeps a
+      // voucher on screen after it has just been balanced, instead of making
+      // it disappear from under the person who balanced it.
+      ? allVisibleReceipts.filter(receipt => focusedReceiptIds.includes(receipt.id))
+      : allVisibleReceipts.filter(receipt => {
+          const rows = rowsForReceipt(receipt.id);
+          const debit = rows.reduce((sum, row) => sum + (Number(row.debit_amount) || 0), 0);
+          const credit = rows.reduce((sum, row) => sum + (Number(row.credit_amount) || 0), 0);
+          return rows.length > 0 && Math.abs(debit - credit) >= 0.05;
+        });
 
   // Find the starting index inside the currently visible set. In focused mode
   // this prevents the image panel from opening on a non-imbalanced receipt.
@@ -238,8 +246,22 @@ export default function SideBySideReviewer({
     return true;
   };
 
+  // A single empty row is the placeholder shown for an unextracted receipt, not
+  // user work; saving it would create a phantom voucher line.
+  const isBlankPlaceholder = (rows: Transaction[]) =>
+    rows.length === 1 &&
+    !rows[0].ledger_name &&
+    !rows[0].debit_amount &&
+    !rows[0].credit_amount;
+
   // Save current transactions into the map before navigating
   const saveCurrentTx = (nextIndex: number) => {
+    // Send the edits to the database before the receipt swaps out, or the
+    // autosave effect's cleanup cancels them and only the in-memory map keeps
+    // them — right up until the next reload. Not awaited: stepping between
+    // vouchers should stay instant, and the write is serialized behind the
+    // save queue either way.
+    void flushPendingSave();
     if (currentReceipt) {
       setTxMap(prev => ({ ...prev, [currentReceipt.id]: transactions }));
     }
@@ -322,14 +344,7 @@ export default function SideBySideReviewer({
   useEffect(() => {
     if (!dirtyRef.current) return;
     if (!currentReceipt || !batch || !currentUser.organization_id) return;
-    // A single empty row is the placeholder shown for an unextracted receipt,
-    // not user work; saving it would create a phantom voucher line.
-    const isJustBlankPlaceholder =
-      transactions.length === 1 &&
-      !transactions[0].ledger_name &&
-      !transactions[0].debit_amount &&
-      !transactions[0].credit_amount;
-    if (isJustBlankPlaceholder) return;
+    if (isBlankPlaceholder(transactions)) return;
 
     const receiptId = currentReceipt.id;
     const rows = transactions;
@@ -410,6 +425,46 @@ export default function SideBySideReviewer({
     );
     transactionSaveQueueRef.current = save.catch(() => undefined);
     return save;
+  };
+
+  /**
+   * Write the open voucher through to the database right now, rather than
+   * waiting out the autosave debounce.
+   *
+   * The autosave timer is owned by an effect keyed on the receipt, so both
+   * leaving the reviewer and stepping to another receipt run that effect's
+   * cleanup and cancel the pending write. Anything typed in the last second
+   * would otherwise reach the in-memory map and nothing else, and the stale
+   * database row would be what came back on the next visit.
+   *
+   * Resolves false only when the write was attempted and failed, so a caller
+   * that is about to navigate can stay put and leave the error on screen.
+   */
+  const flushPendingSave = async (): Promise<boolean> => {
+    if (!dirtyRef.current) return true;
+    if (!currentReceipt || !batch || !currentUser.organization_id) return true;
+    if (isBlankPlaceholder(transactions)) return true;
+
+    const changeVersion = changeVersionRef.current;
+    setSaveState('saving');
+    try {
+      await queueTransactionSave(
+        currentReceipt.id,
+        { batchId: batch.id, organizationId: currentUser.organization_id, userId: currentUser.id },
+        transactions
+      );
+    } catch (err: any) {
+      setSaveState('error');
+      setSaveError(err?.message || 'Changes could not be saved.');
+      return false;
+    }
+    if (changeVersion === changeVersionRef.current) {
+      dirtyRef.current = false;
+      setSaveState('saved');
+      setSaveError(null);
+      window.setTimeout(() => setSaveState('idle'), 2500);
+    }
+    return true;
   };
 
   const handleUpdateTransaction = (id: string, field: keyof Transaction, value: any) => {
@@ -497,30 +552,16 @@ export default function SideBySideReviewer({
     }
     // Writes through rather than only confirming: this button previously
     // reported success while nothing left the browser.
-    if (currentReceipt && batch && currentUser.organization_id) {
-      setSaveState('saving');
-      try {
-        await queueTransactionSave(
-          currentReceipt.id,
-          { batchId: batch.id, organizationId: currentUser.organization_id, userId: currentUser.id },
-          transactions
-        );
-        setSaveState('saved');
-        setSaveError(null);
-        dirtyRef.current = false;
-        window.setTimeout(() => setSaveState('idle'), 2500);
-        window.setTimeout(() => setSaveState('idle'), 2500);
-      } catch (err: any) {
-        setSaveState('error');
-        setSaveError(err?.message || 'Changes could not be saved.');
-        return;
-      }
-    }
+    if (!(await flushPendingSave())) return;
     setSavedSuccess(true);
     setTimeout(() => setSavedSuccess(false), 3000);
   };
 
-  const handleBack = () => {
+  const handleBack = async () => {
+    // Leaving unmounts the reviewer and cancels the debounced write, so the
+    // batch list would otherwise reload the pre-edit rows. Stay put if the save
+    // fails: the error beside the Save button is the only warning the user gets.
+    if (!(await flushPendingSave())) return;
     onBack();
   };
 
@@ -551,7 +592,10 @@ export default function SideBySideReviewer({
 
   // In focused imbalance mode, keep the workflow limited to the affected
   // receipts. Normal review mode still exports the complete batch.
-  const handleExportAll = () => {
+  const handleExportAll = async () => {
+    // The export screen replaces this one, so the same cancelled-debounce loss
+    // applies here as on Back.
+    if (!(await flushPendingSave())) return;
     const saved = currentReceipt ? { ...txMap, [currentReceipt.id]: transactions } : txMap;
     const exportReceipts = (reviewOnlyImbalanced || localFocusedReceiptIds !== null)
       ? visibleReceipts
