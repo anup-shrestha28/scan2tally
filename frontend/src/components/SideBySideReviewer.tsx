@@ -503,6 +503,15 @@ export default function SideBySideReviewer({
     setTransactions(after);
   };
 
+  const handleUpdateReceiptField = (field: 'voucher_date' | 'voucher_no', value: string) => {
+    const before = transactions;
+    const after = transactions.map(t => ({ ...t, [field]: value }));
+    recordTransactionChange(before, after);
+    dirtyRef.current = true;
+    changeVersionRef.current += 1;
+    setTransactions(after);
+  };
+
   /**
    * Takes the server's suggestion for a row.
    *
@@ -875,8 +884,27 @@ export default function SideBySideReviewer({
 
           <div className="reviewer-body">
             <div className="voucher-meta">
-              <div><strong>Date:</strong> {transactions[0]?.voucher_date || ''}</div>
-              <div><strong>Voucher No:</strong> {(transactions[0] as any)?.voucher_no || '-'}</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <strong>Date:</strong> 
+                <input 
+                  type="text"
+                  className="form-input"
+                  style={{ padding: '2px 8px', minHeight: 'auto', width: '120px' }}
+                  value={transactions[0]?.voucher_date || ''} 
+                  onChange={(e) => handleUpdateReceiptField('voucher_date', e.target.value)}
+                  placeholder="YYYY-MM-DD"
+                />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <strong>Voucher No:</strong> 
+                <input 
+                  type="text"
+                  className="form-input"
+                  style={{ padding: '2px 8px', minHeight: 'auto', width: '120px' }}
+                  value={(transactions[0] as any)?.voucher_no || ''} 
+                  onChange={(e) => handleUpdateReceiptField('voucher_no', e.target.value)}
+                />
+              </div>
             </div>
             <div className="table-container">
               <table className="custom-table tx-table">

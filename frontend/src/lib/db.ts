@@ -928,6 +928,7 @@ export async function saveTransactionsForReceipt(
     organization_id: ids.organizationId,
     position: index,
     voucher_date: t.voucher_date || null,
+    voucher_no: t.voucher_no || null,
     voucher_type: t.voucher_type || 'Journal',
     entry_type: t.entry_type,
     ledger_name: t.ledger_name || '',

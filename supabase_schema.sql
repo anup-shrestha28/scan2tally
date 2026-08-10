@@ -149,6 +149,7 @@ CREATE TABLE IF NOT EXISTS public.transactions (
     -- text because they are not Gregorian dates: a DATE column would accept the
     -- value and then quietly give wrong answers to any sort or range filter.
     voucher_date TEXT,
+    voucher_no TEXT,
     voucher_type TEXT DEFAULT 'Journal',
     entry_type entry_type NOT NULL,
     -- The name that gets exported. Holds the canonical Tally spelling once the
@@ -1476,6 +1477,7 @@ BEGIN
         organization_id,
         position,
         voucher_date,
+        voucher_no,
         voucher_type,
         entry_type,
         ledger_name,
@@ -1495,6 +1497,7 @@ BEGIN
         target_org_id,
         COALESCE(row_data.position, row_number() OVER ()::INTEGER - 1),
         row_data.voucher_date,
+        row_data.voucher_no,
         COALESCE(NULLIF(row_data.voucher_type, ''), 'Journal'),
         row_data.entry_type::public.entry_type,
         COALESCE(row_data.ledger_name, ''),
@@ -1510,6 +1513,7 @@ BEGIN
     FROM jsonb_to_recordset(p_transactions) AS row_data (
         position INTEGER,
         voucher_date TEXT,
+        voucher_no TEXT,
         voucher_type TEXT,
         entry_type TEXT,
         ledger_name TEXT,

@@ -57,7 +57,11 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
     if (!groupedTransactions[key]) groupedTransactions[key] = [];
     groupedTransactions[key].push(t);
   });
-  const groups = Object.values(groupedTransactions);
+  const groups = Object.values(groupedTransactions).sort((a, b) => {
+    const aNo = ((a[0] as any)?.voucher_no ?? '') as string;
+    const bNo = ((b[0] as any)?.voucher_no ?? '') as string;
+    return aNo.localeCompare(bNo, undefined, { numeric: true, sensitivity: 'base' });
+  });
 
   // Names Tally has no account for. It will not reject them — it will create a
   // new ledger for each, which is how one account's balance ends up split in
