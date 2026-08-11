@@ -1566,6 +1566,92 @@ input[type='number']::-webkit-inner-spin-button {
   flex-basis: 100%;
 }
 
+/* For toolbars whose placeholder names several searchable fields and would be
+   clipped at the default 260px. Still collapses to full width on mobile. */
+.search-input-wide {
+  flex-basis: 380px;
+  width: min(380px, 100%);
+}
+
+/* Per-operator totals above the extracted-receipts table. Each one is also the
+   filter for that operator, so the number doubles as a way into the rows. */
+.operator-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.operator-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--bg-input);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 550;
+  cursor: pointer;
+}
+.operator-chip:hover {
+  border-color: var(--primary);
+  color: var(--text-main);
+}
+.operator-chip:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.operator-chip-active {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+  color: var(--primary);
+}
+.operator-chip-count {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-muted) 18%, transparent);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+.operator-chip-active .operator-chip-count {
+  background: color-mix(in srgb, var(--primary) 22%, transparent);
+}
+
+/* One bulk upload collapsed to a single row, expandable to its receipts. */
+.upload-group-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.upload-group-toggle:hover { color: var(--primary); }
+.upload-group-toggle:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.upload-group-count {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+  color: var(--primary);
+  font-size: 0.72rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+/* Indented and quieter, so an expanded upload reads as detail belonging to the
+   row above rather than as more top-level rows. */
+.upload-group-member > td:nth-child(2) { padding-left: 34px; }
+.upload-group-member { background: color-mix(in srgb, var(--bg-input) 45%, transparent); }
+
 .search-input-icon {
   position: absolute;
   left: 11px;
@@ -2509,6 +2595,14 @@ body.light .user-form-card .form-label {
 .receipt-status-processing { --receipt-status-accent: var(--primary); }
 .receipt-status-extracted { --receipt-status-accent: var(--accent-emerald); }
 .receipt-status-failed { --receipt-status-accent: var(--accent-rose); }
+/* Unlike the other status badges, the label here is colored to match its icon
+   rather than staying neutral — the color is the whole point of this one. */
+.receipt-status-signed { --receipt-status-accent: var(--accent-emerald); color: var(--accent-emerald); }
+.receipt-status-unsigned { --receipt-status-accent: var(--accent-amber); color: var(--accent-amber); }
+
+/* .reviewer-body is a flex column that stretches its children full-width by
+   default; this badge should only be as wide as its own label. */
+.signature-badge-standalone { align-self: flex-start; }
 
 @media (max-width: 640px) {
   .receipt-table-toolbar-actions { width: 100%; }

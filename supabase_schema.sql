@@ -92,6 +92,21 @@ CREATE TABLE IF NOT EXISTS public.receipts (
     -- here rather than only on the rows because the reviewer rewrites the rows,
     -- and the point of this column is to survive that.
     raw_extraction JSONB,
+    -- Whether the vision model saw a handwritten signature on the voucher.
+    -- NULL means undetermined (not yet extracted, or the read failed) —
+    -- distinct from FALSE, which means the model looked and found none.
+    has_signature BOOLEAN,
+    -- Who ran the extraction that produced this receipt's rows. Distinct from
+    -- uploaded_by: a colleague may retry someone else's failed receipt, and the
+    -- Admin overview reports on who did the work. NULL for receipts extracted
+    -- before this column existed, where uploaded_by is the best answer there is.
+    extracted_by UUID REFERENCES public.users(id),
+    -- When the extraction that produced this receipt's rows finished. Written
+    -- once, by complete_receipt_extraction, and never touched again. Distinct
+    -- from updated_at, which the touch trigger moves on every later edit: a
+    -- reviewer correcting an amount must not make the voucher look freshly
+    -- extracted, which is exactly what reading updated_at as "extracted" did.
+    extracted_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -1409,7 +1424,9 @@ CREATE OR REPLACE FUNCTION public.complete_receipt_extraction(
     p_receipt_id UUID,
     p_transactions JSONB,
     p_verification_warnings JSONB,
-    p_raw_extraction JSONB
+    p_raw_extraction JSONB,
+    p_has_signature BOOLEAN DEFAULT NULL,
+    p_extracted_by UUID DEFAULT NULL
 )
 RETURNS BOOLEAN
 LANGUAGE plpgsql
@@ -1533,6 +1550,9 @@ BEGIN
         error_message = NULL,
         verification_warnings = COALESCE(p_verification_warnings, '[]'::JSONB),
         raw_extraction = p_raw_extraction,
+        has_signature = p_has_signature,
+        extracted_by = COALESCE(p_extracted_by, target_receipt.uploaded_by),
+        extracted_at = clock_timestamp(),
         extraction_queue_message_id = NULL,
         extraction_queued_at = NULL,
         extraction_worker = NULL,

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2, RotateCcw, RotateCw, Undo2, Redo2, ZoomIn, ChevronLeft, ChevronRight, Loader2, HelpCircle } from 'lucide-react';
+import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2, RotateCcw, RotateCw, Undo2, Redo2, ZoomIn, ChevronLeft, ChevronRight, Loader2, HelpCircle, FileSignature } from 'lucide-react';
 import { ScanBatch, Receipt, Transaction, User, Ledger } from '../types';
 import { saveTransactionsForReceipt, getReceiptImageUrl, deleteReceipt, fetchLedgers, resolveLedgerName } from '../lib/db';
 import { LEDGER_MATCHING } from '../lib/features';
@@ -1054,6 +1054,23 @@ export default function SideBySideReviewer({
                 placeholder="Being Expenses paid via cheque no."
               />
             </div>
+
+            {/* Signature detection. Advisory, like the ledger-match pill above —
+                a best-effort read from a general vision model, not a dedicated
+                signature verifier, so it never blocks anything, only flags it. */}
+            {currentReceipt?.status === 'Extracted' && currentReceipt.has_signature != null && (
+              <span
+                className={`receipt-status-badge ${currentReceipt.has_signature ? 'receipt-status-signed' : 'receipt-status-unsigned'} signature-badge-standalone`}
+                title={currentReceipt.has_signature
+                  ? 'The AI saw what looks like a handwritten signature on this voucher.'
+                  : 'The AI did not see a handwritten signature on this voucher. Verify against the original if one is required.'}
+              >
+                <span className="receipt-status-icon" aria-hidden="true">
+                  <FileSignature size={12} />
+                </span>
+                <span>{currentReceipt.has_signature ? 'Signature Detected' : 'No Signature'}</span>
+              </span>
+            )}
           </div>
         </div>
       </div>

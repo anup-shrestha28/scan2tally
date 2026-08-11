@@ -135,6 +135,10 @@ export interface Receipt {
   // with the voucher's printed जम्मा total). Advisory only — the receipt is
   // still Extracted and editable; these just point the reviewer at what to check.
   verification_warnings?: string[];
+  // Whether the vision model saw a handwritten signature on the voucher.
+  // undefined/null means undetermined (not yet extracted, or the read
+  // failed) — distinct from false, which means it looked and found none.
+  has_signature?: boolean | null;
 }
 
 export interface ScanBatch {

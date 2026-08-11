@@ -1,11 +1,30 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Loader2, AlertCircle, FileSpreadsheet, BookOpen, Users, Layers, ArrowRight,
+  Loader2, AlertCircle, FileSpreadsheet, BookOpen, Users, Layers, ArrowRight, FileCheck2,
+  ChevronLeft, ChevronRight, ChevronDown,
 } from 'lucide-react';
 import { User } from '../types';
-import { fetchOrgOverview, OrgOverview } from '../lib/db';
+import {
+  fetchOrgOverview, OrgOverview, fetchExtractedReceipts, ExtractedReceiptsReport,
+} from '../lib/db';
 import { LEDGER_MATCHING } from '../lib/features';
 import { usePolling } from '../lib/usePolling';
+import { filterBySearch } from '../lib/search';
+import SearchInput from './SearchInput';
+
+const PER_PAGE = 25;
+
+type PageItem = number | 'start-ellipsis' | 'end-ellipsis';
+
+/** Condenses a long page list so the control keeps a fixed width. */
+function getPageItems(currentPage: number, pageCount: number): PageItem[] {
+  if (pageCount <= 7) return Array.from({ length: pageCount }, (_, index) => index + 1);
+  if (currentPage <= 4) return [1, 2, 3, 4, 5, 'end-ellipsis', pageCount];
+  if (currentPage >= pageCount - 3) {
+    return [1, 'start-ellipsis', pageCount - 4, pageCount - 3, pageCount - 2, pageCount - 1, pageCount];
+  }
+  return [1, 'start-ellipsis', currentPage - 1, currentPage, currentPage + 1, 'end-ellipsis', pageCount];
+}
 
 /**
  * What an Admin sees about their own organisation.
@@ -41,8 +60,42 @@ export default function AdminDashboard({
   currentUser, onOpenWorkspace, onOpenLedgers, onOpenTeam,
 }: AdminDashboardProps) {
   const [overview, setOverview] = useState<OrgOverview | null>(null);
+  const [extracted, setExtracted] = useState<ExtractedReceiptsReport | null>(null);
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Matches every query token against any of the visible columns, so
+  // "lily batch 11" narrows by operator and batch at once. A group also matches
+  // on the names of the receipts inside it, so searching for a single page of a
+  // PDF still finds the upload it belongs to.
+  const filtered = useMemo(() => filterBySearch(
+    extracted?.groups || [],
+    search,
+    group => [
+      group.label,
+      group.operatorName,
+      group.batchName,
+      group.extractedAt,
+      ...group.members.map(member => member.filename),
+    ],
+  ), [extracted, search]);
+
+  const filteredReceiptCount = useMemo(
+    () => filtered.reduce((sum, group) => sum + group.members.length, 0),
+    [filtered],
+  );
+
+  const pageCount = Math.max(1, Math.ceil(filtered.length / PER_PAGE));
+  // Derived rather than stored, so deleting or filtering down to fewer pages
+  // cannot strand the reader on a page that no longer exists.
+  const visiblePage = Math.min(page, pageCount);
+  const pageStart = (visiblePage - 1) * PER_PAGE;
+  const paginated = filtered.slice(pageStart, pageStart + PER_PAGE);
+
+  useEffect(() => { setPage(1); }, [search]);
 
   useEffect(() => {
     let cancelled = false;
@@ -53,12 +106,27 @@ export default function AdminDashboard({
     return () => { cancelled = true; };
   }, []);
 
+  // Kept off the blocking path above: the tiles are the point of this screen,
+  // and a slow or failed receipt listing must not stop them rendering.
+  useEffect(() => {
+    let cancelled = false;
+    fetchExtractedReceipts()
+      .then(data => { if (!cancelled) setExtracted(data); })
+      .catch(() => { /* the section simply stays absent */ });
+    return () => { cancelled = true; };
+  }, []);
+
   // Extraction, exports and uploads are performed from the workspace (often by
   // another operator), so this read-only overview should stay current without
   // requiring an Admin to reload it. Poll faster only while work is in flight.
   usePolling(async ({ signal }) => {
-    const data = await fetchOrgOverview();
-    if (!signal.aborted) setOverview(data);
+    const [data, receipts] = await Promise.all([
+      fetchOrgOverview(),
+      fetchExtractedReceipts().catch(() => null),
+    ]);
+    if (signal.aborted) return;
+    setOverview(data);
+    if (receipts) setExtracted(receipts);
   }, {
     enabled: !loading && Boolean(overview),
     intervalMs: overview && (overview.receipts.Queued || overview.receipts.Processing) ? 5000 : 30000,
@@ -83,7 +151,7 @@ export default function AdminDashboard({
     );
   }
 
-  const { batches, receipts, rows, ledgersUnresolved, ledgerCount, exports, staff } = overview;
+  const { batches, receipts, rows, ledgersUnresolved, ledgerCount, exports } = overview;
   const awaiting = receipts.Pending + receipts.Queued + receipts.Processing;
 
   return (
@@ -180,65 +248,210 @@ export default function AdminDashboard({
         </div>
       )}
 
-      <div className="grid-auto">
-        <div className="card">
-          <h3 className="section-title">
-            <FileSpreadsheet size={18} color="var(--primary)" />
-            Recent Tally Exports
-          </h3>
-          {!exports.length ? (
-            <p className="text-muted" style={{ fontSize: '0.85rem' }}>
-              No spreadsheets have been generated yet.
-            </p>
-          ) : (
-            <div className="table-container">
-              <table className="custom-table">
-                <thead>
-                  <tr><th>File</th><th>Rows</th><th>By</th><th>When</th></tr>
-                </thead>
-                <tbody>
-                  {exports.map(record => (
-                    <tr key={record.id}>
-                      <td style={{ fontWeight: 500 }}>{record.file_name}</td>
-                      <td>{record.record_count}</td>
-                      <td className="text-muted">{record.generated_by_name || '—'}</td>
-                      <td className="text-muted text-xs">{record.created_at}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-
-        <div className="card">
-          <h3 className="section-title">
-            <Users size={18} color="var(--primary)" />
-            Who Has Been Scanning
-          </h3>
-          {!staff.length ? (
-            <p className="text-muted" style={{ fontSize: '0.85rem' }}>
-              No receipts have been uploaded yet.
-            </p>
-          ) : (
-            <div className="table-container">
-              <table className="custom-table">
-                <thead>
-                  <tr><th>Staff Member</th><th>Receipts Uploaded</th></tr>
-                </thead>
-                <tbody>
-                  {staff.map(person => (
-                    <tr key={person.id}>
-                      <td style={{ fontWeight: 500 }}>{person.name}</td>
-                      <td>{person.receipts}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
+      <div className="card">
+        <h3 className="section-title">
+          <FileSpreadsheet size={18} color="var(--primary)" />
+          Recent Tally Exports
+        </h3>
+        {!exports.length ? (
+          <p className="text-muted" style={{ fontSize: '0.85rem' }}>
+            No spreadsheets have been generated yet.
+          </p>
+        ) : (
+          <div className="table-container">
+            <table className="custom-table">
+              <thead>
+                <tr><th>File</th><th>Rows</th><th>By</th><th>When</th></tr>
+              </thead>
+              <tbody>
+                {exports.map(record => (
+                  <tr key={record.id}>
+                    <td style={{ fontWeight: 500 }}>{record.file_name}</td>
+                    <td>{record.record_count}</td>
+                    <td className="text-muted">{record.generated_by_name || '—'}</td>
+                    <td className="text-muted text-xs">{record.created_at}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
+
+      {/* Who extracted what, and where it lives. Row-level security scopes every
+          row here to this Admin's own organisation. */}
+      {extracted && (
+        <div className="card">
+          <h3 className="section-title">
+            <FileCheck2 size={18} color="var(--primary)" />
+            Extracted Receipts
+            <span className="text-muted" style={{ fontSize: '0.8rem', fontWeight: 500 }}>
+              {extracted.total} total
+            </span>
+          </h3>
+          {!extracted.records.length ? (
+            <p className="text-muted" style={{ fontSize: '0.85rem' }}>
+              No receipts have been extracted yet.
+            </p>
+          ) : (
+            <>
+              {/* Per-operator totals, counted in receipts rather than in the
+                  collapsed upload rows above. Each one filters the table
+                  instead of only reporting, so the number is a way in. */}
+              {extracted.byOperator.length > 1 && (
+                <div className="operator-chips" aria-label="Receipts extracted per operator">
+                  {extracted.byOperator.map(person => {
+                    const active = search === person.name;
+                    return (
+                      <button
+                        type="button"
+                        key={person.name}
+                        className={`operator-chip${active ? ' operator-chip-active' : ''}`}
+                        onClick={() => setSearch(active ? '' : person.name)}
+                        aria-pressed={active}
+                        title={active ? 'Clear this filter' : `Show only ${person.name}'s receipts`}
+                      >
+                        <Users size={13} aria-hidden="true" />
+                        <span>{person.name}</span>
+                        <span className="operator-chip-count">{person.receipts}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div className="receipt-table-toolbar">
+                <SearchInput
+                  value={search}
+                  onChange={setSearch}
+                  ariaLabel="Search extracted receipts"
+                  placeholder="Search by file, operator or batch…"
+                  className="search-input-wide"
+                />
+              </div>
+
+              {!filtered.length ? (
+                <p className="text-muted" style={{ fontSize: '0.85rem' }}>
+                  No extracted receipts match “{search}”.
+                </p>
+              ) : (
+                <>
+                  <div className="table-container">
+                    <table className="custom-table">
+                      <thead>
+                        <tr>
+                          <th style={{ width: '56px' }}>#</th>
+                          <th>Receipt</th>
+                          <th>Extracted By</th>
+                          <th>Batch</th>
+                          <th>When</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {paginated.map((group, index) => {
+                          const isGroup = group.members.length > 1;
+                          const isOpen = expanded.has(group.key);
+                          return (
+                            <React.Fragment key={group.key}>
+                              <tr>
+                                {/* Numbered across the whole result set, not per
+                                    page, so a row's number does not change as
+                                    the reader pages through. */}
+                                <td className="text-muted">{pageStart + index + 1}</td>
+                                <td style={{ fontWeight: 500 }}>
+                                  {isGroup ? (
+                                    <button
+                                      type="button"
+                                      className="upload-group-toggle"
+                                      onClick={() => setExpanded(previous => {
+                                        const next = new Set(previous);
+                                        if (next.has(group.key)) next.delete(group.key);
+                                        else next.add(group.key);
+                                        return next;
+                                      })}
+                                      aria-expanded={isOpen}
+                                    >
+                                      {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                                      <span>{group.label}</span>
+                                      <span className="upload-group-count">
+                                        {group.members.length} receipts
+                                      </span>
+                                    </button>
+                                  ) : group.label}
+                                </td>
+                                <td>{group.operatorName}</td>
+                                <td className="text-muted">{group.batchName}</td>
+                                <td className="text-muted text-xs">{group.extractedAt}</td>
+                              </tr>
+                              {isGroup && isOpen && group.members.map(member => (
+                                <tr key={member.id} className="upload-group-member">
+                                  <td />
+                                  <td className="text-muted">{member.filename}</td>
+                                  <td />
+                                  <td />
+                                  <td className="text-muted text-xs">{member.extractedAt}</td>
+                                </tr>
+                              ))}
+                            </React.Fragment>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {pageCount > 1 && (
+                    <div className="files-pagination" aria-label="Extracted receipt pages">
+                      {/* Counted in uploads, because that is what a row is
+                          here; the receipt total is named separately rather
+                          than left to look like the same number. */}
+                      <span className="pagination-summary">
+                        Showing {pageStart + 1}–{Math.min(pageStart + PER_PAGE, filtered.length)} of {filtered.length} uploads
+                        {' · '}{filteredReceiptCount} {filteredReceiptCount === 1 ? 'receipt' : 'receipts'}
+                        {filteredReceiptCount !== extracted.total && ` of ${extracted.total}`}
+                      </span>
+                      <div className="pagination-controls">
+                        <button
+                          type="button"
+                          className="pagination-arrow"
+                          onClick={() => setPage(p => Math.max(1, p - 1))}
+                          disabled={visiblePage === 1}
+                          aria-label="Previous page"
+                        >
+                          <ChevronLeft size={15} />
+                        </button>
+                        {getPageItems(visiblePage, pageCount).map(item => (
+                          typeof item === 'number' ? (
+                            <button
+                              type="button"
+                              key={item}
+                              className={`pagination-page${visiblePage === item ? ' pagination-page-active' : ''}`}
+                              onClick={() => setPage(item)}
+                              aria-current={visiblePage === item ? 'page' : undefined}
+                            >
+                              {item}
+                            </button>
+                          ) : (
+                            <span key={item} className="receipt-pagination-ellipsis" aria-hidden="true">…</span>
+                          )
+                        ))}
+                        <button
+                          type="button"
+                          className="pagination-arrow"
+                          onClick={() => setPage(p => Math.min(pageCount, p + 1))}
+                          disabled={visiblePage === pageCount}
+                          aria-label="Next page"
+                        >
+                          <ChevronRight size={15} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }

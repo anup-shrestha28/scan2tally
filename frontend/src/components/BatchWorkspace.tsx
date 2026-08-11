@@ -612,6 +612,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
           status: state.status,
           error_message: state.error_message,
           verification_warnings: state.verification_warnings,
+          has_signature: state.has_signature !== undefined ? state.has_signature : receipt.has_signature,
           extraction_queue_message_id: nextQueueMessageId,
           extraction_queued_at: state.extraction_queued_at !== undefined
             ? state.extraction_queued_at
@@ -1524,8 +1525,10 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                           {b.id === activeBatchId && <span className="batch-current-badge">Current</span>}
                         </span>
                         {b.created_by !== currentUser.id && b.created_by && (
-                          <span className="batch-item-creator" title={b.created_by}>
-                            Created by {b.created_by_name || `ID ${b.created_by}`}
+                          // No raw id in the fallback: a UUID tells the reader
+                          // nothing, reads as a bug, and is not theirs to see.
+                          <span className="batch-item-creator">
+                            Created by {b.created_by_name || 'another team member'}
                           </span>
                         )}
                       </span>

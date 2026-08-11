@@ -431,9 +431,25 @@ function queueColumnsMissing(error: { message?: string; details?: string; hint?:
   );
 }
 
+// Migration 013 adds signature detection. Same rolling-release concern as the
+// queue columns above: a deployment can briefly run the new frontend against
+// the old schema. Checked with its own dedicated probe rather than folded into
+// the queue-column retry above — both a missing queue column and a missing
+// has_signature column surface as the same generic PostgREST "unknown column"
+// code, so a combined retry cannot tell which one actually failed and can end
+// up disabling the wrong one.
+let receiptSignatureColumnAvailable: boolean | null = null;
+
+async function isSignatureColumnAvailable(): Promise<boolean> {
+  if (receiptSignatureColumnAvailable !== null) return receiptSignatureColumnAvailable;
+  const { error } = await supabase.from('receipts').select('has_signature').limit(1);
+  receiptSignatureColumnAvailable = !error;
+  return receiptSignatureColumnAvailable;
+}
+
 /** Loads batches with their receipts in one round trip. */
 export async function fetchBatches(): Promise<ScanBatch[]> {
-  const query = (includeQueue: boolean) => supabase
+  const query = (includeQueue: boolean, includeSignature: boolean) => supabase
       .from('scan_batches')
       .select(`
         id, created_by, name, status, hidden_from_users, hidden_by, created_at,
@@ -441,15 +457,17 @@ export async function fetchBatches(): Promise<ScanBatch[]> {
           id, filename, file_path, status, error_message,
           image_width, image_height, verification_warnings, created_at, updated_at
           ${includeQueue ? `, ${RECEIPT_QUEUE_COLUMNS}` : ''}
+          ${includeSignature ? ', has_signature' : ''}
         )
       `)
       .order('created_at', { ascending: false });
 
   const includeQueue = receiptQueueColumnsAvailable !== false;
-  let result = await query(includeQueue);
+  const includeSignature = await isSignatureColumnAvailable();
+  let result = await query(includeQueue, includeSignature);
   if (includeQueue && result.error && queueColumnsMissing(result.error)) {
     receiptQueueColumnsAvailable = false;
-    result = await query(false);
+    result = await query(false, includeSignature);
   } else if (includeQueue && !result.error) {
     receiptQueueColumnsAvailable = true;
   }
@@ -458,9 +476,15 @@ export async function fetchBatches(): Promise<ScanBatch[]> {
   if (error) throw new Error(error.message);
 
   const creatorIds = [...new Set((data || []).map((batch: any) => batch.created_by).filter(Boolean))];
+  // The RPC is keyed on BATCH ids, not creator ids: it joins scan_batches to
+  // find whose names this reader is allowed to see. Passing creator ids here
+  // matched no batch at all, so it silently returned nothing and every caller
+  // fell through to the users table below — which an Operator cannot read, so
+  // they saw raw UUIDs where an Admin saw names.
+  const batchIds = [...new Set((data || []).map((batch: any) => batch.id).filter(Boolean))];
   const creatorNames = new Map<string, string>();
   if (creatorIds.length) {
-    const { data: creators } = await supabase.rpc('get_batch_creator_names', { p_batch_ids: creatorIds });
+    const { data: creators } = await supabase.rpc('get_batch_creator_names', { p_batch_ids: batchIds });
     for (const creator of creators || []) {
       if (creator?.id && creator?.name) creatorNames.set(creator.id, creator.name);
     }
@@ -519,6 +543,7 @@ export async function fetchBatches(): Promise<ScanBatch[]> {
           verification_warnings: Array.isArray(r.verification_warnings)
             ? r.verification_warnings
             : undefined,
+          has_signature: typeof r.has_signature === 'boolean' ? r.has_signature : null,
         })
       ),
   }));
@@ -684,6 +709,7 @@ export interface ReceiptServerState {
   extraction_queued_at?: string | null;
   extraction_generation?: number;
   updated_at?: string;
+  has_signature?: boolean | null;
 }
 
 export function parseReceiptServerState(value: unknown): ReceiptServerState | null {
@@ -697,6 +723,7 @@ export function parseReceiptServerState(value: unknown): ReceiptServerState | nu
   const hasQueuedAt = Object.prototype.hasOwnProperty.call(row, 'extraction_queued_at');
   const hasGeneration = Object.prototype.hasOwnProperty.call(row, 'extraction_generation');
   const hasUpdatedAt = Object.prototype.hasOwnProperty.call(row, 'updated_at');
+  const hasSignature = Object.prototype.hasOwnProperty.call(row, 'has_signature');
   const generation = hasGeneration ? Number(row.extraction_generation) : undefined;
   const updatedAt = hasUpdatedAt && row.updated_at != null ? String(row.updated_at) : undefined;
   const queueMessageId = hasQueueMessage && row.extraction_queue_message_id != null
@@ -727,21 +754,23 @@ export function parseReceiptServerState(value: unknown): ReceiptServerState | nu
     extraction_queued_at: hasQueuedAt ? queuedAt : undefined,
     extraction_generation: generation,
     updated_at: updatedAt,
+    has_signature: hasSignature ? (typeof row.has_signature === 'boolean' ? row.has_signature : null) : undefined,
   };
 }
 
 export async function fetchReceiptStates(ids: string[]): Promise<ReceiptServerState[]> {
   if (!ids.length) return [];
-  const query = (includeQueue: boolean) => supabase
+  const query = (includeQueue: boolean, includeSignature: boolean) => supabase
       .from('receipts')
-      .select(`id, status, error_message, verification_warnings, updated_at${includeQueue ? `, ${RECEIPT_QUEUE_COLUMNS}` : ''}`)
+      .select(`id, status, error_message, verification_warnings, updated_at${includeQueue ? `, ${RECEIPT_QUEUE_COLUMNS}` : ''}${includeSignature ? ', has_signature' : ''}`)
       .in('id', ids);
 
   const includeQueue = receiptQueueColumnsAvailable !== false;
-  let result = await query(includeQueue);
+  const includeSignature = await isSignatureColumnAvailable();
+  let result = await query(includeQueue, includeSignature);
   if (includeQueue && result.error && queueColumnsMissing(result.error)) {
     receiptQueueColumnsAvailable = false;
-    result = await query(false);
+    result = await query(false, includeSignature);
   } else if (includeQueue && !result.error) {
     receiptQueueColumnsAvailable = true;
   }
@@ -847,7 +876,7 @@ export async function fetchTransactionsForBatch(
     ? await supabase
         .from('transactions')
         .select(`
-          id, receipt_id, position, voucher_date, voucher_type, entry_type,
+          id, receipt_id, position, voucher_date, voucher_no, voucher_type, entry_type,
           ledger_name, ledger_id, ledger_match, ledger_match_score,
           debit_amount, credit_amount, needs_review, narration
         `)
@@ -856,7 +885,7 @@ export async function fetchTransactionsForBatch(
     : await supabase
         .from('transactions')
         .select(`
-          id, receipt_id, position, voucher_date, voucher_type, entry_type,
+          id, receipt_id, position, voucher_date, voucher_no, voucher_type, entry_type,
           ledger_name, debit_amount, credit_amount, needs_review, narration
         `)
         .eq('batch_id', batchId)
@@ -871,6 +900,7 @@ export async function fetchTransactionsForBatch(
       id: row.id,
       receipt_id: row.receipt_id,
       voucher_date: row.voucher_date || '',
+      voucher_no: row.voucher_no || '',
       voucher_type: row.voucher_type || 'Journal',
       entry_type: row.entry_type,
       ledger_name: row.ledger_name || '',
@@ -1206,7 +1236,6 @@ export interface OrgOverview {
   ledgersUnresolved: number;
   ledgerCount: number;
   exports: ExportRecord[];
-  staff: { id: string; name: string; receipts: number }[];
 }
 
 /**
@@ -1219,7 +1248,7 @@ export interface OrgOverview {
 export async function fetchOrgOverview(): Promise<OrgOverview> {
   const fetchOverviewReceipts = async () => {
     const query = (includeQueue: boolean) => supabase.from('receipts')
-      .select(`id, status, uploaded_by${includeQueue ? `, ${RECEIPT_QUEUE_COLUMNS}` : ''}`);
+      .select(`id, status${includeQueue ? `, ${RECEIPT_QUEUE_COLUMNS}` : ''}`);
     const includeQueue = receiptQueueColumnsAvailable !== false;
     let result = await query(includeQueue);
     if (includeQueue && result.error && queueColumnsMissing(result.error)) {
@@ -1259,10 +1288,8 @@ export async function fetchOrgOverview(): Promise<OrgOverview> {
 
   const receipts: Record<ReceiptDisplayStatus, number> =
     { Pending: 0, Queued: 0, Processing: 0, Extracted: 0, Failed: 0 };
-  const perUploader = new Map<string, number>();
   const receiptRows = (receiptRes.data || []) as unknown as Array<{
     status: ReceiptStatus;
-    uploaded_by?: string | null;
     extraction_queue_message_id?: number | null;
   }>;
   for (const r of receiptRows) {
@@ -1270,7 +1297,6 @@ export async function fetchOrgOverview(): Promise<OrgOverview> {
       ? 'Queued'
       : r.status as ReceiptStatus;
     if (displayStatus in receipts) receipts[displayStatus]++;
-    if (r.uploaded_by) perUploader.set(r.uploaded_by, (perUploader.get(r.uploaded_by) || 0) + 1);
   }
 
   const rows = (txRes.data || []).length;
@@ -1281,10 +1307,6 @@ export async function fetchOrgOverview(): Promise<OrgOverview> {
     : 0;
 
   const names = new Map((userRes.data || []).map((u: any) => [u.id, u.name]));
-  // Keyed by id, not name: two people with the same name are two people.
-  const staff = [...perUploader.entries()]
-    .map(([id, count]) => ({ id, name: names.get(id) || 'Unknown', receipts: count }))
-    .sort((a, b) => b.receipts - a.receipts);
 
   const exports = (exportRes.data || []).map((r: any) => ({
     id: r.id,
@@ -1301,7 +1323,243 @@ export async function fetchOrgOverview(): Promise<OrgOverview> {
     ledgersUnresolved,
     ledgerCount: ledgerRes.count ?? 0,
     exports,
-    staff,
+  };
+}
+
+// Migrations 014 and 016 add extracted_by and extracted_at. Probed separately
+// for the same reason as has_signature: a rolling release can briefly run this
+// frontend against the older schema, and a missing column fails the whole
+// PostgREST query. Probed as a pair because they are read as a pair.
+let receiptExtractionColumnsAvailable: boolean | null = null;
+
+async function areExtractionColumnsAvailable(): Promise<boolean> {
+  if (receiptExtractionColumnsAvailable !== null) return receiptExtractionColumnsAvailable;
+  const { error } = await supabase.from('receipts').select('extracted_by, extracted_at').limit(1);
+  receiptExtractionColumnsAvailable = !error;
+  return receiptExtractionColumnsAvailable;
+}
+
+export interface ExtractedReceiptRecord {
+  id: string;
+  filename: string;
+  batchName: string;
+  operatorName: string;
+  extractedAt: string;
+  /** Raw values kept for sorting and searching; the strings above are display. */
+  extractedAtMs: number;
+  batchCreatedMs: number;
+}
+
+export interface ExtractedReceiptsReport {
+  total: number;
+  records: ExtractedReceiptRecord[];
+  groups: ExtractedReceiptGroup[];
+  /** Receipts extracted per operator, busiest first. */
+  byOperator: { name: string; receipts: number }[];
+}
+
+/**
+ * One upload shown as one row. A 19-page PDF or a multi-file selection would
+ * otherwise fill the whole report with near-identical rows and bury every other
+ * upload — 23 of the first 25 rows, in the case that prompted this.
+ */
+export interface ExtractedReceiptGroup {
+  key: string;
+  /** "newJourna.pdf", or the filename itself when the upload was a single file. */
+  label: string;
+  operatorName: string;
+  batchName: string;
+  /** Newest receipt in the group; what the group sorts and displays by. */
+  extractedAt: string;
+  extractedAtMs: number;
+  batchCreatedMs: number;
+  members: ExtractedReceiptRecord[];
+}
+
+/** The `X - page 3 of 19.jpg` names produced by splitPdfIntoPageImages. */
+const PDF_PAGE_NAME = /^(.*) - page \d+ of \d+\.jpg$/i;
+
+/** Loose files uploaded in one action land within seconds of each other. */
+const UPLOAD_BURST_MS = 2 * 60 * 1000;
+
+function groupExtractedReceipts(records: ExtractedReceiptRecord[]): ExtractedReceiptGroup[] {
+  const groups: ExtractedReceiptGroup[] = [];
+  const byPdf = new Map<string, ExtractedReceiptGroup>();
+
+  const startGroup = (key: string, label: string, record: ExtractedReceiptRecord) => {
+    const group: ExtractedReceiptGroup = {
+      key,
+      label,
+      operatorName: record.operatorName,
+      batchName: record.batchName,
+      extractedAt: record.extractedAt,
+      extractedAtMs: record.extractedAtMs,
+      batchCreatedMs: record.batchCreatedMs,
+      members: [record],
+    };
+    groups.push(group);
+    return group;
+  };
+
+  for (const record of records) {
+    const pdfMatch = PDF_PAGE_NAME.exec(record.filename);
+
+    if (pdfMatch) {
+      // Pages of one source document, split by this app. Keyed on the batch and
+      // operator too, so the same PDF uploaded twice stays two separate rows —
+      // which is exactly the case in this data ("Pdf" and "PDF Test").
+      const label = `${pdfMatch[1]}.pdf`;
+      const key = `pdf:${record.batchName}:${record.operatorName}:${label}`;
+      const existing = byPdf.get(key);
+      if (existing) {
+        existing.members.push(record);
+        if (record.extractedAtMs > existing.extractedAtMs) {
+          existing.extractedAtMs = record.extractedAtMs;
+          existing.extractedAt = record.extractedAt;
+        }
+      } else {
+        byPdf.set(key, startGroup(key, label, record));
+      }
+      continue;
+    }
+
+    // Loose files: same batch, same operator, uploaded in the same burst. Only
+    // ever merged into the immediately preceding group, so an unrelated upload
+    // in between reliably splits them.
+    const previous = groups[groups.length - 1];
+    const canExtend = previous
+      && previous.key.startsWith('burst:')
+      && previous.batchName === record.batchName
+      && previous.operatorName === record.operatorName
+      && Math.abs(previous.members[previous.members.length - 1].extractedAtMs - record.extractedAtMs) <= UPLOAD_BURST_MS;
+
+    if (canExtend) {
+      previous.members.push(record);
+      if (record.extractedAtMs > previous.extractedAtMs) {
+        previous.extractedAtMs = record.extractedAtMs;
+        previous.extractedAt = record.extractedAt;
+      }
+    } else {
+      startGroup(`burst:${record.id}`, record.filename, record);
+    }
+  }
+
+  for (const group of groups) {
+    // A "group" of one is just the receipt; label it as itself rather than
+    // inventing an upload that never happened.
+    if (group.members.length === 1) {
+      group.label = group.members[0].filename;
+    } else if (group.key.startsWith('burst:')) {
+      // Loose files have no shared source document to name, and borrowing the
+      // first filename would read as a single receipt that happens to carry a
+      // count badge. Say what the row actually is.
+      group.label = `${group.members.length} photos uploaded together`;
+    }
+  }
+  return groups;
+}
+
+/**
+ * Which receipts have been extracted, by whom, and in which batch.
+ *
+ * Scoped to the reader's own organisation by row-level security, not by a
+ * filter added here: receipts are reachable only through scan_batches rows
+ * whose organization_id matches the caller, so another company's receipts are
+ * never returned even if this query asked for them. The Admin-only restriction
+ * is likewise enforced by the users table's own policy — a non-Admin resolves
+ * no colleague names at all.
+ */
+export async function fetchExtractedReceipts(): Promise<ExtractedReceiptsReport> {
+  const includeExtraction = await areExtractionColumnsAvailable();
+  const columns = `id, filename, batch_id, uploaded_by, created_at, updated_at${
+    includeExtraction ? ', extracted_by, extracted_at' : ''}`;
+
+  // Every extracted receipt, not a page of them: the overview searches, sorts
+  // and paginates in the browser, and doing that over a truncated list would
+  // silently hide matches that live past the cut-off.
+  const [listRes, batchRes] = await Promise.all([
+    supabase.from('receipts').select(columns).eq('status', 'Extracted'),
+    supabase.from('scan_batches').select('id, name, created_at'),
+  ]);
+
+  if (listRes.error) throw new Error(listRes.error.message);
+  if (batchRes.error) throw new Error(batchRes.error.message);
+
+  const rows = (listRes.data || []) as unknown as Array<{
+    id: string;
+    filename: string;
+    batch_id: string;
+    uploaded_by?: string | null;
+    extracted_by?: string | null;
+    extracted_at?: string | null;
+    created_at?: string | null;
+    updated_at?: string | null;
+  }>;
+
+  // Only the operators actually referenced, so this does not enumerate staff
+  // who have never extracted anything.
+  const operatorIds = [...new Set(
+    rows.map(r => r.extracted_by || r.uploaded_by).filter(Boolean) as string[]
+  )];
+  const names = new Map<string, string>();
+  if (operatorIds.length) {
+    const { data: people } = await supabase.from('users').select('id, name').in('id', operatorIds);
+    for (const person of people || []) {
+      if (person?.id && person?.name) names.set(person.id, person.name);
+    }
+  }
+
+  const batches = new Map(
+    (batchRes.data || []).map((b: any) => [b.id, { name: b.name, created: Date.parse(b.created_at) }])
+  );
+
+  const records = rows.map(r => {
+    // extracted_by is authoritative; uploaded_by is the honest fallback for
+    // receipts extracted before that column existed.
+    const operatorId = r.extracted_by || r.uploaded_by;
+    const batch = batches.get(r.batch_id);
+    // extracted_at is the only value edits cannot move. created_at is the
+    // fallback before migration 016 — extraction is queued on upload, so the
+    // two are within a minute, where updated_at drifts by days once a reviewer
+    // touches the voucher.
+    const stamp = r.extracted_at || r.created_at || r.updated_at;
+    const extractedAtMs = stamp ? Date.parse(stamp) : Number.NaN;
+    return {
+      id: r.id,
+      filename: r.filename,
+      batchName: batch?.name || 'Unknown batch',
+      operatorName: (operatorId && names.get(operatorId)) || 'Unknown',
+      extractedAt: Number.isNaN(extractedAtMs) ? '—' : new Date(extractedAtMs).toLocaleString(),
+      extractedAtMs: Number.isNaN(extractedAtMs) ? 0 : extractedAtMs,
+      batchCreatedMs: Number.isNaN(batch?.created ?? Number.NaN) ? 0 : (batch?.created ?? 0),
+    };
+  });
+
+  // Newest batch first, and newest receipt first inside each batch, so the work
+  // an Admin just watched happen is at the top rather than scattered.
+  records.sort((a, b) =>
+    b.batchCreatedMs - a.batchCreatedMs ||
+    a.batchName.localeCompare(b.batchName) ||
+    b.extractedAtMs - a.extractedAtMs ||
+    a.filename.localeCompare(b.filename)
+  );
+
+  // Counted over receipts, not upload groups: "Lily extracted 99 receipts" is
+  // the question being asked, and counting the collapsed rows would answer a
+  // different and much smaller one.
+  const perOperator = new Map<string, number>();
+  for (const record of records) {
+    perOperator.set(record.operatorName, (perOperator.get(record.operatorName) || 0) + 1);
+  }
+  const byOperator = [...perOperator.entries()]
+    .map(([name, receipts]) => ({ name, receipts }))
+    .sort((a, b) => b.receipts - a.receipts || a.name.localeCompare(b.name));
+
+  return {
+    total: records.length,
+    records,
+    groups: groupExtractedReceipts(records),
+    byOperator,
   };
 }
 

@@ -722,19 +722,27 @@ Return ONLY a JSON object in this shape:
 """
 
 # Separate request, so the total is an INDEPENDENT check rather than something
-# the transcription was allowed to steer toward.
+# the transcription was allowed to steer toward. Signature detection rides
+# along on this same request rather than issuing a third one: both are a single
+# glance at the whole voucher, not something that benefits from the multiple
+# independent passes the line items get.
 TOTALS_PROMPT = """
-Look ONLY at the bottom row of this handwritten Nepalese Goshwara voucher — the row
-labelled जम्मा, which holds the voucher's own stated totals.
+Look at this handwritten Nepalese Goshwara voucher and answer two independent questions.
 
+1. Find the bottom row labelled जम्मा, which holds the voucher's own stated totals.
 That row has a total under the खर्च (डेबिट) / Debit side and one under the
 आम्दानी (क्रेडिट) / Credit side. Each is split into रु. (rupees) and पै. (paisa)
 sub-columns; combine as rupees + paisa/100. An empty पै. cell means .00.
-
 Transcribe only those two numbers. Ignore every other row. Do not compute anything.
 
+2. Does the voucher carry a handwritten signature, initial, or personal mark —
+distinct from the printed ledger entries and amounts — anywhere on it (commonly
+near the bottom, beside a preparer/approver name, or in a dedicated signature box)?
+Answer true only if you can see an actual signature-like mark, not merely a
+printed name or a blank line.
+
 Return ONLY a JSON object of this shape:
-    {"stated_total_debit": 14408.35, "stated_total_credit": 14408.35}
+    {"stated_total_debit": 14408.35, "stated_total_credit": 14408.35, "has_signature": true}
 """
 
 
@@ -783,7 +791,8 @@ def openai_transcribe(base64_image: str, media_type: str) -> List[dict]:
 
 
 def openai_read_totals(base64_image: str, media_type: str) -> dict:
-    return read_stated_totals(_openai_vision_json(TOTALS_PROMPT, base64_image, media_type))
+    """The raw parsed response: stated totals AND the signature flag, read once."""
+    return _openai_vision_json(TOTALS_PROMPT, base64_image, media_type)
 
 
 async def _run_blocking_provider_calls(calls) -> list:
@@ -889,7 +898,8 @@ def gemini_transcribe(raw_bytes: bytes) -> List[dict]:
 
 
 def gemini_read_totals(raw_bytes: bytes) -> dict:
-    return read_stated_totals(_gemini_vision_json(TOTALS_PROMPT, raw_bytes))
+    """The raw parsed response: stated totals AND the signature flag, read once."""
+    return _gemini_vision_json(TOTALS_PROMPT, raw_bytes)
 
 
 def _row_amount(row: dict) -> float:
@@ -971,6 +981,17 @@ def read_stated_totals(parsed: dict) -> dict:
             if value:
                 totals[out] = round(value, 2)
     return totals
+
+
+def read_signature_flag(parsed: dict) -> Optional[bool]:
+    """Pull the signature-detected flag out of the same response, if present.
+
+    None (not False) means the model did not answer this at all — e.g. the
+    totals request failed outright — so the UI can tell "no signature seen"
+    apart from "we never got to look."
+    """
+    value = parsed.get("has_signature")
+    return value if isinstance(value, bool) else None
 
 
 def verify_against_stated_totals(transactions: List[dict], stated: dict) -> dict:
@@ -1142,6 +1163,7 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
     extracted_transactions = []
     error_msg = None
     stated_totals = {}  # the voucher's own जम्मा row, when the engine could read it
+    has_signature: Optional[bool] = None  # None until the totals request answers it
     consensus_notes: List[str] = []
 
     # 1. Live OpenAI Extraction
@@ -1197,7 +1219,8 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
                     # a broken totals call silently disables the whole check.
                     log(f"⚠️ Could not read the जम्मा total row: {_describe_error(totals_result)}")
                 elif totals_result:
-                    stated_totals = totals_result
+                    stated_totals = read_stated_totals(totals_result)
+                    has_signature = read_signature_flag(totals_result)
                 log(f"✅ Extracted {len(extracted_transactions)} transactions from OpenAI "
                       f"({len(transcripts)}/{OCR_CONSENSUS_RUNS} transcription runs agreed on structure)")
                 for note in consensus_notes:
@@ -1247,7 +1270,8 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
                 if isinstance(totals_result, Exception):
                     log(f"⚠️ Could not read the जम्मा total row: {_describe_error(totals_result)}")
                 elif totals_result:
-                    stated_totals = totals_result
+                    stated_totals = read_stated_totals(totals_result)
+                    has_signature = read_signature_flag(totals_result)
                 log(f"✅ Extracted {len(extracted_transactions)} transactions from Gemini "
                       f"({len(transcripts)}/{OCR_CONSENSUS_RUNS} transcription runs agreed on structure)")
                 for note in consensus_notes:
@@ -1299,7 +1323,8 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
         "status": "Extracted" if not error_msg else "Failed",
         "transactions": extracted_transactions,
         "error": error_msg,
-        "verification": verification
+        "verification": verification,
+        "has_signature": has_signature
     }
 
 
@@ -2071,6 +2096,12 @@ def receipt_job_select() -> str:
 # applied must not be sent rows or patches that carry them.
 ledger_matching_ready = False
 job_claiming_ready = False
+# Migrations 013/014/016 add has_signature, extracted_by and extracted_at. Only
+# the pre-007 compatibility path writes these columns directly; PostgREST
+# rejects the whole PATCH when asked for a column that does not exist, and
+# _patch_receipt does not inspect its response, so an ungated write would leave
+# the receipt silently stuck instead of Extracted.
+receipt_extraction_metadata_ready = False
 MIGRATION_002_REQUIRED_ERROR = (
     "Extraction queue setup is incomplete. Apply "
     "scripts/migrations/002_ledgers_claiming_audit.sql in Supabase, re-run "
@@ -2157,13 +2188,14 @@ async def detect_schema_features() -> None:
     Once any 007 queue objects exist, however, missing 002 prerequisites are a
     broken migration chain and must pause rather than bypass the global queue.
     """
-    global ledger_matching_ready, job_claiming_ready
+    global ledger_matching_ready, job_claiming_ready, receipt_extraction_metadata_ready
     global extraction_queue_ready, extraction_queue_configuration_error
     global extraction_queue_absence_first_seen, extraction_queue_absence_confirmations
     # A second probe can run in tests or after a transient database failure.
     # Never carry a previous successful queue probe into a failed one.
     ledger_matching_ready = False
     job_claiming_ready = False
+    receipt_extraction_metadata_ready = False
     extraction_queue_ready = None if supabase_admin_available else False
     extraction_queue_configuration_error = None
     if not supabase_admin_available:
@@ -2192,10 +2224,17 @@ async def detect_schema_features() -> None:
                 _column_exists(client, "receipts", "raw_extraction"),
                 _column_exists(client, "receipts", "extraction_queue_message_id"),
                 _column_exists(client, "extraction_worker_slot", "slot_id"),
+                _column_exists(client, "receipts", "has_signature"),
+                _column_exists(client, "receipts", "extracted_by"),
+                _column_exists(client, "receipts", "extracted_at"),
             )
             ledger_matching_ready = all(schema_probes[:8])
             job_claiming_ready = all(schema_probes[8:11])
-            queue_schema_present = any(schema_probes[11:])
+            # Bounded explicitly rather than left open-ended: probes appended
+            # after this point are not queue markers, and an open slice would
+            # quietly start counting them as evidence that migration 007 exists.
+            queue_schema_present = any(schema_probes[11:13])
+            receipt_extraction_metadata_ready = all(schema_probes[13:16])
             queue_health = await client.post(
                 f"{SUPABASE_URL}/rest/v1/rpc/extraction_queue_health",
                 headers=_svc_headers(),
@@ -2418,6 +2457,11 @@ async def complete_extraction_job(
         "p_transactions": prepared["rows"],
         "p_verification_warnings": prepared["warnings"],
         "p_raw_extraction": prepared.get("raw_extraction"),
+        "p_has_signature": prepared.get("has_signature"),
+        # Same precedence _run_queued_extraction_job uses to pick the acting
+        # user, so the operator credited with the extraction is the one whose
+        # request actually ran it — a retry credits the person who retried.
+        "p_extracted_by": job.get("requested_by") or job.get("uploaded_by"),
     })
     return result is True
 
@@ -2673,6 +2717,7 @@ async def _prepare_extraction(receipt: dict, user_id: Optional[str]) -> dict:
             "rows": [],
             "warnings": [],
             "raw_extraction": result,
+            "has_signature": None,
         }
 
     rows = normalize_transaction_rows(
@@ -2710,6 +2755,7 @@ async def _prepare_extraction(receipt: dict, user_id: Optional[str]) -> dict:
         "rows": rows,
         "warnings": warnings,
         "raw_extraction": result,
+        "has_signature": result.get("has_signature"),
     }
 
 
@@ -2727,11 +2773,26 @@ async def _extract_and_store(receipt: dict, user_id: Optional[str]) -> None:
             {"raw_extraction": prepared["raw_extraction"]}
             if job_claiming_ready else {}
         )
+        # Gated on their own probe, not on job_claiming_ready: these columns
+        # arrive with migrations far later than 002, so a database can satisfy
+        # that flag and still not have them.
+        extraction_metadata = (
+            {
+                "has_signature": prepared.get("has_signature"),
+                "extracted_by": user_id or receipt.get("uploaded_by"),
+                # Set here rather than left to updated_at, which the touch
+                # trigger moves on every later edit; a corrected voucher must
+                # not look freshly extracted. The queue path sets this in its RPC.
+                "extracted_at": _now(),
+            }
+            if receipt_extraction_metadata_ready else {}
+        )
 
         if prepared["error"]:
             await _patch_receipt(client, receipt_id, _finished({
                 "status": "Failed",
                 "error_message": prepared["error"],
+                **({"has_signature": None} if receipt_extraction_metadata_ready else {}),
                 "verification_warnings": [],
                 **audit,
             }))
@@ -2762,6 +2823,7 @@ async def _extract_and_store(receipt: dict, user_id: Optional[str]) -> None:
             "status": "Extracted",
             "error_message": None,
             "verification_warnings": prepared["warnings"],
+            **extraction_metadata,
             **audit,
         }))
 
