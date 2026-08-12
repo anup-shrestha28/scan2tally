@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Download, ArrowLeft, AlertTriangle, Loader2 } from 'lucide-react';
+import { Download, ArrowLeft, AlertTriangle, Loader2, BarChart3 } from 'lucide-react';
 import ExcelJS from 'exceljs';
 import { ScanBatch, Transaction, User } from '../types';
 import { recordExport } from '../lib/db';
@@ -12,6 +12,12 @@ interface ExcelExporterProps {
   receiptNames?: Record<string, string>;
   onBack: () => void;
   onFixImbalanced: (receiptIds: string[]) => void;
+}
+
+interface ParticularTotal {
+  name: string;
+  debit: number;
+  credit: number;
 }
 
 const normalizeNarration = (raw: string | undefined): string => {
@@ -49,6 +55,8 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
   const [downloading, setDownloading] = useState(false);
   const [recordError, setRecordError] = useState<string | null>(null);
   const [showImbalanceWarning, setShowImbalanceWarning] = useState(false);
+  const [showParticularTotals, setShowParticularTotals] = useState(false);
+  const [downloadingParticularTotals, setDownloadingParticularTotals] = useState(false);
 
   // Group transactions by receipt_id so we can format each receipt as a separate voucher block
   const groupedTransactions: Record<string, Transaction[]> = {};
@@ -62,6 +70,102 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
     const bNo = ((b[0] as any)?.voucher_no ?? '') as string;
     return aNo.localeCompare(bNo, undefined, { numeric: true, sensitivity: 'base' });
   });
+  const detectedVoucherNumbers = [...new Set(
+    groups
+      .map(group => group.find(transaction => transaction.voucher_no)?.voucher_no?.trim())
+      .filter((voucherNo): voucherNo is string => Boolean(voucherNo))
+  )];
+  const voucherNumberLabel = detectedVoucherNumbers.length === 0
+    ? 'Voucher No: Not detected'
+    : `${detectedVoucherNumbers.length === 1 ? 'Voucher No' : 'Voucher Nos'}: ${detectedVoucherNumbers.join(', ')}`;
+
+  // Batch-level summary based on the values after reviewer edits. Voucher
+  // boundaries do not apply here: repeated particulars across the batch are
+  // intentionally combined into one Dr/Cr total.
+  const particularTotals: ParticularTotal[] = (() => {
+    const totals = new Map<string, ParticularTotal>();
+    transactions.forEach(transaction => {
+      const name = (transaction.ledger_name || transaction.debit_ledger || transaction.credit_ledger || '').trim();
+      if (!name) return;
+      const key = name.replace(/\s+/g, ' ').toLocaleLowerCase();
+      const current = totals.get(key) || { name, debit: 0, credit: 0 };
+      current.debit += Number(transaction.debit_amount) || 0;
+      current.credit += Number(transaction.credit_amount) || 0;
+      totals.set(key, current);
+    });
+    return [...totals.values()]
+      .map(total => ({
+        ...total,
+        debit: Math.round(total.debit * 100) / 100,
+        credit: Math.round(total.credit * 100) / 100,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  })();
+
+  const downloadParticularTotalsExcel = async () => {
+    setDownloadingParticularTotals(true);
+    try {
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet('Particular Totals');
+      sheet.getColumn(1).width = 42;
+      sheet.getColumn(2).width = 18;
+      sheet.getColumn(3).width = 18;
+
+      const title = sheet.addRow([batch?.name || 'Particular Totals', '', '']);
+      sheet.mergeCells(`A${title.number}:C${title.number}`);
+      title.getCell(1).font = { bold: true, size: 14 };
+      title.getCell(1).alignment = { horizontal: 'center' };
+
+      const header = sheet.addRow(['Particulars', 'Dr', 'Cr']);
+      header.eachCell(cell => {
+        cell.font = { bold: true };
+        cell.alignment = { horizontal: 'center' };
+      });
+
+      particularTotals.forEach(total => {
+        const row = sheet.addRow([total.name, total.debit || '', total.credit || '']);
+        row.getCell(2).numFmt = '#,##0.00';
+        row.getCell(3).numFmt = '#,##0.00';
+        row.getCell(2).alignment = { horizontal: 'right' };
+        row.getCell(3).alignment = { horizontal: 'right' };
+      });
+
+      const totalDebit = particularTotals.reduce((sum, total) => sum + total.debit, 0);
+      const totalCredit = particularTotals.reduce((sum, total) => sum + total.credit, 0);
+      const totalRow = sheet.addRow(['Total', totalDebit, totalCredit]);
+      totalRow.getCell(1).font = { bold: true };
+      totalRow.getCell(2).font = { bold: true };
+      totalRow.getCell(3).font = { bold: true };
+      totalRow.getCell(2).numFmt = '#,##0.00';
+      totalRow.getCell(3).numFmt = '#,##0.00';
+      totalRow.getCell(2).alignment = { horizontal: 'right' };
+      totalRow.getCell(3).alignment = { horizontal: 'right' };
+
+      for (let rowNumber = header.number; rowNumber <= totalRow.number; rowNumber++) {
+        sheet.getRow(rowNumber).eachCell({ includeEmpty: true }, cell => {
+          cell.border = {
+            top: { style: 'thin' },
+            left: { style: 'thin' },
+            bottom: { style: 'thin' },
+            right: { style: 'thin' },
+          };
+        });
+      }
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${safeFilePart(batch?.name || 'Particular Totals')}_particular_totals.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } finally {
+      setDownloadingParticularTotals(false);
+    }
+  };
 
   // Names Tally has no account for. It will not reject them — it will create a
   // new ledger for each, which is how one account's balance ends up split in
@@ -240,13 +344,81 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
   const balanceDifference = totalDebit - totalCredit;
   const isBalanced = Math.abs(balanceDifference) < 0.01;
 
+  if (showParticularTotals) {
+    return (
+      <div className="export-page">
+      <div className="row row-between row-wrap" style={{ marginBottom: '20px' }}>
+          <div className="row row-wrap">
+            <button className="back-link" onClick={() => setShowParticularTotals(false)}>
+              <ArrowLeft size={16} />
+              Back to Excel Preview
+            </button>
+          </div>
+          <button className="btn btn-primary export-download-btn" onClick={downloadParticularTotalsExcel} disabled={downloadingParticularTotals}>
+            {downloadingParticularTotals
+              ? <><Loader2 size={17} className="animate-spin" /> Preparing...</>
+              : <><Download size={17} /> Download Excel</>}
+          </button>
+        </div>
+        <div className="card">
+          <div className="row row-between" style={{ marginBottom: '16px' }}>
+            <div>
+              <h3 className="section-title section-title-lg" style={{ marginBottom: 0 }}>Particular Totals</h3>
+              <span className="export-batch-name">{voucherNumberLabel}</span>
+              <span className="text-muted export-voucher-count">
+                {particularTotals.length} {particularTotals.length === 1 ? 'particular' : 'particulars'} across {groups.length} {groups.length === 1 ? 'voucher' : 'vouchers'}
+              </span>
+            </div>
+            <div className="export-totals">
+              <div className="export-totals-row">
+                <span>Total Debit: <strong className="total-debit">Rs. {totalDebit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong></span>
+                <span>Total Credit: <strong className="total-credit">Rs. {totalCredit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong></span>
+              </div>
+            </div>
+          </div>
+          <div className="table-container export-preview">
+            <table className="voucher-table">
+              <tbody>
+                <tr>
+                  <td colSpan={3} className="voucher-heading">Particular Totals</td>
+                </tr>
+                <tr>
+                  <td className="voucher-col-head voucher-particulars">Particulars</td>
+                  <td className="voucher-col-head">Dr</td>
+                  <td className="voucher-col-head">Cr</td>
+                </tr>
+                {particularTotals.map(total => (
+                  <tr key={total.name.toLocaleLowerCase()}>
+                    <td>{total.name}</td>
+                    <td className="voucher-amount">{formatAmt(total.debit)}</td>
+                    <td className="voucher-amount">{formatAmt(total.credit)}</td>
+                  </tr>
+                ))}
+                {particularTotals.length === 0 && (
+                  <tr><td colSpan={3} className="table-empty">No named particulars found.</td></tr>
+                )}
+                <tr>
+                  <td className="voucher-heading">Total</td>
+                  <td className="voucher-amount">{formatAmt(totalDebit)}</td>
+                  <td className="voucher-amount">{formatAmt(totalCredit)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="export-page">
       <div className="row row-between row-wrap">
-        <button className="back-link excel-back-review-btn" onClick={onBack}>
-          <ArrowLeft size={16} />
-          Review & Edit
-        </button>
+        <div className="row row-wrap">
+          <button className="back-link excel-back-review-btn" onClick={onBack}>
+            <ArrowLeft size={16} />
+            Review & Edit
+          </button>
+        </div>
         <button
           className="btn btn-primary export-download-btn"
           onClick={handleDownloadClick}
@@ -290,6 +462,7 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
         <div className="row row-between" style={{ marginBottom: '16px' }}>
           <div>
             <h3 className="section-title section-title-lg" style={{ marginBottom: 0 }}>Excel File Preview</h3>
+            <span className="export-batch-name">{voucherNumberLabel}</span>
             <span className="text-muted export-voucher-count">
               {groups.length} {groups.length === 1 ? 'voucher' : 'vouchers'}
             </span>
@@ -306,6 +479,12 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
               </span>
             )}
           </div>
+        </div>
+
+        <div className="row row-end" style={{ marginBottom: '16px' }}>
+          <button className="btn btn-secondary" onClick={() => setShowParticularTotals(true)}>
+            <BarChart3 size={17} /> Show Particular Totals
+          </button>
         </div>
 
         <div className="table-container export-preview">

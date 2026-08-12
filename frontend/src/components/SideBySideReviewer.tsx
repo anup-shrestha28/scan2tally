@@ -599,16 +599,15 @@ export default function SideBySideReviewer({
     }
   };
 
-  // In focused imbalance mode, keep the workflow limited to the affected
-  // receipts. Normal review mode still exports the complete batch.
+    // Focused mode limits the review list, but exporting must always return to
+    // the complete batch. Otherwise "Proceed to Export" would silently create
+    // an export containing only the receipt(s) that were sent for fixing.
   const handleExportAll = async () => {
     // The export screen replaces this one, so the same cancelled-debounce loss
     // applies here as on Back.
     if (!(await flushPendingSave())) return;
     const saved = currentReceipt ? { ...txMap, [currentReceipt.id]: transactions } : txMap;
-    const exportReceipts = (reviewOnlyImbalanced || localFocusedReceiptIds !== null)
-      ? visibleReceipts
-      : allVisibleReceipts;
+    const exportReceipts = allVisibleReceipts;
     const all = exportReceipts.flatMap(r => (saved[r.id] || []).map(t => ({ ...t, receipt_id: r.id })));
     const exportData = all.length > 0 ? all : transactions.map(t => ({ ...t, receipt_id: currentReceipt?.id }));
 

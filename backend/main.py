@@ -693,14 +693,21 @@ Do NOT add anything up. Do NOT make the rows agree with each other or with any t
 If a digit is genuinely unclear, give your single best reading of that cell and nothing more —
 never adjust another cell to compensate.
 
+IMPORTANT: Read the voucher number separately from the top-left header. It is the handwritten
+number immediately after the Nepali label "भौचर नं." / "भौचर न." (Voucher No.), above the table.
+This is NOT the date, a ledger amount, cheque number, or page number. Copy only the digits
+written beside that label. If it is genuinely absent or unreadable, return an empty string.
+
 Ignore the bottom row labelled जम्मा entirely. It is a total, not a transaction; do not report it.
 
 Return ONLY a JSON object in this shape:
     {
       "voucher_date": "2083-03-15",
+      "voucher_no": "1024",
       "transactions": [
         {
           "voucher_date": "2083-03-15",
+          "voucher_no": "1024",
           "voucher_type": "Journal",
           "entry_type": "Dr",
           "ledger_name": "Freight outward",
@@ -742,7 +749,7 @@ Answer true only if you can see an actual signature-like mark, not merely a
 printed name or a blank line.
 
 Return ONLY a JSON object of this shape:
-    {"stated_total_debit": 14408.35, "stated_total_credit": 14408.35, "has_signature": true}
+    {"voucher_no": "19", "stated_total_debit": 14408.35, "stated_total_credit": 14408.35, "has_signature": true}
 """
 
 
@@ -784,7 +791,12 @@ def _openai_vision_json(prompt: str, base64_image: str, media_type: str) -> dict
 def openai_transcribe(base64_image: str, media_type: str) -> List[dict]:
     parsed = _openai_vision_json(TRANSCRIBE_PROMPT, base64_image, media_type)
     if isinstance(parsed, dict):
-        return parsed.get("transactions") or []
+        rows = parsed.get("transactions") or []
+        voucher_no = parsed.get("voucher_no")
+        return [
+            {**row, "voucher_no": row.get("voucher_no") or voucher_no}
+            for row in rows
+        ]
     if isinstance(parsed, list):
         return parsed
     return []
@@ -891,7 +903,12 @@ def _gemini_vision_json(prompt: str, raw_bytes: bytes) -> dict:
 def gemini_transcribe(raw_bytes: bytes) -> List[dict]:
     parsed = _gemini_vision_json(TRANSCRIBE_PROMPT, raw_bytes)
     if isinstance(parsed, dict):
-        return parsed.get("transactions") or []
+        rows = parsed.get("transactions") or []
+        voucher_no = parsed.get("voucher_no")
+        return [
+            {**row, "voucher_no": row.get("voucher_no") or voucher_no}
+            for row in rows
+        ]
     if isinstance(parsed, list):
         return parsed
     return []
@@ -992,6 +1009,15 @@ def read_signature_flag(parsed: dict) -> Optional[bool]:
     """
     value = parsed.get("has_signature")
     return value if isinstance(value, bool) else None
+
+
+def read_voucher_no(parsed: dict) -> Optional[str]:
+    """Return the handwritten number beside the voucher-number label."""
+    value = parsed.get("voucher_no") if isinstance(parsed, dict) else None
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    return cleaned or None
 
 
 def verify_against_stated_totals(transactions: List[dict], stated: dict) -> dict:
@@ -1163,6 +1189,7 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
     extracted_transactions = []
     error_msg = None
     stated_totals = {}  # the voucher's own जम्मा row, when the engine could read it
+    voucher_no: Optional[str] = None  # handwritten number beside भौचर नं.
     has_signature: Optional[bool] = None  # None until the totals request answers it
     consensus_notes: List[str] = []
 
@@ -1221,6 +1248,7 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
                 elif totals_result:
                     stated_totals = read_stated_totals(totals_result)
                     has_signature = read_signature_flag(totals_result)
+                    voucher_no = read_voucher_no(totals_result)
                 log(f"✅ Extracted {len(extracted_transactions)} transactions from OpenAI "
                       f"({len(transcripts)}/{OCR_CONSENSUS_RUNS} transcription runs agreed on structure)")
                 for note in consensus_notes:
@@ -1272,6 +1300,7 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
                 elif totals_result:
                     stated_totals = read_stated_totals(totals_result)
                     has_signature = read_signature_flag(totals_result)
+                    voucher_no = read_voucher_no(totals_result)
                 log(f"✅ Extracted {len(extracted_transactions)} transactions from Gemini "
                       f"({len(transcripts)}/{OCR_CONSENSUS_RUNS} transcription runs agreed on structure)")
                 for note in consensus_notes:
@@ -1291,6 +1320,12 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
             log(f"📋 Using demo classification engine: {len(extracted_transactions)} rows")
 
     log(f"🔚 Final result: {len(extracted_transactions)} transactions, error={error_msg}")
+
+    # The dedicated header read is a fallback for transcription passes that
+    # correctly read the rows but omit the voucher number field.
+    if voucher_no:
+        for transaction in extracted_transactions:
+            transaction["voucher_no"] = transaction.get("voucher_no") or voucher_no
 
     # Reconcile against the voucher's own printed totals. Reporting only —
     # a discrepancy never rewrites an amount, it just tells the reviewer where
@@ -2637,6 +2672,7 @@ def normalize_transaction_rows(
             "organization_id": organization_id,
             "position": position,
             "voucher_date": t.get("voucher_date") or "2083-03-15",
+            "voucher_no": str(t.get("voucher_no") or "").strip() or None,
             "voucher_type": t.get("voucher_type") or "Journal",
             "entry_type": entry_type,
             "ledger_name": (
