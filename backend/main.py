@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import base64
+import contextvars
 import hashlib
 import asyncio
 import socket
@@ -371,6 +372,153 @@ GEMINI_MAX_OUTPUT_TOKENS = max(
     2000,
     int(_positive_env_number("GEMINI_MAX_OUTPUT_TOKENS", 8192.0)),
 )
+
+
+# ------------------------------------------------- extraction progress logging
+#
+# Extraction is the slowest thing this server does and was also the quietest: a
+# receipt waiting on a vision request that will not return for five minutes
+# looked exactly like one that had finished, so "is it still working or is it
+# stuck?" had no answer in the log.
+#
+# Every percentage below is anchored to work that has ALREADY completed. Nothing
+# here advances on a timer, deliberately: a number that climbs while a request
+# is hung reports progress that is not happening, which is worse than no number
+# at all. A stalled extraction parks at its last honest figure and the elapsed
+# seconds on each line are what expose the stall.
+EXTRACTION_PROGRESS_LOGS = (
+    (os.getenv("EXTRACTION_PROGRESS_LOGS") or "true").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+
+_PROGRESS_CLAIMED = 0
+_PROGRESS_IMAGE_READY = 10
+_PROGRESS_VISION_SENT = 15
+# The vision calls are the long pole — several concurrent requests, each with a
+# multi-minute ceiling of its own — so they get the widest band and report every
+# response as it lands. Without that the log would sit silent at 15% for
+# minutes, which is the exact ambiguity these lines exist to remove.
+_PROGRESS_VISION_DONE = 70
+_PROGRESS_CONSENSUS = 75
+_PROGRESS_VERIFIED = 80
+_PROGRESS_ROWS_READY = 85
+_PROGRESS_LEDGERS_DONE = 90
+_PROGRESS_SAVING = 95
+_PROGRESS_STORED = 100
+
+
+class ExtractionProgress:
+    """Ordered, monotonic progress for one receipt's extraction.
+
+    One instance per receipt, reached through the context variable below rather
+    than passed down by hand. The pipeline crosses three layers, and the seams
+    between them (``run_extraction``, ``_prepare_extraction``) are replaced
+    wholesale by the tests — threading a reporter through those signatures would
+    change the very call shapes that other code and those tests depend on, for
+    something that is pure observability.
+    """
+
+    def __init__(self, receipt_id, filename: str) -> None:
+        short_id = str(receipt_id or "")[:8]
+        name = str(filename or "receipt")
+        # Filenames alone are not unique — a split PDF produces the same
+        # "page 3 of 19.jpg" in every batch it is uploaded to — so the receipt
+        # id is what makes an interleaved log readable.
+        self._label = f"{name} ({short_id})" if short_id else name
+        self._started = time.monotonic()
+        self._percent = 0
+        self._stage = "queued"
+        self._calls_total = 0
+        self._calls_done = 0
+
+    @property
+    def stage(self) -> str:
+        """The last stage reached, so a failure can say where it stopped."""
+        return self._stage
+
+    def elapsed_seconds(self) -> float:
+        return time.monotonic() - self._started
+
+    def step(self, percent: int, stage: str, detail: str = "") -> None:
+        # Clamped rather than trusted. A provider callback that lands late, or a
+        # stage reached twice, must never print a number lower than one already
+        # shown: a log that appears to go backwards is unreadable as progress.
+        percent = max(int(percent), self._percent)
+        self._percent = percent
+        self._stage = stage
+        if not EXTRACTION_PROGRESS_LOGS:
+            return
+        suffix = f" — {detail}" if detail else ""
+        log(
+            f"📊 [{percent:3d}%] {self._label} · {self.elapsed_seconds():5.1f}s "
+            f"· {stage}{suffix}"
+        )
+
+    def vision_sent(self, total_calls: int, engine: str, transcription_passes: int) -> None:
+        """Records how many provider calls this receipt is waiting on."""
+        self._calls_total = max(0, int(total_calls))
+        self._calls_done = 0
+        passes = "pass" if transcription_passes == 1 else "passes"
+        self.step(
+            _PROGRESS_VISION_SENT,
+            "vision requests sent",
+            f"{engine}: {transcription_passes} transcription {passes} "
+            f"+ 1 totals/signature read, running concurrently",
+        )
+
+    def vision_response(self) -> None:
+        """One provider call settled; steps proportionally inside the band."""
+        if self._calls_total <= 0:
+            return
+        self._calls_done = min(self._calls_done + 1, self._calls_total)
+        span = _PROGRESS_VISION_DONE - _PROGRESS_VISION_SENT
+        percent = _PROGRESS_VISION_SENT + round(span * self._calls_done / self._calls_total)
+        self.step(
+            percent,
+            "vision response received",
+            f"{self._calls_done} of {self._calls_total} complete",
+        )
+
+    def failed(self, message: str) -> None:
+        """Terminal line naming the stage that was in flight when it stopped.
+
+        Never reports a percentage: the extraction did not reach one, and
+        printing the last figure beside a failure reads as partial success.
+        """
+        if not EXTRACTION_PROGRESS_LOGS:
+            return
+        log(
+            f"📊 [FAIL] {self._label} · {self.elapsed_seconds():5.1f}s "
+            f"· stopped during '{self._stage}' — {message}"
+        )
+
+
+class _SilentExtractionProgress(ExtractionProgress):
+    """The default when no receipt is in scope, so call sites need no guards."""
+
+    def __init__(self) -> None:
+        super().__init__("", "")
+
+    def step(self, percent: int, stage: str, detail: str = "") -> None:
+        return
+
+    def failed(self, message: str) -> None:
+        return
+
+
+_SILENT_PROGRESS = _SilentExtractionProgress()
+
+# Each asyncio task runs in its own copy of the context, so a value set inside
+# one extraction cannot leak into another running beside it on the legacy
+# concurrent path.
+_extraction_progress: "contextvars.ContextVar[ExtractionProgress]" = contextvars.ContextVar(
+    "scan2tally_extraction_progress", default=_SILENT_PROGRESS
+)
+
+
+def extraction_progress() -> ExtractionProgress:
+    """The reporter for the receipt being extracted in this task."""
+    return _extraction_progress.get()
 
 
 def openai_sampling_params(model: str) -> dict:
@@ -807,18 +955,43 @@ def openai_read_totals(base64_image: str, media_type: str) -> dict:
     return _openai_vision_json(TOTALS_PROMPT, base64_image, media_type)
 
 
-async def _run_blocking_provider_calls(calls) -> list:
+def _announce_settled_call(task: "asyncio.Task", on_settled) -> None:
+    """Reports one settled provider call without ever disturbing the extraction.
+
+    A cancelled task is not a response, so it is not counted — otherwise a
+    timed-out receipt would print its way to the top of the vision band on the
+    way out. Any error raised by the reporter itself is swallowed: this is
+    commentary, and commentary must not be able to fail the work it describes.
+    """
+    if task.cancelled():
+        return
+    try:
+        on_settled()
+    except Exception:
+        pass
+
+
+async def _run_blocking_provider_calls(calls, on_settled=None) -> list:
     """Runs SDK calls in threads and waits for those threads if cancelled.
 
     asyncio can cancel the awaitable returned by ``to_thread``, but Python
     cannot terminate the thread that is already inside an SDK request. Shield
     each worker and, on cancellation, wait for every finite provider request to
     settle before propagating cancellation to the queue worker.
+
+    ``on_settled`` is invoked once per call as it finishes, in completion order
+    rather than submission order. It is attached as a done-callback so the
+    gather/shield behaviour above is left exactly as it was.
     """
     workers = [
         asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
         for function, args, kwargs in calls
     ]
+    if on_settled is not None:
+        for worker in workers:
+            worker.add_done_callback(
+                lambda task, report=on_settled: _announce_settled_call(task, report)
+            )
     try:
         return await asyncio.gather(
             *(asyncio.shield(worker) for worker in workers),
@@ -1192,6 +1365,7 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
     voucher_no: Optional[str] = None  # handwritten number beside भौचर नं.
     has_signature: Optional[bool] = None  # None until the totals request answers it
     consensus_notes: List[str] = []
+    progress = extraction_progress()
 
     # 1. Live OpenAI Extraction
     if openai_available:
@@ -1212,7 +1386,12 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
                 for _ in range(OCR_CONSENSUS_RUNS)
             ]
             calls.append((openai_read_totals, (base64_image, media_type), {}))
-            runs = await _run_blocking_provider_calls(calls)
+            progress.vision_sent(
+                len(calls), f"OpenAI {OPENAI_VISION_MODEL}", OCR_CONSENSUS_RUNS
+            )
+            runs = await _run_blocking_provider_calls(
+                calls, on_settled=progress.vision_response
+            )
             transcripts = [r for r in runs[:-1] if not isinstance(r, Exception) and r]
             totals_result = runs[-1]
 
@@ -1225,6 +1404,12 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
                 log("❌ OpenAI returned no readable journal entry content")
             else:
                 extracted_transactions, consensus_notes = build_consensus(transcripts)
+                progress.step(
+                    _PROGRESS_CONSENSUS,
+                    "consensus built",
+                    f"{len(extracted_transactions)} rows from "
+                    f"{len(transcripts)}/{OCR_CONSENSUS_RUNS} usable passes",
+                )
 
                 # Comparing independent passes is what catches an invented
                 # amount, so losing passes quietly weakens the one check the
@@ -1270,7 +1455,12 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
                 for _ in range(OCR_CONSENSUS_RUNS)
             ]
             calls.append((gemini_read_totals, (raw_bytes,), {}))
-            runs = await _run_blocking_provider_calls(calls)
+            progress.vision_sent(
+                len(calls), f"Gemini {GEMINI_VISION_MODEL}", OCR_CONSENSUS_RUNS
+            )
+            runs = await _run_blocking_provider_calls(
+                calls, on_settled=progress.vision_response
+            )
             transcripts = [r for r in runs[:-1] if not isinstance(r, Exception) and r]
             totals_result = runs[-1]
 
@@ -1283,6 +1473,12 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
                 log("❌ Gemini returned no readable journal entry content")
             else:
                 extracted_transactions, consensus_notes = build_consensus(transcripts)
+                progress.step(
+                    _PROGRESS_CONSENSUS,
+                    "consensus built",
+                    f"{len(extracted_transactions)} rows from "
+                    f"{len(transcripts)}/{OCR_CONSENSUS_RUNS} usable passes",
+                )
 
                 if len(transcripts) < OCR_CONSENSUS_RUNS:
                     detail = extraction_error_message("Gemini Vision", failures[0]) if failures else ""
@@ -1318,6 +1514,11 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
         extracted_transactions = classify_voucher_image_content(raw_bytes, filename)
         if extracted_transactions:
             log(f"📋 Using demo classification engine: {len(extracted_transactions)} rows")
+            progress.step(
+                _PROGRESS_CONSENSUS,
+                "read by the offline demo engine",
+                f"{len(extracted_transactions)} rows, no vision provider configured",
+            )
 
     log(f"🔚 Final result: {len(extracted_transactions)} transactions, error={error_msg}")
 
@@ -1348,6 +1549,19 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
             log(f"⚠️ Verification: {warning}")
     elif verification["checked_against_voucher"]:
         log("✅ Verification: line items reconcile with the voucher's जम्मा totals")
+
+    # Only advanced on a reading that produced rows. Stepping here after a
+    # failure would show the extraction climbing past a point it never reached.
+    if not error_msg and extracted_transactions:
+        if verification["checked_against_voucher"]:
+            detail = (
+                f"{len(verification['warnings'])} warning(s)"
+                if verification["warnings"]
+                else "line items reconcile with the जम्मा totals"
+            )
+        else:
+            detail = "the जम्मा total row could not be read; rows left unchecked"
+        progress.step(_PROGRESS_VERIFIED, "verified against the voucher", detail)
 
     return {
         "filename": filename,
@@ -2741,6 +2955,13 @@ async def _prepare_extraction(receipt: dict, user_id: Optional[str]) -> dict:
     if not content_type.startswith("image/") and content_type != "application/pdf":
         content_type = "image/jpeg"
 
+    progress = extraction_progress()
+    progress.step(
+        _PROGRESS_IMAGE_READY,
+        "image downloaded",
+        f"{len(raw_bytes) / 1024:.0f} KB, {content_type}",
+    )
+
     result = await run_extraction(raw_bytes, content_type, filename)
 
     error_msg = result.get("error")
@@ -2763,6 +2984,11 @@ async def _prepare_extraction(receipt: dict, user_id: Optional[str]) -> dict:
         organization_id=receipt["organization_id"],
         updated_by=user_id or receipt.get("uploaded_by"),
     )
+    progress.step(
+        _PROGRESS_ROWS_READY,
+        "rows prepared",
+        f"{len(rows)} ledger {'line' if len(rows) == 1 else 'lines'}",
+    )
 
     # Resolve each name against the organisation's real chart of accounts.
     # Only certain matches rewrite the extracted name; suggestions remain for a
@@ -2783,8 +3009,25 @@ async def _prepare_extraction(receipt: dict, user_id: Optional[str]) -> dict:
             # an extraction being cancelled must still unwind.
             log(f"⚠️ Could not load the chart of accounts: {_describe_error(err)}")
             warnings = warnings + [LEDGER_MATCHING_UNAVAILABLE_WARNING]
+            progress.step(
+                _PROGRESS_LEDGERS_DONE,
+                "ledger matching unavailable",
+                "the chart of accounts could not be loaded; rows left unmatched",
+            )
         else:
             warnings = warnings + ledger_matching.apply_to_rows(rows, ledgers)
+            progress.step(
+                _PROGRESS_LEDGERS_DONE,
+                "ledger matching applied",
+                f"checked against {len(ledgers)} "
+                f"{'ledger' if len(ledgers) == 1 else 'ledgers'}",
+            )
+    else:
+        progress.step(
+            _PROGRESS_LEDGERS_DONE,
+            "ledger matching skipped",
+            "not enabled for this database",
+        )
 
     return {
         "error": None,
@@ -2825,6 +3068,7 @@ async def _extract_and_store(receipt: dict, user_id: Optional[str]) -> None:
         )
 
         if prepared["error"]:
+            extraction_progress().failed(prepared["error"])
             await _patch_receipt(client, receipt_id, _finished({
                 "status": "Failed",
                 "error_message": prepared["error"],
@@ -2836,6 +3080,9 @@ async def _extract_and_store(receipt: dict, user_id: Optional[str]) -> None:
             return
 
         rows = prepared["rows"]
+        extraction_progress().step(
+            _PROGRESS_SAVING, "saving to the database", f"{len(rows)} rows"
+        )
 
         # Replace rather than append, so a retry cannot leave the voucher with
         # the rows from a previous attempt still attached to it.
@@ -2863,6 +3110,9 @@ async def _extract_and_store(receipt: dict, user_id: Optional[str]) -> None:
             **audit,
         }))
 
+    extraction_progress().step(
+        _PROGRESS_STORED, "done", f"{len(rows)} transactions stored"
+    )
     log(f"✅ Stored {len(rows)} transactions for {filename} (receipt {receipt_id})")
 
 
@@ -2941,6 +3191,16 @@ async def _run_queued_extraction_job(job: dict) -> None:
         "uploaded_by": job.get("uploaded_by"),
     }
     user_id = job.get("requested_by") or job.get("uploaded_by")
+    progress = ExtractionProgress(receipt_id, filename)
+    # Set before the tasks below are created: a task copies the context at
+    # creation, so anything set afterwards would never reach _prepare_extraction.
+    progress_token = _extraction_progress.set(progress)
+    attempt = job.get("attempt_count")
+    progress.step(
+        _PROGRESS_CLAIMED,
+        "claimed from the queue",
+        f"attempt {attempt}" if attempt else "starting",
+    )
     lease_lost = asyncio.Event()
     heartbeat = asyncio.create_task(_heartbeat_queued_extraction(job, lease_lost))
     extraction = asyncio.create_task(_prepare_extraction(receipt, user_id))
@@ -2957,6 +3217,7 @@ async def _run_queued_extraction_job(job: dict) -> None:
         if lost_waiter in done and lease_lost.is_set():
             extraction.cancel()
             await asyncio.gather(extraction, return_exceptions=True)
+            progress.failed("its extraction lease was taken over by another worker")
             log(f"ℹ️ Stopped stale extraction for receipt {receipt_id} after losing its lease.")
             return
 
@@ -2967,6 +3228,9 @@ async def _run_queued_extraction_job(job: dict) -> None:
             # the next receipt could overlap the timed-out provider request.
             extraction.cancel()
             await asyncio.gather(extraction, return_exceptions=True)
+            progress.failed(
+                f"exceeded the {EXTRACTION_TIMEOUT_SECONDS}s extraction deadline"
+            )
             await _record_queued_failure(
                 job,
                 "Extraction took too long and was stopped. Please try again.",
@@ -2978,6 +3242,7 @@ async def _run_queued_extraction_job(job: dict) -> None:
         except asyncio.CancelledError:
             raise
         except Exception as err:
+            progress.failed(_describe_error(err))
             await _record_queued_failure(
                 job,
                 extraction_error_message("Extraction", err),
@@ -2986,9 +3251,11 @@ async def _run_queued_extraction_job(job: dict) -> None:
             return
 
         if lease_lost.is_set():
+            progress.failed("its extraction lease was taken over by another worker")
             return
 
         if prepared["error"]:
+            progress.failed(prepared["error"])
             await _record_queued_failure(
                 job,
                 prepared["error"],
@@ -2997,21 +3264,38 @@ async def _run_queued_extraction_job(job: dict) -> None:
             log(f"❌ Extraction failed for {filename}: {prepared['error']}")
             return
 
+        progress.step(
+            _PROGRESS_SAVING,
+            "saving to the database",
+            f"{len(prepared['rows'])} rows",
+        )
         try:
             async with httpx.AsyncClient(timeout=60) as client:
                 accepted = await complete_extraction_job(client, job, prepared)
         except Exception as err:
             # Completion may have committed even if its response was lost. Never
             # turn that ambiguity into an unfenced failure; redelivery is safe.
+            progress.failed(
+                f"the save could not be confirmed, so the receipt will be retried: "
+                f"{_describe_error(err)}"
+            )
             log(f"⚠️ Could not confirm queued extraction completion: {_describe_error(err)}")
             return
 
         if accepted:
+            progress.step(
+                _PROGRESS_STORED,
+                "done",
+                f"{len(prepared['rows'])} transactions stored",
+            )
             log(
                 f"✅ Stored {len(prepared['rows'])} transactions for {filename} "
                 f"(receipt {receipt_id})"
             )
         else:
+            progress.failed(
+                "result discarded; its extraction lease is now owned elsewhere"
+            )
             log(
                 f"ℹ️ Discarded stale result for receipt {receipt_id}; "
                 "its extraction lease is now owned elsewhere."
@@ -3019,12 +3303,17 @@ async def _run_queued_extraction_job(job: dict) -> None:
     except asyncio.CancelledError:
         extraction.cancel()
         await asyncio.gather(extraction, return_exceptions=True)
+        progress.failed("the backend is shutting down; the receipt will be retried")
         raise
     finally:
         heartbeat.cancel()
         lost_waiter.cancel()
         await asyncio.gather(heartbeat, lost_waiter, return_exceptions=True)
         _jobs_in_flight.discard(receipt_id)
+        # Reset rather than leave set: this consumer loops on to the next
+        # receipt in the same task, and a stale reporter would label those lines
+        # with the previous receipt's name.
+        _extraction_progress.reset(progress_token)
 
 
 async def consume_extraction_queue() -> None:
@@ -3112,20 +3401,30 @@ async def wait_for_extraction_queue_schema() -> None:
 
 async def _run_extraction_job(receipt: dict, user_id: Optional[str]) -> None:
     receipt_id = receipt["id"]
+    # Each of these runs as its own task, and a task gets its own copy of the
+    # context, so several concurrent legacy extractions cannot overwrite one
+    # another's reporter.
+    progress = ExtractionProgress(receipt_id, receipt.get("filename") or "receipt")
+    _extraction_progress.set(progress)
     try:
         # Queueing time is deliberately outside the timeout: waiting for a slot
         # is not the same as being stuck.
         async with _extraction_slot():
+            progress.step(_PROGRESS_CLAIMED, "starting extraction")
             await asyncio.wait_for(
                 _extract_and_store(receipt, user_id),
                 timeout=EXTRACTION_TIMEOUT_SECONDS,
             )
     except asyncio.TimeoutError:
+        progress.failed(
+            f"exceeded the {EXTRACTION_TIMEOUT_SECONDS}s extraction deadline"
+        )
         await _fail_receipt(
             receipt_id,
             "Extraction took too long and was stopped. Please try again.",
         )
     except Exception as err:
+        progress.failed(_describe_error(err))
         await _fail_receipt(receipt_id, extraction_error_message("Extraction", err))
         log(f"❌ Extraction job for receipt {receipt_id} failed: {_describe_error(err)}")
     finally:
