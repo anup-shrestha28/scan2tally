@@ -865,6 +865,10 @@ export async function downloadReceiptImage(path: string): Promise<File | null> {
 
 // ---------------------------------------------------------------- transactions
 
+function normalizeNarration(value: unknown): string {
+  return String(value ?? '').replace(/[()]/g, '').trim();
+}
+
 export async function fetchTransactionsForBatch(
   batchId: string
 ): Promise<Record<string, Transaction[]>> {
@@ -910,7 +914,7 @@ export async function fetchTransactionsForBatch(
       debit_amount: Number(row.debit_amount) || 0,
       credit_amount: Number(row.credit_amount) || 0,
       needs_review: row.needs_review || undefined,
-      narration: row.narration || '',
+      narration: normalizeNarration(row.narration),
     };
     (grouped[row.receipt_id] ||= []).push(tx);
   }
@@ -973,7 +977,7 @@ export async function saveTransactionsForReceipt(
     debit_amount: t.entry_type === 'Dr' ? Number(t.debit_amount) || 0 : 0,
     credit_amount: t.entry_type === 'Cr' ? Number(t.credit_amount) || 0 : 0,
     needs_review: t.needs_review === true,
-    narration: t.narration || '',
+    narration: normalizeNarration(t.narration),
     updated_by: ids.userId,
     raw_extracted_data: originalReadings.get(t.id) ?? null,
   }));

@@ -2129,6 +2129,11 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
               <span className="text-muted text-xs">{previewReceipt.filename} · Use ← → to browse</span>
             </div>
 
+            <div className="voucher-preview-meta" aria-label="Extracted voucher details">
+              <strong>Voucher No:</strong>{' '}
+              {receiptTransactionsMap[previewReceipt.id]?.find(transaction => transaction.voucher_no)?.voucher_no || 'Not detected'}
+            </div>
+
             <div
               className="preview-stage"
               onWheel={event => {

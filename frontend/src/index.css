@@ -2779,6 +2779,13 @@ body.light .user-form-card .form-label {
   transition: transform 0.3s ease;
   cursor: zoom-in;
 }
+.voucher-preview-meta {
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-card-hover);
+  font-size: 0.9rem;
+}
 
 .preview-img:active,
 .receipt-img-rotatable:active {

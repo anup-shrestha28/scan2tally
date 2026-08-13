@@ -70,15 +70,6 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
     const bNo = ((b[0] as any)?.voucher_no ?? '') as string;
     return aNo.localeCompare(bNo, undefined, { numeric: true, sensitivity: 'base' });
   });
-  const detectedVoucherNumbers = [...new Set(
-    groups
-      .map(group => group.find(transaction => transaction.voucher_no)?.voucher_no?.trim())
-      .filter((voucherNo): voucherNo is string => Boolean(voucherNo))
-  )];
-  const voucherNumberLabel = detectedVoucherNumbers.length === 0
-    ? 'Voucher No: Not detected'
-    : `${detectedVoucherNumbers.length === 1 ? 'Voucher No' : 'Voucher Nos'}: ${detectedVoucherNumbers.join(', ')}`;
-
   // Batch-level summary based on the values after reviewer edits. Voucher
   // boundaries do not apply here: repeated particulars across the batch are
   // intentionally combined into one Dr/Cr total.
@@ -364,7 +355,6 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
           <div className="row row-between" style={{ marginBottom: '16px' }}>
             <div>
               <h3 className="section-title section-title-lg" style={{ marginBottom: 0 }}>Particular Totals</h3>
-              <span className="export-batch-name">{voucherNumberLabel}</span>
               <span className="text-muted export-voucher-count">
                 {particularTotals.length} {particularTotals.length === 1 ? 'particular' : 'particulars'} across {groups.length} {groups.length === 1 ? 'voucher' : 'vouchers'}
               </span>
@@ -462,7 +452,6 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
         <div className="row row-between" style={{ marginBottom: '16px' }}>
           <div>
             <h3 className="section-title section-title-lg" style={{ marginBottom: 0 }}>Excel File Preview</h3>
-            <span className="export-batch-name">{voucherNumberLabel}</span>
             <span className="text-muted export-voucher-count">
               {groups.length} {groups.length === 1 ? 'voucher' : 'vouchers'}
             </span>

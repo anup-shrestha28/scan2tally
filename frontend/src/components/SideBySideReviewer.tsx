@@ -14,6 +14,28 @@ interface TransactionHistoryEntry {
   after: Transaction[];
 }
 
+const RECEIPT_ROTATIONS_STORAGE_KEY = 'scan2tally.receipt-rotations';
+
+function loadReceiptRotations(): Record<string, number> {
+  try {
+    const stored = window.localStorage.getItem(RECEIPT_ROTATIONS_STORAGE_KEY);
+    const parsed = stored ? JSON.parse(stored) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveReceiptRotation(receiptId: string, rotation: number): void {
+  try {
+    const rotations = loadReceiptRotations();
+    rotations[receiptId] = ((rotation % 360) + 360) % 360;
+    window.localStorage.setItem(RECEIPT_ROTATIONS_STORAGE_KEY, JSON.stringify(rotations));
+  } catch {
+    // Image rotation remains available for the current session if storage is blocked.
+  }
+}
+
 function getReceiptPageItems(currentPage: number, pageCount: number): ReceiptPageItem[] {
   if (pageCount <= 6) return Array.from({ length: pageCount }, (_, index) => index + 1);
   if (currentPage <= 4) return [1, 2, 3, 4, 5, 6, 7, 'end-ellipsis', pageCount];
@@ -267,7 +289,6 @@ export default function SideBySideReviewer({
     }
     dirtyRef.current = false;
     setCurrentIndex(nextIndex);
-    setRotation(0);
     setZoom(1);
   };
 
@@ -323,6 +344,12 @@ export default function SideBySideReviewer({
   useEffect(() => {
     setTransactions(getTxForReceipt(visibleReceipts[currentIndex] || null));
   }, [currentIndex, deletedReceiptIds]);
+
+  // Restore the saved orientation whenever the reviewer moves to another
+  // receipt. The orientation is kept per receipt, including after a reload.
+  useEffect(() => {
+    setRotation(currentReceipt ? loadReceiptRotations()[currentReceipt.id] || 0 : 0);
+  }, [currentReceipt?.id]);
 
   // When allReceiptTransactions changes (fresh extraction), merge in
   useEffect(() => {
@@ -402,8 +429,16 @@ export default function SideBySideReviewer({
 
   const ledgerById = (id?: string | null) => ledgers.find(l => l.id === id);
 
-  const rotateLeft = () => setRotation(r => r - 90);
-  const rotateRight = () => setRotation(r => r + 90);
+  const rotateBy = (degrees: number) => {
+    if (!currentReceipt) return;
+    setRotation(previous => {
+      const next = previous + degrees;
+      saveReceiptRotation(currentReceipt.id, next);
+      return next;
+    });
+  };
+  const rotateLeft = () => rotateBy(-90);
+  const rotateRight = () => rotateBy(90);
 
   const recordTransactionChange = (before: Transaction[], after: Transaction[]) => {
     if (!currentReceipt) return;
