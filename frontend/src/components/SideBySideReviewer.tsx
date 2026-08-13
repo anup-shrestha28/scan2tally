@@ -3,6 +3,7 @@ import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Tr
 import { ScanBatch, Receipt, Transaction, User, Ledger } from '../types';
 import { saveTransactionsForReceipt, getReceiptImageUrl, deleteReceipt, fetchLedgers, resolveLedgerName } from '../lib/db';
 import { LEDGER_MATCHING } from '../lib/features';
+import { duplicateVoucherGroups, sortReceiptsByVoucherNo } from '../lib/receiptOrder';
 
 /** Ties the ledger inputs to the single datalist rendered at the bottom. */
 const LEDGER_OPTIONS_ID = 'chart-of-accounts';
@@ -47,6 +48,7 @@ interface SideBySideReviewerProps {
   batch: ScanBatch | null;
   currentUser: User;
   selectedReceipt?: Receipt | null;
+  initialReceiptIndex?: number;
   initialTransactions?: Transaction[];
   allReceiptTransactions?: Record<string, Transaction[]>;
   reviewOnlyImbalanced?: boolean;
@@ -126,6 +128,7 @@ export default function SideBySideReviewer({
   batch,
   currentUser,
   selectedReceipt,
+  initialReceiptIndex,
   initialTransactions,
   allReceiptTransactions = {},
   reviewOnlyImbalanced = false,
@@ -161,6 +164,7 @@ export default function SideBySideReviewer({
   const [showImbalanceModal, setShowImbalanceModal] = useState(false);
   const [pendingExportData, setPendingExportData] = useState<Transaction[] | null>(null);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [duplicateWarningDismissed, setDuplicateWarningDismissed] = useState(false);
   const [deletingReceipt, setDeletingReceipt] = useState(false);
   const [deletedReceiptIds, setDeletedReceiptIds] = useState<Set<string>>(new Set());
   const undoStacksRef = useRef<Record<string, TransactionHistoryEntry[]>>({});
@@ -173,7 +177,11 @@ export default function SideBySideReviewer({
   // and so the reviewer is told when one will not survive the trip into Tally.
   const [ledgers, setLedgers] = useState<Ledger[]>([]);
 
-  const allVisibleReceipts = receipts.filter(receipt => !deletedReceiptIds.has(receipt.id));
+  const allVisibleReceipts = sortReceiptsByVoucherNo(
+    receipts.filter(receipt => !deletedReceiptIds.has(receipt.id)),
+    txMap,
+  );
+  const duplicateVoucherWarnings = duplicateVoucherGroups(allVisibleReceipts, txMap);
   const rowsForReceipt = (receiptId: string): Transaction[] => {
     return txMap[receiptId] || allReceiptTransactions[receiptId] ||
       (receiptId === selectedReceipt?.id ? initialTransactions || [] : []);
@@ -203,9 +211,9 @@ export default function SideBySideReviewer({
 
   // Find the starting index inside the currently visible set. In focused mode
   // this prevents the image panel from opening on a non-imbalanced receipt.
-  const startIndex = selectedReceipt
+  const startIndex = initialReceiptIndex ?? (selectedReceipt
     ? visibleReceipts.findIndex(r => r.id === selectedReceipt.id)
-    : 0;
+    : 0);
 
   const [currentIndex, setCurrentIndex] = useState(Math.max(0, startIndex));
   const currentReceipt = visibleReceipts[currentIndex] || null;
@@ -344,6 +352,10 @@ export default function SideBySideReviewer({
   useEffect(() => {
     setTransactions(getTxForReceipt(visibleReceipts[currentIndex] || null));
   }, [currentIndex, deletedReceiptIds]);
+
+  useEffect(() => {
+    setCurrentIndex(Math.max(0, startIndex));
+  }, [startIndex]);
 
   // Restore the saved orientation whenever the reviewer moves to another
   // receipt. The orientation is kept per receipt, including after a reload.
@@ -502,6 +514,32 @@ export default function SideBySideReviewer({
     return true;
   };
 
+  const saveTransactionRows = async (rows: Transaction[]): Promise<boolean> => {
+    if (!currentReceipt || !batch || !currentUser.organization_id) return true;
+    if (isBlankPlaceholder(rows)) return true;
+
+    const changeVersion = changeVersionRef.current;
+    setSaveState('saving');
+    try {
+      await queueTransactionSave(
+        currentReceipt.id,
+        { batchId: batch.id, organizationId: currentUser.organization_id, userId: currentUser.id },
+        rows
+      );
+    } catch (err: any) {
+      setSaveState('error');
+      setSaveError(err?.message || 'Changes could not be saved.');
+      return false;
+    }
+    if (changeVersion === changeVersionRef.current) {
+      dirtyRef.current = false;
+      setSaveState('saved');
+      setSaveError(null);
+      window.setTimeout(() => setSaveState('idle'), 2500);
+    }
+    return true;
+  };
+
   const handleUpdateTransaction = (id: string, field: keyof Transaction, value: any) => {
     const before = transactions;
     const after = transactions.map(t => {
@@ -545,6 +583,12 @@ export default function SideBySideReviewer({
     dirtyRef.current = true;
     changeVersionRef.current += 1;
     setTransactions(after);
+    if (field === 'voucher_no') {
+      if (currentReceipt) {
+        setTxMap(prev => ({ ...prev, [currentReceipt.id]: after }));
+      }
+      void saveTransactionRows(after);
+    }
   };
 
   /**
@@ -775,6 +819,31 @@ export default function SideBySideReviewer({
         </div>
       </div>
 
+      {duplicateVoucherWarnings.length > 0 && !duplicateWarningDismissed && (
+        <div className="alert alert-warning alert-top text-xs" role="alert">
+          <AlertTriangle size={15} className="alert-icon" />
+          <span className="alert-body">
+            {duplicateVoucherWarnings.map(group => (
+              <span key={group.voucherNo}>
+                <span className="alert-title">Duplicate voucher detected on pages:</span>{' '}
+                {group.receipts
+                  .map(receipt => allVisibleReceipts.findIndex(item => item.id === receipt.id) + 1)
+                  .join(', ')}. Verify before export.
+              </span>
+            ))}
+          </span>
+          <button
+            className="alert-dismiss duplicate-warning-dismiss"
+            onClick={() => setDuplicateWarningDismissed(true)}
+            title="Dismiss"
+            aria-label="Dismiss duplicate voucher warning"
+            type="button"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       {/* Receipt navigation */}
       {visibleReceipts.length > 1 && (
         <div className="reviewer-nav">
@@ -937,6 +1006,13 @@ export default function SideBySideReviewer({
                   style={{ padding: '2px 8px', minHeight: 'auto', width: '120px' }}
                   value={(transactions[0] as any)?.voucher_no || ''} 
                   onChange={(e) => handleUpdateReceiptField('voucher_no', e.target.value)}
+                  onBlur={() => void handleSaveProgress()}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Enter') return;
+                    event.preventDefault();
+                    event.currentTarget.blur();
+                    void handleSaveProgress();
+                  }}
                 />
               </div>
             </div>

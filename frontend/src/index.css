@@ -2052,6 +2052,10 @@ body.light .user-form-card .form-label {
   padding: 0;
 }
 
+.duplicate-warning-dismiss {
+  font-size: 1.5rem;
+}
+
 /* Project-wide Supabase warning, visible to every signed-in role before the
    current page content. It is intentionally compact because it can persist. */
 .capacity-alert-stack {

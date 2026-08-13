@@ -277,7 +277,15 @@ export default function App() {
     setAuthError(null);
   };
 
-  const handleSelectBatch = (batch: ScanBatch, receipt?: Receipt, extractedTx?: Transaction[], txMap?: Record<string, Transaction[]>, focusImbalanced = false, focusReceiptIds: string[] = []) => {
+  const handleSelectBatch = (
+    batch: ScanBatch,
+    receipt?: Receipt,
+    extractedTx?: Transaction[],
+    txMap?: Record<string, Transaction[]>,
+    focusImbalanced = false,
+    focusReceiptIds: string[] = [],
+    initialReceiptIndex?: number,
+  ) => {
     setReviewOnlyImbalanced(focusImbalanced);
     setFocusedImbalancedReceiptIds(focusImbalanced ? focusReceiptIds : []);
     setActiveBatch(batch);
@@ -296,7 +304,11 @@ export default function App() {
     if (txMap) {
       setAllReceiptTransactions(txMap);
     }
-    
+
+    if (initialReceiptIndex !== undefined) {
+      setSelectedReceipt(receipt || null);
+    }
+
     setCurrentView('reviewer');
   };
 
@@ -440,6 +452,7 @@ export default function App() {
             batch={activeBatch}
             currentUser={currentUser}
             selectedReceipt={selectedReceipt}
+            initialReceiptIndex={0}
             initialTransactions={liveExtractedTransactions}
             allReceiptTransactions={allReceiptTransactions}
             reviewOnlyImbalanced={reviewOnlyImbalanced}

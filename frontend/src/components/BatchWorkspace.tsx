@@ -32,6 +32,7 @@ import {
   ExportRecord,
 } from '../lib/db';
 import { isPdfFile, splitPdfIntoPageImages } from '../lib/pdf';
+import { duplicateVoucherGroups, sortReceiptsByVoucherNo } from '../lib/receiptOrder';
 
 /**
  * How often to re-check receipts the server is still working on.
@@ -253,7 +254,15 @@ function measureImage(url: string): Promise<{ width: number; height: number } | 
 
 interface BatchWorkspaceProps {
   currentUser: User;
-  onSelectBatch: (batch: ScanBatch, selectedReceipt?: Receipt, extractedTx?: Transaction[], txMap?: Record<string, Transaction[]>) => void;
+  onSelectBatch: (
+    batch: ScanBatch,
+    selectedReceipt?: Receipt,
+    extractedTx?: Transaction[],
+    txMap?: Record<string, Transaction[]>,
+    focusImbalanced?: boolean,
+    focusReceiptIds?: string[],
+    initialReceiptIndex?: number,
+  ) => void;
 }
 
 export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWorkspaceProps) {
@@ -262,6 +271,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [uploadValidationError, setUploadValidationError] = useState<string | null>(null);
+  const [duplicateWarningDismissed, setDuplicateWarningDismissed] = useState(false);
   // Rendering a PDF's pages happens before any receipt row exists, so it has no
   // per-receipt status to report through. Without this the dropzone simply sits
   // still for several seconds on a long scan and looks broken.
@@ -377,7 +387,11 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   const activeBatchHiddenBySearch = Boolean(
     hasBatchSearch && activeBatch && !visibleBatches.some(batch => batch.id === activeBatch.id)
   );
-  const activeReceipts = activeBatch?.receipts ?? [];
+  const activeReceipts = sortReceiptsByVoucherNo(
+    activeBatch?.receipts ?? [],
+    receiptTransactionsMap,
+  );
+  const duplicateVoucherWarnings = duplicateVoucherGroups(activeReceipts, receiptTransactionsMap);
   const receiptStatusCounts = activeReceipts.reduce<Record<ReceiptFilterStatus, number>>(
     (counts, receipt) => {
       counts[receiptFilterStatus(receipt)] += 1;
@@ -399,18 +413,9 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
       const matchesStatus = receiptStatusFilter === 'All' || receiptFilterStatus(receipt) === receiptStatusFilter;
       const matchesName = !normalizedReceiptSearch || normalizeSearchText(receipt.filename).includes(normalizedReceiptSearch);
       return matchesStatus && matchesName;
-    })
-    .sort((a, b) => {
-      const issueScore = (receipt: Receipt) => (
-        receipt.upload_state === 'failed' ||
-        receipt.status === 'Failed' ||
-        Boolean(receipt.enqueue_error || receipt.error_message) ||
-        isLowResolution(receipt)
-          ? 0
-          : 1
-      );
-      return issueScore(a) - issueScore(b);
     });
+  // activeReceipts is already ordered by the voucher number detected in the
+  // extracted rows. Filtering must not put failed files ahead of that order.
   const receiptPageCount = Math.max(1, Math.ceil(filteredReceipts.length / RECEIPTS_PER_PAGE));
   const visibleReceiptPage = Math.min(receiptPage, receiptPageCount);
   const paginatedReceipts = filteredReceipts.slice(
@@ -1304,13 +1309,16 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     try {
       const transactionMap = await fetchTransactionsForBatch(activeBatch.id);
       setReceiptTransactionsMap(transactionMap);
-      const firstExtractedReceipt = activeBatch.receipts.find(r => r.status === 'Extracted');
-      if (firstExtractedReceipt) {
+      const firstReceipt = activeBatch.receipts[0];
+      if (firstReceipt) {
         onSelectBatch(
           activeBatch,
-          firstExtractedReceipt,
-          transactionMap[firstExtractedReceipt.id] || [],
-          transactionMap
+          firstReceipt,
+          transactionMap[firstReceipt.id] || [],
+          transactionMap,
+          false,
+          [],
+          0
         );
       }
     } catch (err: any) {
@@ -1375,10 +1383,34 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
           <AlertTriangle size={15} className="alert-icon" />
           <span className="alert-body">{uploadValidationError}</span>
           <button
-            className="alert-dismiss"
+            className="alert-dismiss duplicate-warning-dismiss"
             onClick={() => setUploadValidationError(null)}
             title="Dismiss"
             aria-label="Dismiss upload format warning"
+          >
+            ×
+          </button>
+        </div>
+      )}
+      {duplicateVoucherWarnings.length > 0 && !duplicateWarningDismissed && (
+        <div className="alert alert-warning alert-top text-xs" role="alert">
+          <AlertTriangle size={15} className="alert-icon" />
+          <span className="alert-body">
+            {duplicateVoucherWarnings.map(group => (
+              <span key={group.voucherNo}>
+                <span className="alert-title">Duplicate voucher detected on pages:</span>{' '}
+                {group.receipts
+                  .map(receipt => activeReceipts.findIndex(item => item.id === receipt.id) + 1)
+                  .join(', ')}. Verify before export.
+              </span>
+            ))}
+          </span>
+          <button
+            className="alert-dismiss"
+            onClick={() => setDuplicateWarningDismissed(true)}
+            title="Dismiss"
+            aria-label="Dismiss duplicate voucher warning"
+            type="button"
           >
             ×
           </button>

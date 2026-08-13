@@ -1193,6 +1193,13 @@ def read_voucher_no(parsed: dict) -> Optional[str]:
     return cleaned or None
 
 
+def normalize_narration(value: object) -> str:
+    """Remove brackets copied from the handwritten narration."""
+    if value is None:
+        return ""
+    return str(value).replace("(", "").replace(")", "").strip()
+
+
 def verify_against_stated_totals(transactions: List[dict], stated: dict) -> dict:
     """Reconcile extracted line items against the voucher's printed जम्मा totals.
 
@@ -2896,7 +2903,7 @@ def normalize_transaction_rows(
             "debit_amount": (debit or legacy) if entry_type == "Dr" else 0,
             "credit_amount": (credit or legacy) if entry_type == "Cr" else 0,
             "needs_review": t.get("needs_review") is True,
-            "narration": t.get("narration") or "",
+            "narration": normalize_narration(t.get("narration")),
             "updated_by": updated_by,
             # What the model actually said about this line, so a figure disputed
             # months later can be told apart from one a reviewer corrected. The
