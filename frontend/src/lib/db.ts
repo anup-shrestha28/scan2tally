@@ -848,12 +848,82 @@ export async function uploadReceiptImage(
 }
 
 /** The bucket is private, so viewing needs a short-lived signed URL. */
-export async function getReceiptImageUrl(path: string, expiresInSeconds = 3600): Promise<string> {
-  const { data, error } = await supabase.storage
-    .from(RECEIPTS_BUCKET)
-    .createSignedUrl(path, expiresInSeconds);
-  if (error) throw new Error(error.message);
-  return data.signedUrl;
+const receiptImageUrlCache = new Map<string, { url: string; expiresAt: number }>();
+const receiptImageUrlRequests = new Map<string, Promise<string>>();
+const RECEIPT_IMAGE_URL_STORAGE_KEY = 'scan2tally-receipt-image-urls';
+
+function readStoredReceiptImageUrl(path: string): { url: string; expiresAt: number } | null {
+  try {
+    const stored = sessionStorage.getItem(RECEIPT_IMAGE_URL_STORAGE_KEY);
+    const entry = stored ? JSON.parse(stored)[path] : null;
+    return entry?.url && entry.expiresAt > Date.now() ? entry : null;
+  } catch {
+    return null;
+  }
+}
+
+function storeReceiptImageUrl(path: string, value: { url: string; expiresAt: number }) {
+  try {
+    const stored = sessionStorage.getItem(RECEIPT_IMAGE_URL_STORAGE_KEY);
+    const entries = stored ? JSON.parse(stored) : {};
+    entries[path] = value;
+    sessionStorage.setItem(RECEIPT_IMAGE_URL_STORAGE_KEY, JSON.stringify(entries));
+  } catch {
+    // Private browsing or restricted storage should not prevent image loading.
+  }
+}
+
+export async function getReceiptImageUrl(
+  path: string,
+  expiresInSeconds = 3600,
+  forceRefresh = false,
+): Promise<string> {
+  if (forceRefresh) {
+    receiptImageUrlCache.delete(path);
+    receiptImageUrlRequests.delete(path);
+    try {
+      const stored = sessionStorage.getItem(RECEIPT_IMAGE_URL_STORAGE_KEY);
+      const entries = stored ? JSON.parse(stored) : {};
+      delete entries[path];
+      sessionStorage.setItem(RECEIPT_IMAGE_URL_STORAGE_KEY, JSON.stringify(entries));
+    } catch {
+      // Ignore storage restrictions; the network request below still works.
+    }
+  }
+  const cached = receiptImageUrlCache.get(path);
+  if (cached && cached.expiresAt > Date.now()) return cached.url;
+  const stored = readStoredReceiptImageUrl(path);
+  if (stored) {
+    receiptImageUrlCache.set(path, stored);
+    return stored.url;
+  }
+
+  const inFlight = receiptImageUrlRequests.get(path);
+  if (inFlight) return inFlight;
+
+  const request = (async () => {
+    const { data, error } = await supabase.storage
+      .from(RECEIPTS_BUCKET)
+      .createSignedUrl(path, expiresInSeconds);
+    if (error) throw new Error(error.message);
+    const cacheEntry = {
+      url: data.signedUrl,
+      // Refresh a little before expiry so an image never gets a URL that is
+      // about to stop working while the reviewer is still open.
+      expiresAt: Date.now() + Math.max(1, expiresInSeconds - 60) * 1000,
+    };
+    receiptImageUrlCache.set(path, cacheEntry);
+    storeReceiptImageUrl(path, cacheEntry);
+    return data.signedUrl;
+  })();
+  receiptImageUrlRequests.set(path, request);
+  try {
+    return await request;
+  } finally {
+    if (receiptImageUrlRequests.get(path) === request) {
+      receiptImageUrlRequests.delete(path);
+    }
+  }
 }
 
 export async function downloadReceiptImage(path: string): Promise<File | null> {
@@ -866,7 +936,7 @@ export async function downloadReceiptImage(path: string): Promise<File | null> {
 // ---------------------------------------------------------------- transactions
 
 function normalizeNarration(value: unknown): string {
-  return String(value ?? '').replace(/[()]/g, '').trim();
+  return String(value ?? '').replace(/[()\[\]{}]/g, '').trim();
 }
 
 export async function fetchTransactionsForBatch(

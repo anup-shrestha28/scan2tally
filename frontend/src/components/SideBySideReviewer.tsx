@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2, RotateCcw, RotateCw, Undo2, Redo2, ZoomIn, ChevronLeft, ChevronRight, Loader2, HelpCircle, FileSignature } from 'lucide-react';
+import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2, RotateCcw, RotateCw, ZoomIn, ChevronLeft, ChevronRight, Loader2, HelpCircle, FileSignature } from 'lucide-react';
 import { ScanBatch, Receipt, Transaction, User, Ledger } from '../types';
 import { saveTransactionsForReceipt, getReceiptImageUrl, deleteReceipt, fetchLedgers, resolveLedgerName } from '../lib/db';
 import { LEDGER_MATCHING } from '../lib/features';
@@ -154,6 +154,9 @@ export default function SideBySideReviewer({
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [saveError, setSaveError] = useState<string | null>(null);
   const [imageUrl, setImageUrl] = useState<string>('');
+  const [imageLoading, setImageLoading] = useState(false);
+  const imageRetryReceiptIdRef = useRef<string | null>(null);
+  const preloadedImagesRef = useRef<Map<string, Promise<string>>>(new Map());
   const dirtyRef = useRef(false);
   const changeVersionRef = useRef(0);
   // Transaction saves replace all rows. Serialize them so a later undo cannot
@@ -217,6 +220,36 @@ export default function SideBySideReviewer({
 
   const [currentIndex, setCurrentIndex] = useState(Math.max(0, startIndex));
   const currentReceipt = visibleReceipts[currentIndex] || null;
+  // Voucher-number edits can reorder visibleReceipts while the reviewer is
+  // open. Keep the page identity separate from its numeric position so page 2
+  // does not suddenly show another receipt with the edited receipt's fields.
+  const currentReceiptIdRef = useRef<string | null>(currentReceipt?.id || null);
+  const visibleReceiptSignature = visibleReceipts.map(receipt => receipt.id).join(',');
+
+  const preloadReceipt = (receipt: Receipt): Promise<string> => {
+    const existing = preloadedImagesRef.current.get(receipt.id);
+    if (existing) return existing;
+
+    const urlPromise = (receipt.previewUrl
+      ? Promise.resolve(receipt.previewUrl)
+      : receipt.storage_path
+        ? getReceiptImageUrl(receipt.storage_path)
+        : Promise.resolve('')
+    ).then(url => new Promise<string>((resolve, reject) => {
+      if (!url) {
+        reject(new Error('Receipt image path is missing.'));
+        return;
+      }
+      const image = new window.Image();
+      image.onload = () => resolve(url);
+      image.onerror = () => reject(new Error('Receipt image could not be loaded.'));
+      image.src = url;
+    }));
+
+    preloadedImagesRef.current.set(receipt.id, urlPromise);
+    urlPromise.catch(() => preloadedImagesRef.current.delete(receipt.id));
+    return urlPromise;
+  };
 
   // Get transactions for the currently viewed receipt
   const getTxForReceipt = (receipt: Receipt | null): Transaction[] => {
@@ -295,6 +328,7 @@ export default function SideBySideReviewer({
     if (currentReceipt) {
       setTxMap(prev => ({ ...prev, [currentReceipt.id]: transactions }));
     }
+    currentReceiptIdRef.current = visibleReceipts[nextIndex]?.id || null;
     dirtyRef.current = false;
     setCurrentIndex(nextIndex);
     setZoom(1);
@@ -352,6 +386,20 @@ export default function SideBySideReviewer({
   useEffect(() => {
     setTransactions(getTxForReceipt(visibleReceipts[currentIndex] || null));
   }, [currentIndex, deletedReceiptIds]);
+
+  // Editing a voucher number changes the sort order. Re-find the receipt by
+  // id before allowing the numeric page index to identify a different one.
+  useEffect(() => {
+    const receiptId = currentReceiptIdRef.current;
+    if (receiptId) {
+      const matchingIndex = visibleReceipts.findIndex(receipt => receipt.id === receiptId);
+      if (matchingIndex >= 0) {
+        if (matchingIndex !== currentIndex) setCurrentIndex(matchingIndex);
+        return;
+      }
+    }
+    currentReceiptIdRef.current = visibleReceipts[currentIndex]?.id || null;
+  }, [visibleReceiptSignature, currentIndex]);
 
   useEffect(() => {
     setCurrentIndex(Math.max(0, startIndex));
@@ -416,16 +464,53 @@ export default function SideBySideReviewer({
   // used as-is, and only the storage path survives a refresh.
   useEffect(() => {
     let cancelled = false;
-    if (!currentReceipt) { setImageUrl(''); return; }
-    if (currentReceipt.previewUrl) { setImageUrl(currentReceipt.previewUrl); return; }
-    if (!currentReceipt.storage_path) { setImageUrl(''); return; }
-
+    // Do not leave the previous receipt visible while the new signed URL is
+    // being resolved. The URL is keyed by receipt, so it must be cleared first.
+    setImageUrl('');
+    setImageLoading(Boolean(currentReceipt));
+    imageRetryReceiptIdRef.current = null;
+    if (!currentReceipt) return;
+    if (currentReceipt.previewUrl) {
+      setImageUrl(currentReceipt.previewUrl);
+      void preloadReceipt(currentReceipt).catch(() => undefined);
+      return;
+    }
+    if (!currentReceipt.storage_path) {
+      setImageLoading(false);
+      return;
+    }
     getReceiptImageUrl(currentReceipt.storage_path)
-      .then(url => { if (!cancelled) setImageUrl(url); })
-      .catch(() => { if (!cancelled) setImageUrl(''); });
+      .then(url => {
+        if (!cancelled) setImageUrl(url);
+        void preloadReceipt(currentReceipt).catch(() => undefined);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setImageUrl('');
+          setImageLoading(false);
+        }
+      });
 
     return () => { cancelled = true; };
   }, [currentReceipt?.id, currentReceipt?.previewUrl, currentReceipt?.storage_path]);
+
+  // Fetch and decode the adjacent page before the operator clicks it. This
+  // keeps normal next/previous navigation responsive even when signed URL
+  // creation or image download takes a moment.
+  useEffect(() => {
+    const adjacentReceipts = [
+      visibleReceipts[currentIndex - 1],
+      visibleReceipts[currentIndex + 1],
+      visibleReceipts[currentIndex + 2],
+    ].filter((receipt): receipt is Receipt => Boolean(receipt));
+    let cancelled = false;
+    adjacentReceipts.forEach(receipt => {
+      preloadReceipt(receipt).catch(() => {
+        // The visible page will show the load error if preloading fails.
+      });
+    });
+    return () => { cancelled = true; };
+  }, [currentIndex, visibleReceiptSignature]);
 
   // An empty chart of accounts is a normal state, not an error: matching simply
   // does not apply, and every row stays 'Unchecked'. With the feature off the
@@ -585,6 +670,7 @@ export default function SideBySideReviewer({
     setTransactions(after);
     if (field === 'voucher_no') {
       if (currentReceipt) {
+        currentReceiptIdRef.current = currentReceipt.id;
         setTxMap(prev => ({ ...prev, [currentReceipt.id]: after }));
       }
       void saveTransactionRows(after);
@@ -926,13 +1012,41 @@ export default function SideBySideReviewer({
             {imageUrl ? (
               <img
                 src={imageUrl}
-                alt="Uploaded Handwritten Bill Receipt"
+                alt=""
                 className="receipt-img receipt-img-rotatable"
                 style={{ transform: `rotate(${rotation}deg) scale(${zoom})` }}
+                onLoad={() => setImageLoading(false)}
+                onError={() => {
+                  // A signed URL can be stale after a same-path retry or an
+                  // object replacement. Refresh it once before showing the
+                  // empty-state message, rather than making the operator
+                  // leave and reopen the reviewer.
+                  if (currentReceipt?.storage_path && imageRetryReceiptIdRef.current !== currentReceipt.id) {
+                    const retryReceiptId = currentReceipt.id;
+                    imageRetryReceiptIdRef.current = retryReceiptId;
+                    setImageLoading(true);
+                    getReceiptImageUrl(currentReceipt.storage_path, 3600, true)
+                      .then(url => {
+                        if (imageRetryReceiptIdRef.current === retryReceiptId) {
+                          setImageUrl(url);
+                          void preloadReceipt(currentReceipt).catch(() => undefined);
+                        }
+                      })
+                      .catch(() => {
+                        if (imageRetryReceiptIdRef.current === retryReceiptId) {
+                          setImageUrl('');
+                          setImageLoading(false);
+                        }
+                      });
+                    return;
+                  }
+                  setImageUrl('');
+                  setImageLoading(false);
+                }}
                 onDoubleClick={() => setZoom(value => value > 1 ? 1 : 2)}
               />
             ) : (
-              <div className="text-muted text-center">No Receipt Image Selected</div>
+              imageLoading ? <Loader2 size={24} className="animate-spin" aria-label="Loading receipt image" /> : null
             )}
           </div>
         </div>
@@ -953,28 +1067,6 @@ export default function SideBySideReviewer({
                   {unresolvedLedgers} unresolved {unresolvedLedgers === 1 ? 'ledger' : 'ledgers'}
                 </span>
               )}
-            </div>
-            <div className="row-xs" style={{ marginLeft: 'auto' }} aria-label="Transaction history">
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm btn-icon"
-                onClick={() => applyTransactionHistory('undo')}
-                disabled={!currentReceipt || !(undoStacksRef.current[currentReceipt?.id || ''] || []).length}
-                title="Undo deleted row (Ctrl/Cmd+Z)"
-                aria-label="Undo deleted row"
-              >
-                <Undo2 size={14} />
-              </button>
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm btn-icon"
-                onClick={() => applyTransactionHistory('redo')}
-                disabled={!currentReceipt || !(redoStacksRef.current[currentReceipt?.id || ''] || []).length}
-                title="Redo deleted row (Ctrl/Cmd+Shift+Z)"
-                aria-label="Redo deleted row"
-              >
-                <Redo2 size={14} />
-              </button>
             </div>
             <span className={`balance-pill ${isBalanced ? 'balance-ok' : 'balance-warn'}`}>
               {isBalanced ? (

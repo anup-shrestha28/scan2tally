@@ -24,8 +24,8 @@ const normalizeNarration = (raw: string | undefined): string => {
   const baseStatic = 'Being Expenses paid via cheque no.';
   if (!raw) return baseStatic;
   
-  // Remove surrounding parentheses and trailing/leading dots
-  const cleaned = raw.trim().replace(/^[\(\)\.]+|[\(\)\.]+$/g, '').trim();
+  // Remove bracket characters while preserving the narration text itself.
+  const cleaned = raw.trim().replace(/[\(\)\[\]\{\}\.]+/g, '').trim();
   
   // Try to find any sequence of digits that might be the cheque number
   const chequeMatch = cleaned.match(/(?:cheque(?: no\.?)?\s*|no\.?\s*)(\d+)/i);

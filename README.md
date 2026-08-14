@@ -30,7 +30,7 @@ Store and office staff write transaction details **by hand on paper receipts**. 
 - React 18 + Vite SPA in strict TypeScript.
 - **3-tier roles**:
   - `Super Admin` — platform owner: client organizations and platform-wide figures.
-  - `Admin` — the company's books: an organisation overview, the chart of accounts, and staff accounts.
+  - `Admin` — the company's books: an organisation dashboard, the chart of accounts, and staff accounts.
   - `Operator` — data entry: batches, uploads and voucher review.
 - **Scan batch hub** with drag-and-drop upload, low-resolution warnings, and archiving.
 - **Side-by-side reviewer**: the paper voucher on the left, an editable transaction table on the

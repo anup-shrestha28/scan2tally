@@ -1194,10 +1194,10 @@ def read_voucher_no(parsed: dict) -> Optional[str]:
 
 
 def normalize_narration(value: object) -> str:
-    """Remove brackets copied from the handwritten narration."""
+    """Keep the narration text intact while stripping bracket characters."""
     if value is None:
         return ""
-    return str(value).replace("(", "").replace(")", "").strip()
+    return str(value).translate(str.maketrans('', '', '()[]{}')).strip()
 
 
 def verify_against_stated_totals(transactions: List[dict], stated: dict) -> dict:
