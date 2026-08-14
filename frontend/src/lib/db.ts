@@ -1570,17 +1570,12 @@ export async function fetchExtractedReceipts(): Promise<ExtractedReceiptsReport>
     updated_at?: string | null;
   }>;
 
-  // Only the operators actually referenced, so this does not enumerate staff
-  // who have never extracted anything.
-  const operatorIds = [...new Set(
-    rows.map(r => r.extracted_by || r.uploaded_by).filter(Boolean) as string[]
-  )];
   const names = new Map<string, string>();
-  if (operatorIds.length) {
-    const { data: people } = await supabase.from('users').select('id, name').in('id', operatorIds);
-    for (const person of people || []) {
-      if (person?.id && person?.name) names.set(person.id, person.name);
-    }
+  // Load the whole team so the overview can show users with zero extracted
+  // receipts as well as users who have done work.
+  const { data: people } = await supabase.from('users').select('id, name');
+  for (const person of people || []) {
+    if (person?.id && person?.name) names.set(person.id, person.name);
   }
 
   const batches = new Map(
@@ -1625,8 +1620,9 @@ export async function fetchExtractedReceipts(): Promise<ExtractedReceiptsReport>
   for (const record of records) {
     perOperator.set(record.operatorName, (perOperator.get(record.operatorName) || 0) + 1);
   }
-  const byOperator = [...perOperator.entries()]
-    .map(([name, receipts]) => ({ name, receipts }))
+  const byOperator = [...names.values()]
+    .map(name => ({ name, receipts: perOperator.get(name) || 0 }))
+    .concat(perOperator.has('Unknown') ? [{ name: 'Unknown', receipts: perOperator.get('Unknown') || 0 }] : [])
     .sort((a, b) => b.receipts - a.receipts || a.name.localeCompare(b.name));
 
   return {

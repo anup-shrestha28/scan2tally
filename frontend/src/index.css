@@ -1618,6 +1618,18 @@ input[type='number']::-webkit-inner-spin-button {
   background: color-mix(in srgb, var(--primary) 22%, transparent);
 }
 
+.overview-user-table-scroll {
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.overview-user-table-scroll th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-card);
+}
+
 /* One bulk upload collapsed to a single row, expandable to its receipts. */
 .upload-group-toggle {
   display: inline-flex;

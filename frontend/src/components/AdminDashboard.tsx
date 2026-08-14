@@ -13,6 +13,7 @@ import { filterBySearch } from '../lib/search';
 import SearchInput from './SearchInput';
 
 const PER_PAGE = 25;
+const USERS_PER_PAGE = 10;
 
 type PageItem = number | 'start-ellipsis' | 'end-ellipsis';
 
@@ -63,6 +64,7 @@ export default function AdminDashboard({
   const [extracted, setExtracted] = useState<ExtractedReceiptsReport | null>(null);
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
+  const [userPage, setUserPage] = useState(1);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -95,7 +97,17 @@ export default function AdminDashboard({
   const pageStart = (visiblePage - 1) * PER_PAGE;
   const paginated = filtered.slice(pageStart, pageStart + PER_PAGE);
 
+  const userCount = extracted?.byOperator.length || 0;
+  const userPageCount = Math.max(1, Math.ceil(userCount / USERS_PER_PAGE));
+  const visibleUserPage = Math.min(userPage, userPageCount);
+  const userPageStart = (visibleUserPage - 1) * USERS_PER_PAGE;
+  const paginatedUsers = extracted?.byOperator.slice(
+    userPageStart,
+    userPageStart + USERS_PER_PAGE,
+  ) || [];
+
   useEffect(() => { setPage(1); }, [search]);
+  useEffect(() => { setUserPage(1); }, [userCount]);
 
   useEffect(() => {
     let cancelled = false;
@@ -224,6 +236,72 @@ export default function AdminDashboard({
           </>
         )}
       </div>
+
+      {extracted && (
+        <div className="card">
+          <h3 className="section-title">
+            <Users size={18} color="var(--primary)" />
+            Receipts Extracted by User
+          </h3>
+          <div className={`table-container${userCount > USERS_PER_PAGE ? ' overview-user-table-scroll' : ''}`}>
+            <table className="custom-table">
+              <thead>
+                <tr><th>User</th><th>Receipts Extracted</th></tr>
+              </thead>
+              <tbody>
+                {paginatedUsers.map(person => (
+                  <tr key={person.name}>
+                    <td>{person.name}</td>
+                    <td>{person.receipts}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {userPageCount > 1 && (
+            <div className="files-pagination" aria-label="Users pagination">
+              <span className="pagination-summary">
+                Showing {userPageStart + 1}–{Math.min(userPageStart + USERS_PER_PAGE, userCount)} of {userCount} users
+              </span>
+              <div className="pagination-controls">
+                <button
+                  type="button"
+                  className="pagination-arrow"
+                  onClick={() => setUserPage(current => Math.max(1, current - 1))}
+                  disabled={visibleUserPage === 1}
+                  aria-label="Previous users page"
+                >
+                  <ChevronLeft size={15} />
+                </button>
+                {getPageItems(visibleUserPage, userPageCount).map(item => (
+                  typeof item === 'number' ? (
+                    <button
+                      type="button"
+                      key={item}
+                      className={`pagination-page${visibleUserPage === item ? ' pagination-page-active' : ''}`}
+                      onClick={() => setUserPage(item)}
+                      aria-current={visibleUserPage === item ? 'page' : undefined}
+                    >
+                      {item}
+                    </button>
+                  ) : (
+                    <span key={item} className="receipt-pagination-ellipsis" aria-hidden="true">…</span>
+                  )
+                ))}
+                <button
+                  type="button"
+                  className="pagination-arrow"
+                  onClick={() => setUserPage(current => Math.min(userPageCount, current + 1))}
+                  disabled={visibleUserPage === userPageCount}
+                  aria-label="Next users page"
+                >
+                  <ChevronRight size={15} />
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* The single most consequential thing an Admin can be told. Everything
           above is reporting; this is the one that silently corrupts a ledger. */}
