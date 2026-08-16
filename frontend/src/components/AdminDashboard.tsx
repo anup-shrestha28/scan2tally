@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Loader2, AlertCircle, FileSpreadsheet, BookOpen, Users, Layers, ArrowRight, FileCheck2,
-  ChevronLeft, ChevronRight, ChevronDown,
+  ChevronLeft, ChevronRight,
 } from 'lucide-react';
 import { User } from '../types';
 import {
@@ -14,6 +14,39 @@ import SearchInput from './SearchInput';
 
 const PER_PAGE = 25;
 const USERS_PER_PAGE = 10;
+const BATCH_SCROLL_THRESHOLD = 10;
+type RangePreset = '7' | '30' | '90' | 'all' | 'custom';
+type BatchReceiptSummary = {
+  batchName: string;
+  receipts: number;
+  latestAt: string;
+  latestAtMs: number;
+  operators: string[];
+};
+
+function formatDuration(seconds: number | null): string {
+  if (seconds === null || !Number.isFinite(seconds)) return '—';
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+}
+
+function formatDelta(value: number | null, suffix = ''): string {
+  if (value === null || !Number.isFinite(value)) return 'No prior period';
+  return `${value > 0 ? '+' : ''}${value.toFixed(value % 1 ? 1 : 0)}${suffix}`;
+}
+
+function downloadOverviewCsv(overview: OrgOverview): void {
+  const escape = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+  const header = ['Receipt ID', 'Status', 'Uploaded At', 'Extracted At', 'Extracted By'];
+  const lines = overview.receiptAnalytics.map(row => [row.id, row.status, row.uploadedAt, row.extractedAt, row.extractedBy].map(escape).join(','));
+  const blob = new Blob([[header.map(escape).join(','), ...lines].join('\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `scan2tally-overview-${new Date().toISOString().slice(0, 10)}.csv`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
 
 type PageItem = number | 'start-ellipsis' | 'end-ellipsis';
 
@@ -60,35 +93,57 @@ function Tile({ label, value, tone, note }: {
 export default function AdminDashboard({
   currentUser, onOpenWorkspace, onOpenLedgers, onOpenTeam,
 }: AdminDashboardProps) {
+  const showTechnicalOverview = currentUser.role !== 'Admin';
   const [overview, setOverview] = useState<OrgOverview | null>(null);
   const [extracted, setExtracted] = useState<ExtractedReceiptsReport | null>(null);
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [userPage, setUserPage] = useState(1);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [rangePreset, setRangePreset] = useState<RangePreset>('30');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Matches every query token against any of the visible columns, so
-  // "lily batch 11" narrows by operator and batch at once. A group also matches
-  // on the names of the receipts inside it, so searching for a single page of a
-  // PDF still finds the upload it belongs to.
-  const filtered = useMemo(() => filterBySearch(
-    extracted?.groups || [],
-    search,
-    group => [
-      group.label,
-      group.operatorName,
-      group.batchName,
-      group.extractedAt,
-      ...group.members.map(member => member.filename),
-    ],
-  ), [extracted, search]);
+  const batchSummaries = useMemo<BatchReceiptSummary[]>(() => {
+    const batches = new Map<string, BatchReceiptSummary & { operatorSet: Set<string> }>();
+    for (const record of extracted?.records || []) {
+      const existing = batches.get(record.batchName);
+      if (existing) {
+        existing.receipts += 1;
+        existing.operatorSet.add(record.operatorName);
+        if (record.extractedAtMs > existing.latestAtMs) {
+          existing.latestAtMs = record.extractedAtMs;
+          existing.latestAt = record.extractedAt;
+        }
+      } else {
+        batches.set(record.batchName, {
+          batchName: record.batchName,
+          receipts: 1,
+          latestAt: record.extractedAt,
+          latestAtMs: record.extractedAtMs,
+          operators: [],
+          operatorSet: new Set([record.operatorName]),
+        });
+      }
+    }
+    return [...batches.values()]
+      .map(({ operatorSet, ...batch }) => ({
+        ...batch,
+        operators: [...operatorSet].sort((a, b) => a.localeCompare(b)),
+      }))
+      .sort((a, b) => b.latestAtMs - a.latestAtMs || a.batchName.localeCompare(b.batchName));
+  }, [extracted]);
 
-  const filteredReceiptCount = useMemo(
-    () => filtered.reduce((sum, group) => sum + group.members.length, 0),
-    [filtered],
-  );
+  const filtered = useMemo(() => filterBySearch(
+    batchSummaries,
+    search,
+    batch => [
+      batch.batchName,
+      batch.latestAt,
+      ...batch.operators,
+    ],
+  ), [batchSummaries, search]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PER_PAGE));
   // Derived rather than stored, so deleting or filtering down to fewer pages
@@ -105,6 +160,70 @@ export default function AdminDashboard({
     userPageStart,
     userPageStart + USERS_PER_PAGE,
   ) || [];
+
+  const analytics = useMemo(() => {
+    const rows = overview?.receiptAnalytics || [];
+    const now = new Date();
+    let end = new Date(now);
+    end.setHours(23, 59, 59, 999);
+    let start = new Date(now);
+    if (rangePreset === 'custom' && customFrom) start = new Date(`${customFrom}T00:00:00`);
+    else if (rangePreset === '7' || rangePreset === '30' || rangePreset === '90') {
+      start.setDate(start.getDate() - Number(rangePreset) + 1);
+      start.setHours(0, 0, 0, 0);
+    } else {
+      const timestamps = rows.map(row => Date.parse(row.uploadedAt || '')).filter(Number.isFinite);
+      start = timestamps.length ? new Date(Math.min(...timestamps)) : new Date(now);
+      start.setHours(0, 0, 0, 0);
+    }
+    if (rangePreset === 'custom' && customTo) end = new Date(`${customTo}T23:59:59.999`);
+    if (start > end) [start, end] = [end, start];
+
+    const duration = end.getTime() - start.getTime();
+    const previousStart = new Date(start.getTime() - duration - 1);
+    const previousEnd = new Date(start.getTime() - 1);
+    const inWindow = (date: string | null, from: Date, to: Date) => {
+      const time = Date.parse(date || '');
+      return Number.isFinite(time) && time >= from.getTime() && time <= to.getTime();
+    };
+    const summarize = (from: Date, to: Date) => {
+      const extractedRows = rows.filter(row => row.status === 'Extracted' && inWindow(row.extractedAt || row.uploadedAt, from, to));
+      const failed = rows.filter(row => row.status === 'Failed' && inWindow(row.uploadedAt, from, to)).length;
+      const durations = extractedRows
+        .map(row => Date.parse(row.extractedAt || '') - Date.parse(row.uploadedAt || ''))
+        .filter(value => Number.isFinite(value) && value >= 0)
+        .map(value => value / 1000);
+      const byUser = new Map<string, number>();
+      extractedRows.forEach(row => byUser.set(row.extractedBy || 'Unknown', (byUser.get(row.extractedBy || 'Unknown') || 0) + 1));
+      return {
+        extracted: extractedRows.length,
+        failed,
+        total: extractedRows.length + failed,
+        successRate: extractedRows.length + failed ? (extractedRows.length / (extractedRows.length + failed)) * 100 : null,
+        averageSeconds: durations.length ? durations.reduce((sum, value) => sum + value, 0) / durations.length : null,
+        byUser,
+      };
+    };
+    const current = summarize(start, end);
+    const previous = rangePreset === 'all' ? null : summarize(previousStart, previousEnd);
+    const dayCount = Math.max(1, Math.ceil(duration / 86400000));
+    const bucketCount = Math.min(dayCount, 14);
+    const bucketSize = Math.max(1, Math.ceil(dayCount / bucketCount));
+    const trend = Array.from({ length: bucketCount }, (_, index) => {
+      const bucketStart = new Date(start.getTime() + index * bucketSize * 86400000);
+      const bucketEnd = new Date(Math.min(end.getTime(), bucketStart.getTime() + bucketSize * 86400000 - 1));
+      const extracted = rows.filter(row => row.status === 'Extracted' && inWindow(row.extractedAt || row.uploadedAt, bucketStart, bucketEnd)).length;
+      const failed = rows.filter(row => row.status === 'Failed' && inWindow(row.uploadedAt, bucketStart, bucketEnd)).length;
+      return { label: bucketStart.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }), extracted, failed };
+    });
+    const users = [...new Set([
+      ...current.byUser.keys(),
+      ...(previous ? previous.byUser.keys() : []),
+    ])]
+      .map(name => ({ name, current: current.byUser.get(name) || 0, previous: previous?.byUser.get(name) || 0 }))
+      .sort((a, b) => b.current - a.current || a.name.localeCompare(b.name));
+    return { current, previous, trend, users, start, end };
+  }, [overview, rangePreset, customFrom, customTo]);
 
   useEffect(() => { setPage(1); }, [search]);
   useEffect(() => { setUserPage(1); }, [userCount]);
@@ -163,7 +282,7 @@ export default function AdminDashboard({
     );
   }
 
-  const { batches, receipts, rows, ledgersUnresolved, ledgerCount, exports } = overview;
+  const { batches, receipts, rows, ledgersUnresolved, ledgerCount } = overview;
   const awaiting = receipts.Pending + receipts.Queued + receipts.Processing;
 
   return (
@@ -176,7 +295,7 @@ export default function AdminDashboard({
           </p>
         </div>
         <div className="page-actions">
-          {LEDGER_MATCHING && (
+          {LEDGER_MATCHING && showTechnicalOverview && (
             <button className="btn btn-secondary" onClick={onOpenLedgers}>
               <BookOpen size={16} /> Chart of Accounts
             </button>
@@ -205,40 +324,150 @@ export default function AdminDashboard({
           label="Awaiting Extraction"
           value={awaiting}
           tone={awaiting ? 'amber' : undefined}
-          note={receipts.Queued || receipts.Processing
-            ? `${receipts.Queued} queued · ${receipts.Processing} being read`
-            : 'nothing in progress'}
+          note={awaiting ? `${awaiting} receipt${awaiting === 1 ? '' : 's'} waiting` : 'nothing waiting'}
         />
       </div>
 
-      {/* Adapts rather than leaving holes, because the two ledger tiles are only
-          here when that feature is switched on. */}
-      <div className="grid-auto grid-auto-sm">
-        <Tile
-          label="Failed Receipts"
-          value={receipts.Failed}
-          tone={receipts.Failed ? 'rose' : undefined}
-          note={receipts.Failed ? 'these need a retry or a better photo' : 'nothing failed'}
-        />
-        {LEDGER_MATCHING && (
-          <>
-            <Tile
-              label="Ledgers In Use"
-              value={ledgerCount}
-              note={ledgerCount ? 'names checked against Tally' : 'not set up yet'}
-            />
-            <Tile
-              label="Rows Needing a Ledger"
-              value={ledgersUnresolved}
-              tone={ledgersUnresolved ? 'amber' : undefined}
-              note={ledgersUnresolved ? 'Tally would create new accounts for these' : 'all rows resolve'}
-            />
-          </>
+      {LEDGER_MATCHING && showTechnicalOverview && (
+        <div className="grid-auto grid-auto-sm">
+          <Tile
+            label="Ledgers In Use"
+            value={ledgerCount}
+            note={ledgerCount ? 'names checked against Tally' : 'not set up yet'}
+          />
+          <Tile
+            label="Rows Needing a Ledger"
+            value={ledgersUnresolved}
+            tone={ledgersUnresolved ? 'amber' : undefined}
+            note={ledgersUnresolved ? 'Tally would create new accounts for these' : 'all rows resolve'}
+          />
+        </div>
+      )}
+
+      <div className="card overview-analytics">
+        <div className="overview-analytics-header">
+          <div>
+            <h3 className="section-title">Performance Analytics</h3>
+            <p className="text-muted overview-analytics-caption">
+              {showTechnicalOverview
+                ? 'Extraction volume, quality and speed for the selected period'
+                : 'Extraction volume and quality for the selected period'}
+            </p>
+          </div>
+          <div className="overview-range-controls" aria-label="Analytics date range">
+            {(['7', '30', '90', 'all'] as RangePreset[]).map(preset => (
+              <button
+                type="button"
+                key={preset}
+                className={`overview-range-button${rangePreset === preset ? ' overview-range-button-active' : ''}`}
+                onClick={() => setRangePreset(preset)}
+              >
+                {preset === 'all' ? 'All time' : `${preset} days`}
+              </button>
+            ))}
+            <button
+              type="button"
+              className={`overview-range-button${rangePreset === 'custom' ? ' overview-range-button-active' : ''}`}
+              onClick={() => setRangePreset('custom')}
+            >Custom</button>
+          </div>
+        </div>
+        {rangePreset === 'custom' && (
+          <div className="overview-custom-range">
+            <label>From <input type="date" value={customFrom} onChange={event => setCustomFrom(event.target.value)} /></label>
+            <label>To <input type="date" value={customTo} onChange={event => setCustomTo(event.target.value)} /></label>
+          </div>
         )}
+
+        <div className="grid-auto grid-auto-sm overview-metric-grid">
+          <Tile label="Extracted" value={analytics.current.extracted} note={formatDelta(analytics.previous && analytics.current.extracted - analytics.previous.extracted, ' vs prior')} />
+          <Tile label="Success Rate" value={analytics.current.successRate === null ? '—' : `${analytics.current.successRate.toFixed(1)}%`} tone={analytics.current.successRate !== null && analytics.current.successRate < 90 ? 'amber' : 'emerald'} note={formatDelta(analytics.previous && analytics.current.successRate !== null && analytics.previous.successRate !== null ? analytics.current.successRate - analytics.previous.successRate : null, ' pp vs prior')} />
+          <Tile label="Failure Rate" value={analytics.current.total ? `${((analytics.current.failed / analytics.current.total) * 100).toFixed(1)}%` : '—'} tone={analytics.current.failed ? 'rose' : 'emerald'} note={formatDelta(analytics.previous && analytics.previous.total && analytics.current.total ? ((analytics.current.failed / analytics.current.total) - (analytics.previous.failed / analytics.previous.total)) * 100 : null, ' pp vs prior')} />
+          {showTechnicalOverview && (
+            <Tile label="Average Extraction Time" value={formatDuration(analytics.current.averageSeconds)} note={formatDuration(analytics.previous && analytics.current.averageSeconds !== null && analytics.previous.averageSeconds !== null ? analytics.current.averageSeconds - analytics.previous.averageSeconds : null) + ' vs prior'} />
+          )}
+        </div>
+
+        <div className="overview-analytics-columns">
+          <div>
+            <h4 className="overview-subheading">Receipts over time</h4>
+            <div className="overview-trend-chart" aria-label="Receipts extracted and failed over time">
+              {analytics.trend.map(bucket => {
+                const max = Math.max(1, ...analytics.trend.map(item => item.extracted + item.failed));
+                return (
+                  <div className="overview-trend-column" key={bucket.label} title={`${bucket.label}: ${bucket.extracted} extracted, ${bucket.failed} failed`}>
+                    <div className="overview-trend-bar-area">
+                      <div className="overview-trend-bar overview-trend-bar-failed" style={{ height: `${(bucket.failed / max) * 100}%` }} />
+                      <div className="overview-trend-bar overview-trend-bar-extracted" style={{ height: `${(bucket.extracted / max) * 100}%` }} />
+                    </div>
+                    <span>{bucket.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="overview-chart-legend"><span><i className="legend-dot legend-dot-extracted" />Extracted</span><span><i className="legend-dot legend-dot-failed" />Failed</span></div>
+          </div>
+          <div>
+            <h4 className="overview-subheading">Productivity by user</h4>
+            <div className="table-container overview-user-trend-table">
+              <table className="custom-table">
+                <thead><tr><th>User</th><th>Extracted</th><th>vs prior</th></tr></thead>
+                <tbody>{analytics.users.map(user => (
+                  <tr key={user.name}>
+                    <td><button type="button" className="overview-drill-link" onClick={() => { setSearch(user.name); document.getElementById('extracted-receipts')?.scrollIntoView({ behavior: 'smooth' }); }}>{user.name}</button></td>
+                    <td>{user.current}</td>
+                    <td className="text-muted">{analytics.previous ? formatDelta(user.current - user.previous) : '—'}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       </div>
+
+      {showTechnicalOverview && (
+        <div className="grid-auto grid-auto-sm">
+          <div className="card overview-health-card">
+            <div className="overview-card-heading"><h3 className="section-title">Queue Health</h3><span className={`health-badge${overview.reviewStats.stuck ? ' health-badge-alert' : ''}`}>{overview.reviewStats.stuck ? 'Attention' : 'Healthy'}</span></div>
+            <div className="overview-health-list">
+              <div><span>Queued / processing</span><strong>{receipts.Queued + receipts.Processing}</strong></div>
+              <div><span>Stuck over 10 minutes</span><strong className={overview.reviewStats.stuck ? 'tone-rose' : ''}>{overview.reviewStats.stuck}</strong></div>
+            </div>
+            <button type="button" className="btn btn-secondary overview-drill-button" onClick={() => document.getElementById('extracted-receipts')?.scrollIntoView({ behavior: 'smooth' })}>View receipt details <ArrowRight size={14} /></button>
+          </div>
+          <div className="card overview-health-card">
+            <div className="overview-card-heading"><h3 className="section-title">Review Workload</h3><span className="health-badge">Manual checks</span></div>
+            <div className="overview-health-list">
+              <div><span>Receipts needing review</span><strong>{overview.reviewStats.receipts}</strong></div>
+              <div><span>Verification warnings</span><strong>{overview.reviewStats.warnings}</strong></div>
+              <div><span>Signatures detected</span><strong>{overview.reviewStats.signatures}</strong></div>
+            </div>
+          </div>
+          <div className="card overview-health-card">
+            <div className="overview-card-heading"><h3 className="section-title">Export Activity</h3><span className="health-badge">All time</span></div>
+            <div className="overview-health-list">
+              <div><span>Spreadsheets generated</span><strong>{overview.exportStats.count}</strong></div>
+              <div><span>Rows exported</span><strong>{overview.exportStats.rows}</strong></div>
+              <div><span>Latest export</span><strong className="overview-small-value">{overview.exportStats.latestAt ? new Date(overview.exportStats.latestAt).toLocaleDateString() : 'None'}</strong></div>
+            </div>
+            <button type="button" className="btn btn-secondary overview-drill-button" onClick={() => downloadOverviewCsv(overview)}>Download receipt CSV <FileSpreadsheet size={14} /></button>
+          </div>
+        </div>
+      )}
+
+      {showTechnicalOverview && (analytics.current.failed / Math.max(1, analytics.current.total) > 0.1 || overview.reviewStats.stuck > 0 || overview.ledgersUnresolved > 0) && (
+        <div className="card overview-alerts-card">
+          <h3 className="section-title"><AlertCircle size={18} className="tone-amber" /> Admin Alerts</h3>
+          <div className="overview-alert-list">
+            {analytics.current.failed / Math.max(1, analytics.current.total) > 0.1 && <button type="button" onClick={() => document.getElementById('extracted-receipts')?.scrollIntoView({ behavior: 'smooth' })}>Failure rate is above 10% for the selected period.</button>}
+            {overview.reviewStats.stuck > 0 && <button type="button" onClick={() => document.getElementById('extracted-receipts')?.scrollIntoView({ behavior: 'smooth' })}>{overview.reviewStats.stuck} receipt{overview.reviewStats.stuck === 1 ? '' : 's'} may be stuck in the extraction queue.</button>}
+            {overview.ledgersUnresolved > 0 && <button type="button" onClick={onOpenLedgers}>{overview.ledgersUnresolved} transaction rows need ledger review.</button>}
+          </div>
+        </div>
+      )}
 
       {extracted && (
-        <div className="card">
+        <div className="card" id="extracted-receipts">
           <h3 className="section-title">
             <Users size={18} color="var(--primary)" />
             Receipts Extracted by User
@@ -303,9 +532,8 @@ export default function AdminDashboard({
         </div>
       )}
 
-      {/* The single most consequential thing an Admin can be told. Everything
-          above is reporting; this is the one that silently corrupts a ledger. */}
-      {LEDGER_MATCHING && !ledgerCount && (
+      {/* Technical accounting diagnostics stay out of the simplified Admin view. */}
+      {LEDGER_MATCHING && showTechnicalOverview && !ledgerCount && (
         <div className="card notice-card">
           <div className="row row-top fill" style={{ gap: '10px', minWidth: '280px' }}>
             <AlertCircle size={18} className="alert-icon tone-amber" style={{ marginTop: '2px' }} />
@@ -326,38 +554,8 @@ export default function AdminDashboard({
         </div>
       )}
 
-      <div className="card">
-        <h3 className="section-title">
-          <FileSpreadsheet size={18} color="var(--primary)" />
-          Recent Tally Exports
-        </h3>
-        {!exports.length ? (
-          <p className="text-muted" style={{ fontSize: '0.85rem' }}>
-            No spreadsheets have been generated yet.
-          </p>
-        ) : (
-          <div className="table-container">
-            <table className="custom-table">
-              <thead>
-                <tr><th>File</th><th>Rows</th><th>By</th><th>When</th></tr>
-              </thead>
-              <tbody>
-                {exports.map(record => (
-                  <tr key={record.id}>
-                    <td style={{ fontWeight: 500 }}>{record.file_name}</td>
-                    <td>{record.record_count}</td>
-                    <td className="text-muted">{record.generated_by_name || '—'}</td>
-                    <td className="text-muted text-xs">{record.created_at}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* Who extracted what, and where it lives. Row-level security scopes every
-          row here to this Admin's own organisation. */}
+      {/* Batch-level extraction totals. Row-level security scopes every row here
+          to this Admin's own organisation. */}
       {extracted && (
         <div className="card">
           <h3 className="section-title">
@@ -373,9 +571,9 @@ export default function AdminDashboard({
             </p>
           ) : (
             <>
-              {/* Per-operator totals, counted in receipts rather than in the
-                  collapsed upload rows above. Each one filters the table
-                  instead of only reporting, so the number is a way in. */}
+              {/* Per-operator totals filter the batch summary below, so an Admin
+                  can see which batches a user contributed to without reading
+                  every receipt row. */}
               {extracted.byOperator.length > 1 && (
                 <div className="operator-chips" aria-label="Receipts extracted per operator">
                   {extracted.byOperator.map(person => {
@@ -402,90 +600,43 @@ export default function AdminDashboard({
                 <SearchInput
                   value={search}
                   onChange={setSearch}
-                  ariaLabel="Search extracted receipts"
-                  placeholder="Search by file, operator or batch…"
+                  ariaLabel="Search extracted batches"
+                  placeholder="Search by batch or user…"
                   className="search-input-wide"
                 />
               </div>
 
               {!filtered.length ? (
                 <p className="text-muted" style={{ fontSize: '0.85rem' }}>
-                  No extracted receipts match “{search}”.
+                  No extracted batches match “{search}”.
                 </p>
               ) : (
                 <>
-                  <div className="table-container">
+                  <div className={`table-container${filtered.length > BATCH_SCROLL_THRESHOLD ? ' overview-batch-table-scroll' : ''}`}>
                     <table className="custom-table">
                       <thead>
                         <tr>
                           <th style={{ width: '56px' }}>#</th>
-                          <th>Receipt</th>
-                          <th>Extracted By</th>
-                          <th>Batch</th>
-                          <th>When</th>
+                          <th>Batch Name</th>
+                          <th>Total Receipts</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {paginated.map((group, index) => {
-                          const isGroup = group.members.length > 1;
-                          const isOpen = expanded.has(group.key);
-                          return (
-                            <React.Fragment key={group.key}>
-                              <tr>
-                                {/* Numbered across the whole result set, not per
-                                    page, so a row's number does not change as
-                                    the reader pages through. */}
-                                <td className="text-muted">{pageStart + index + 1}</td>
-                                <td style={{ fontWeight: 500 }}>
-                                  {isGroup ? (
-                                    <button
-                                      type="button"
-                                      className="upload-group-toggle"
-                                      onClick={() => setExpanded(previous => {
-                                        const next = new Set(previous);
-                                        if (next.has(group.key)) next.delete(group.key);
-                                        else next.add(group.key);
-                                        return next;
-                                      })}
-                                      aria-expanded={isOpen}
-                                    >
-                                      {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                                      <span>{group.label}</span>
-                                      <span className="upload-group-count">
-                                        {group.members.length} receipts
-                                      </span>
-                                    </button>
-                                  ) : group.label}
-                                </td>
-                                <td>{group.operatorName}</td>
-                                <td className="text-muted">{group.batchName}</td>
-                                <td className="text-muted text-xs">{group.extractedAt}</td>
-                              </tr>
-                              {isGroup && isOpen && group.members.map(member => (
-                                <tr key={member.id} className="upload-group-member">
-                                  <td />
-                                  <td className="text-muted">{member.filename}</td>
-                                  <td />
-                                  <td />
-                                  <td className="text-muted text-xs">{member.extractedAt}</td>
-                                </tr>
-                              ))}
-                            </React.Fragment>
-                          );
-                        })}
+                        {paginated.map((batch, index) => (
+                          <tr key={batch.batchName}>
+                            <td className="text-muted">{pageStart + index + 1}</td>
+                            <td style={{ fontWeight: 500 }}>{batch.batchName}</td>
+                            <td>{batch.receipts}</td>
+                          </tr>
+                        ))}
                       </tbody>
                     </table>
                   </div>
 
                   {pageCount > 1 && (
-                    <div className="files-pagination" aria-label="Extracted receipt pages">
-                      {/* Counted in uploads, because that is what a row is
-                          here; the receipt total is named separately rather
-                          than left to look like the same number. */}
+                    <div className="files-pagination" aria-label="Extracted batch pages">
                       <span className="pagination-summary">
-                        Showing {pageStart + 1}–{Math.min(pageStart + PER_PAGE, filtered.length)} of {filtered.length} uploads
-                        {' · '}{filteredReceiptCount} {filteredReceiptCount === 1 ? 'receipt' : 'receipts'}
-                        {filteredReceiptCount !== extracted.total && ` of ${extracted.total}`}
+                        Showing {pageStart + 1}–{Math.min(pageStart + PER_PAGE, filtered.length)} of {filtered.length} batches
                       </span>
                       <div className="pagination-controls">
                         <button

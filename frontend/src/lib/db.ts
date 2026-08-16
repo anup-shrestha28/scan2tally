@@ -1310,6 +1310,16 @@ export interface OrgOverview {
   ledgersUnresolved: number;
   ledgerCount: number;
   exports: ExportRecord[];
+  exportStats: { count: number; rows: number; latestAt: string | null };
+  reviewStats: { receipts: number; warnings: number; signatures: number; stuck: number };
+  /** Raw receipt lifecycle facts used by the Overview analytics. */
+  receiptAnalytics: {
+    id: string;
+    status: ReceiptStatus;
+    uploadedAt: string | null;
+    extractedAt: string | null;
+    extractedBy: string | null;
+  }[];
 }
 
 /**
@@ -1320,9 +1330,11 @@ export interface OrgOverview {
  * one company's volume the cost of counting is irrelevant.
  */
 export async function fetchOrgOverview(): Promise<OrgOverview> {
+  const includeExtraction = await areExtractionColumnsAvailable();
+  const includeSignature = await isSignatureColumnAvailable();
   const fetchOverviewReceipts = async () => {
     const query = (includeQueue: boolean) => supabase.from('receipts')
-      .select(`id, status${includeQueue ? `, ${RECEIPT_QUEUE_COLUMNS}` : ''}`);
+      .select(`id, status, uploaded_by, created_at, verification_warnings${includeExtraction ? ', extracted_by, extracted_at' : ''}${includeSignature ? ', has_signature' : ''}${includeQueue ? `, ${RECEIPT_QUEUE_COLUMNS}` : ''}`);
     const includeQueue = receiptQueueColumnsAvailable !== false;
     let result = await query(includeQueue);
     if (includeQueue && result.error && queueColumnsMissing(result.error)) {
@@ -1338,10 +1350,10 @@ export async function fetchOrgOverview(): Promise<OrgOverview> {
     supabase.from('scan_batches').select('id, status'),
     fetchOverviewReceipts(),
     LEDGER_MATCHING
-      ? supabase.from('transactions').select('id, ledger_match')
-      : supabase.from('transactions').select('id'),
+      ? supabase.from('transactions').select('id, receipt_id, ledger_match, needs_review')
+      : supabase.from('transactions').select('id, receipt_id, needs_review'),
     supabase.from('exports').select('id, file_name, record_count, created_at, generated_by')
-      .order('created_at', { ascending: false }).limit(10),
+      .order('created_at', { ascending: false }),
     supabase.from('users').select('id, name'),
   ]);
 
@@ -1363,8 +1375,16 @@ export async function fetchOrgOverview(): Promise<OrgOverview> {
   const receipts: Record<ReceiptDisplayStatus, number> =
     { Pending: 0, Queued: 0, Processing: 0, Extracted: 0, Failed: 0 };
   const receiptRows = (receiptRes.data || []) as unknown as Array<{
+    id: string;
     status: ReceiptStatus;
+    uploaded_by?: string | null;
+    created_at?: string | null;
+    extracted_by?: string | null;
+    extracted_at?: string | null;
     extraction_queue_message_id?: number | null;
+    extraction_queued_at?: string | null;
+    verification_warnings?: unknown;
+    has_signature?: boolean | null;
   }>;
   for (const r of receiptRows) {
     const displayStatus: ReceiptDisplayStatus = r.status === 'Pending' && r.extraction_queue_message_id != null
@@ -1379,6 +1399,21 @@ export async function fetchOrgOverview(): Promise<OrgOverview> {
         t => t.ledger_match === 'Unmatched' || t.ledger_match === 'Suggested'
       ).length
     : 0;
+
+  const reviewReceiptIds = new Set((txRes.data || [])
+    .filter((row: any) => row.needs_review && row.receipt_id)
+    .map((row: any) => row.receipt_id));
+  const reviewStats = {
+    receipts: reviewReceiptIds.size,
+    warnings: receiptRows.filter(row => Array.isArray(row.verification_warnings) && row.verification_warnings.length > 0).length,
+    signatures: receiptRows.filter(row => row.has_signature === true).length,
+    stuck: receiptRows.filter(row => {
+      const displayStatus = row.status === 'Pending' && row.extraction_queue_message_id != null ? 'Queued' : row.status;
+      const queuedAt = Date.parse(row.extraction_queued_at || row.created_at || '');
+      return (displayStatus === 'Queued' || displayStatus === 'Processing')
+        && Number.isFinite(queuedAt) && Date.now() - queuedAt > 10 * 60 * 1000;
+    }).length,
+  };
 
   const names = new Map((userRes.data || []).map((u: any) => [u.id, u.name]));
 
@@ -1396,7 +1431,20 @@ export async function fetchOrgOverview(): Promise<OrgOverview> {
     rows,
     ledgersUnresolved,
     ledgerCount: ledgerRes.count ?? 0,
-    exports,
+    exports: exports.slice(0, 10),
+    exportStats: {
+      count: exportRes.data?.length || 0,
+      rows: (exportRes.data || []).reduce((sum: number, record: any) => sum + (Number(record.record_count) || 0), 0),
+      latestAt: exportRes.data?.[0]?.created_at || null,
+    },
+    reviewStats,
+    receiptAnalytics: receiptRows.map(r => ({
+      id: r.id,
+      status: r.status,
+      uploadedAt: r.created_at || null,
+      extractedAt: includeExtraction ? (r.extracted_at || null) : null,
+      extractedBy: (r.extracted_by || r.uploaded_by) ? names.get(r.extracted_by || r.uploaded_by || '') || 'Unknown' : 'Unknown',
+    })),
   };
 }
 
