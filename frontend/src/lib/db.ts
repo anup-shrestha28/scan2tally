@@ -1464,6 +1464,7 @@ async function areExtractionColumnsAvailable(): Promise<boolean> {
 export interface ExtractedReceiptRecord {
   id: string;
   filename: string;
+  batchId: string;
   batchName: string;
   operatorName: string;
   extractedAt: string;
@@ -1490,6 +1491,7 @@ export interface ExtractedReceiptGroup {
   /** "newJourna.pdf", or the filename itself when the upload was a single file. */
   label: string;
   operatorName: string;
+  batchId: string;
   batchName: string;
   /** Newest receipt in the group; what the group sorts and displays by. */
   extractedAt: string;
@@ -1513,6 +1515,7 @@ function groupExtractedReceipts(records: ExtractedReceiptRecord[]): ExtractedRec
       key,
       label,
       operatorName: record.operatorName,
+      batchId: record.batchId,
       batchName: record.batchName,
       extractedAt: record.extractedAt,
       extractedAtMs: record.extractedAtMs,
@@ -1644,6 +1647,7 @@ export async function fetchExtractedReceipts(): Promise<ExtractedReceiptsReport>
     return {
       id: r.id,
       filename: r.filename,
+      batchId: r.batch_id,
       batchName: batch?.name || 'Unknown batch',
       operatorName: (operatorId && names.get(operatorId)) || 'Unknown',
       extractedAt: Number.isNaN(extractedAtMs) ? '—' : new Date(extractedAtMs).toLocaleString(),

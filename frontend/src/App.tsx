@@ -24,6 +24,7 @@ type AppView = 'batches' | 'reviewer' | 'exporter' | 'users' | 'overview' | 'led
 const APP_VIEW_STORAGE_KEY = 'scan2tally-current-view';
 const APP_STATE_STORAGE_KEY = 'scan2tally-current-state';
 const THEME_STORAGE_KEY = 'scan2tally-theme';
+const ACTIVE_BATCH_STORAGE_KEY = 'scan2tally-active-batch';
 const CAPACITY_SEVERITY: Record<CapacityAlert['level'], number> = {
   healthy: 0,
   warning: 1,
@@ -312,6 +313,13 @@ export default function App() {
     setCurrentView('reviewer');
   };
 
+  const handleOpenBatchById = (batchId: string) => {
+    // BatchWorkspace reads this key on mount to restore the last-viewed batch.
+    // Writing it here before navigating causes it to open on the chosen batch.
+    sessionStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, batchId);
+    setCurrentView('batches');
+  };
+
   const handleExportExcel = (transactions: Transaction[]) => {
     setActiveTransactions(transactions);
     setCurrentView('exporter');
@@ -441,6 +449,7 @@ export default function App() {
             onOpenWorkspace={() => setCurrentView('batches')}
             onOpenLedgers={() => setCurrentView('ledgers')}
             onOpenTeam={() => setCurrentView('users')}
+            onSelectBatch={handleOpenBatchById}
           />
         ) : currentView === 'batches' ? (
           <BatchWorkspace

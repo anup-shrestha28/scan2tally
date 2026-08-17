@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Loader2, AlertCircle, FileSpreadsheet, BookOpen, Users, Layers, ArrowRight, FileCheck2,
-  ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight, ChevronDown,
 } from 'lucide-react';
 import { User } from '../types';
 import {
@@ -17,6 +17,7 @@ const USERS_PER_PAGE = 10;
 const BATCH_SCROLL_THRESHOLD = 10;
 type RangePreset = '7' | '30' | '90' | 'all' | 'custom';
 type BatchReceiptSummary = {
+  batchId: string;
   batchName: string;
   receipts: number;
   latestAt: string;
@@ -73,6 +74,7 @@ interface AdminDashboardProps {
   onOpenWorkspace: () => void;
   onOpenLedgers: () => void;
   onOpenTeam: () => void;
+  onSelectBatch?: (batchId: string) => void;
 }
 
 /** Tones are named rather than hex, so the palette lives in one place. */
@@ -91,7 +93,7 @@ function Tile({ label, value, tone, note }: {
 }
 
 export default function AdminDashboard({
-  currentUser, onOpenWorkspace, onOpenLedgers, onOpenTeam,
+  currentUser, onOpenWorkspace, onOpenLedgers, onOpenTeam, onSelectBatch,
 }: AdminDashboardProps) {
   const showTechnicalOverview = currentUser.role !== 'Admin';
   const [overview, setOverview] = useState<OrgOverview | null>(null);
@@ -99,6 +101,7 @@ export default function AdminDashboard({
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [userPage, setUserPage] = useState(1);
+  const [expandedBatches, setExpandedBatches] = useState<Set<string>>(new Set());
   const [rangePreset, setRangePreset] = useState<RangePreset>('30');
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
@@ -118,6 +121,7 @@ export default function AdminDashboard({
         }
       } else {
         batches.set(record.batchName, {
+          batchId: record.batchId,
           batchName: record.batchName,
           receipts: 1,
           latestAt: record.extractedAt,
@@ -622,13 +626,81 @@ export default function AdminDashboard({
                         </tr>
                       </thead>
                       <tbody>
-                        {paginated.map((batch, index) => (
-                          <tr key={batch.batchName}>
-                            <td className="text-muted">{pageStart + index + 1}</td>
-                            <td style={{ fontWeight: 500 }}>{batch.batchName}</td>
-                            <td>{batch.receipts}</td>
-                          </tr>
-                        ))}
+                        {paginated.map((batch, index) => {
+                          const isExpanded = expandedBatches.has(batch.batchName);
+                          const batchReceipts = extracted.records
+                            .filter(r => r.batchName === batch.batchName)
+                            .sort((a, b) => b.extractedAtMs - a.extractedAtMs);
+
+                          return (
+                            <React.Fragment key={batch.batchName}>
+                              <tr
+                                onClick={() => {
+                                  setExpandedBatches(prev => {
+                                    const next = new Set(prev);
+                                    if (next.has(batch.batchName)) next.delete(batch.batchName);
+                                    else next.add(batch.batchName);
+                                    return next;
+                                  });
+                                }}
+                                style={{ cursor: 'pointer' }}
+                              >
+                                <td className="text-muted" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                  {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                                  {pageStart + index + 1}
+                                </td>
+                                <td style={{ fontWeight: 500 }}>
+                                  {onSelectBatch ? (
+                                    <button
+                                      type="button"
+                                      className="overview-drill-link"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        onSelectBatch(batch.batchId);
+                                      }}
+                                    >
+                                      {batch.batchName}
+                                    </button>
+                                  ) : (
+                                    batch.batchName
+                                  )}
+                                </td>
+                                <td>{batch.receipts}</td>
+                              </tr>
+                              {isExpanded && (
+                                <tr className="expanded-row">
+                                  <td colSpan={3} style={{ padding: 0 }}>
+                                    <div style={{ padding: '16px', backgroundColor: 'var(--bg-dark)', borderBottom: '1px solid var(--border-color)' }}>
+                                      <h4 style={{ margin: '0 0 12px 0', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                                        Receipts in {batch.batchName}
+                                      </h4>
+                                      <div className="table-container" style={{ maxHeight: '300px', overflowY: 'auto', backgroundColor: 'var(--bg-card)', border: '1px solid var(--border-color)', borderRadius: '6px' }}>
+                                        <table className="custom-table" style={{ margin: 0 }}>
+                                          <thead style={{ position: 'sticky', top: 0, zIndex: 1, backgroundColor: 'var(--bg-table-header)' }}>
+                                            <tr>
+                                              <th>Filename</th>
+                                              <th>Extracted At</th>
+                                              <th>Operator</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody>
+                                            {batchReceipts.map(receipt => (
+                                              <tr key={receipt.id}>
+                                                <td>{receipt.filename}</td>
+                                                <td>{receipt.extractedAt}</td>
+                                                <td>{receipt.operatorName}</td>
+                                              </tr>
+                                            ))}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+                            </React.Fragment>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>

@@ -1175,9 +1175,9 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
   };
 
   const handleDeleteSelectedReceipts = async () => {
-    if (!activeBatch || isArchived || isProcessing) return;
+    if (!activeBatch || isArchived) return;
     const ids = filteredReceipts
-      .filter(receipt => selectedReceiptIds.has(receipt.id) && !uploadIsBusy(receipt) && receipt.status !== 'Processing')
+      .filter(receipt => selectedReceiptIds.has(receipt.id) && !uploadIsBusy(receipt) && receipt.status !== 'Processing' && receipt.status !== 'Extracting')
       .map(receipt => receipt.id);
     if (!ids.length) return;
     setPendingDeleteReceiptIds(ids);
@@ -1841,7 +1841,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                     type="button"
                     className="btn btn-danger btn-sm files-delete-selected"
                     onClick={handleDeleteSelectedReceipts}
-                    disabled={isArchived || isProcessing}
+                    disabled={isArchived}
                   >
                     <Trash2 size={14} /> Delete ({selectedReceiptIds.size})
                   </button>
@@ -1888,7 +1888,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                           <input
                             type="checkbox"
                             checked={filteredReceipts.length > 0 && filteredReceipts.every(receipt => selectedReceiptIds.has(receipt.id))}
-                            disabled={isArchived || isProcessing || !filteredReceipts.length}
+                            disabled={isArchived || !filteredReceipts.length}
                             onChange={event => setSelectedReceiptIds(previous => {
                               const next = new Set(previous);
                               filteredReceipts.forEach(receipt => event.target.checked ? next.add(receipt.id) : next.delete(receipt.id));
@@ -1917,7 +1917,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                             <input
                               type="checkbox"
                               checked={selectedReceiptIds.has(rcpt.id)}
-                              disabled={isArchived || isProcessing || uploadIsBusy(rcpt) || rcpt.status === 'Processing'}
+                              disabled={isArchived || uploadIsBusy(rcpt) || rcpt.status === 'Processing' || rcpt.status === 'Extracting'}
                               onChange={event => setSelectedReceiptIds(previous => {
                                 const next = new Set(previous);
                                 if (event.target.checked) next.add(rcpt.id);
@@ -2006,7 +2006,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                                 className="btn btn-danger btn-sm"
                                 onClick={() => handleDeleteReceipt(rcpt.id)}
                                 title="Delete Receipt"
-                                disabled={isProcessing || uploadIsBusy(rcpt)}
+                                disabled={uploadIsBusy(rcpt) || rcpt.status === 'Extracting'}
                               >
                                 <Trash2 size={14} />
                               </button>
