@@ -90,6 +90,7 @@ export default function App() {
   const [allReceiptTransactions, setAllReceiptTransactions] = useState<Record<string, Transaction[]>>(savedState.receiptTransactions || {});
   const [reviewOnlyImbalanced, setReviewOnlyImbalanced] = useState(false);
   const [focusedImbalancedReceiptIds, setFocusedImbalancedReceiptIds] = useState<string[]>([]);
+  const [showParticularsOnExport, setShowParticularsOnExport] = useState(false);
   const [isDark, setIsDark] = useState<boolean>(() => {
     try {
       return localStorage.getItem(THEME_STORAGE_KEY) !== 'light';
@@ -322,6 +323,14 @@ export default function App() {
 
   const handleExportExcel = (transactions: Transaction[]) => {
     setActiveTransactions(transactions);
+    setShowParticularsOnExport(false);
+    setCurrentView('exporter');
+  };
+
+  const handleViewParticularTotals = (batch: ScanBatch, transactions: Transaction[]) => {
+    setActiveBatch(batch);
+    setActiveTransactions(transactions);
+    setShowParticularsOnExport(true);
     setCurrentView('exporter');
   };
 
@@ -455,6 +464,7 @@ export default function App() {
           <BatchWorkspace
             currentUser={currentUser}
             onSelectBatch={handleSelectBatch}
+            onViewParticularTotals={handleViewParticularTotals}
           />
         ) : currentView === 'reviewer' ? (
           <SideBySideReviewer
@@ -477,6 +487,8 @@ export default function App() {
             currentUser={currentUser}
             onBack={() => setCurrentView('reviewer')}
             onFixImbalanced={handleFixImbalanced}
+            initialShowParticularTotals={showParticularsOnExport}
+            onBackFromParticulars={showParticularsOnExport ? () => setCurrentView('batches') : undefined}
           />
         )}
       </main>

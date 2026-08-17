@@ -846,6 +846,8 @@ number immediately after the Nepali label "भौचर नं." / "भौचर
 This is NOT the date, a ledger amount, cheque number, or page number. Copy only the digits
 written beside that label. If it is genuinely absent or unreadable, return an empty string.
 
+CRITICAL RULE FOR PENCIL: DO NOT extract any text, numbers, or markings written in PENCIL (faint grey graphite). You MUST completely ignore pencil markings as if they do not exist. ONLY transcribe data written in ink (blue/black pen). If a cell contains ONLY pencil, treat it as EMPTY.
+
 Ignore the bottom row labelled जम्मा entirely. It is a total, not a transaction; do not report it.
 
 Return ONLY a JSON object in this shape:
@@ -895,6 +897,8 @@ distinct from the printed ledger entries and amounts — anywhere on it (commonl
 near the bottom, beside a preparer/approver name, or in a dedicated signature box)?
 Answer true only if you can see an actual signature-like mark, not merely a
 printed name or a blank line.
+
+CRITICAL RULE FOR PENCIL: DO NOT consider any text, numbers, or markings written in PENCIL (faint grey graphite). You MUST completely ignore pencil markings as if they do not exist. ONLY consider data written in ink (blue/black pen).
 
 Return ONLY a JSON object of this shape:
     {"voucher_no": "19", "stated_total_debit": 14408.35, "stated_total_credit": 14408.35, "has_signature": true}

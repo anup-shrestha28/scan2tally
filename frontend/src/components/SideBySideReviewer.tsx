@@ -38,10 +38,12 @@ function saveReceiptRotation(receiptId: string, rotation: number): void {
 }
 
 function getReceiptPageItems(currentPage: number, pageCount: number): ReceiptPageItem[] {
-  if (pageCount <= 6) return Array.from({ length: pageCount }, (_, index) => index + 1);
-  if (currentPage <= 4) return [1, 2, 3, 4, 5, 6, 7, 'end-ellipsis', pageCount];
-  if (currentPage >= pageCount - 4) return [1, 'start-ellipsis', pageCount - 6, pageCount - 5, pageCount - 4, pageCount - 3, pageCount - 2, pageCount - 1, pageCount];
-  return [1, 'start-ellipsis', currentPage - 1, currentPage, currentPage + 1, currentPage + 2, currentPage + 3, 'end-ellipsis', pageCount];
+  if (pageCount <= 7) return Array.from({ length: pageCount }, (_, index) => index + 1);
+  if (currentPage <= 4) return [1, 2, 3, 4, 5, 'end-ellipsis', pageCount];
+  if (currentPage >= pageCount - 3) {
+    return [1, 'start-ellipsis', pageCount - 4, pageCount - 3, pageCount - 2, pageCount - 1, pageCount];
+  }
+  return [1, 'start-ellipsis', currentPage - 1, currentPage, currentPage + 1, 'end-ellipsis', pageCount];
 }
 
 interface SideBySideReviewerProps {
@@ -776,19 +778,14 @@ export default function SideBySideReviewer({
     const all = exportReceipts.flatMap(r => (saved[r.id] || []).map(t => ({ ...t, receipt_id: r.id })));
     const exportData = all.length > 0 ? all : transactions.map(t => ({ ...t, receipt_id: currentReceipt?.id }));
 
-    // Check for imbalance across all receipts being exported
+    // Check for imbalance using the same source of truth as imbalancedReceiptIds,
+    // so the dialog only fires when there is a real imbalance the user can fix.
     let hasImbalance = false;
-    const grouped = exportData.reduce((acc, t) => {
-      const key = t.receipt_id || 'default';
-      if (!acc[key]) acc[key] = [];
-      acc[key].push(t);
-      return acc;
-    }, {} as Record<string, Transaction[]>);
-
-    for (const group of Object.values(grouped)) {
-      const dr = group.reduce((sum, t) => sum + (Number(t.debit_amount) || 0), 0);
-      const cr = group.reduce((sum, t) => sum + (Number(t.credit_amount) || 0), 0);
-      if (Math.abs(dr - cr) > 0.05) {
+    for (const r of exportReceipts) {
+      const rows = r.id === currentReceipt?.id ? transactions : rowsForReceipt(r.id);
+      const dr = rows.reduce((sum, t) => sum + (Number(t.debit_amount) || 0), 0);
+      const cr = rows.reduce((sum, t) => sum + (Number(t.credit_amount) || 0), 0);
+      if (rows.length > 0 && Math.abs(dr - cr) > 0.005) {
         hasImbalance = true;
         break;
       }
@@ -825,7 +822,7 @@ export default function SideBySideReviewer({
     const rows = receipt.id === currentReceipt?.id ? transactions : rowsForReceipt(receipt.id);
     const debit = rows.reduce((sum, row) => sum + (Number(row.debit_amount) || 0), 0);
     const credit = rows.reduce((sum, row) => sum + (Number(row.credit_amount) || 0), 0);
-    return rows.length > 0 && Math.abs(debit - credit) >= 0.05;
+    return rows.length > 0 && Math.abs(debit - credit) > 0.005;
   }).map(receipt => receipt.id);
 
   const focusFirstImbalancedReceipt = () => {

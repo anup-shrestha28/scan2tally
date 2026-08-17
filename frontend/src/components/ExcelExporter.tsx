@@ -12,6 +12,8 @@ interface ExcelExporterProps {
   receiptNames?: Record<string, string>;
   onBack: () => void;
   onFixImbalanced: (receiptIds: string[]) => void;
+  initialShowParticularTotals?: boolean;
+  onBackFromParticulars?: () => void;
 }
 
 interface ParticularTotal {
@@ -21,25 +23,8 @@ interface ParticularTotal {
 }
 
 const normalizeNarration = (raw: string | undefined): string => {
-  const baseStatic = 'Being Expenses paid via cheque no.';
-  if (!raw) return baseStatic;
-  
-  // Remove bracket characters while preserving the narration text itself.
-  const cleaned = raw.trim().replace(/[\(\)\[\]\{\}\.]+/g, '').trim();
-  
-  // Try to find any sequence of digits that might be the cheque number
-  const chequeMatch = cleaned.match(/(?:cheque(?: no\.?)?\s*|no\.?\s*)(\d+)/i);
-  
-  if (chequeMatch) {
-    const chequeNo = chequeMatch[1];
-    return `${baseStatic} ${chequeNo}`;
-  }
-  
-  // If no digits found but the text includes words like cheque/expenses,
-  // or even if it's completely different, the user wants the static prefix.
-  // We'll just return the static prefix, perhaps appending any non-standard text if it looks completely different,
-  // but based on the prompt, it seems they just want it strictly static + cheque number if any.
-  return baseStatic;
+  if (!raw || !raw.trim()) return 'Being Expenses paid via cheque no.';
+  return raw.trim();
 };
 
 // Format number with Indian-style commas and 2 decimal places
@@ -51,11 +36,11 @@ const formatAmt = (n: number | undefined | null): string => {
 const safeFilePart = (value: string): string =>
   value.trim().replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').replace(/[. ]+$/g, '');
 
-export default function ExcelExporter({ transactions, receiptNames = {}, batch, currentUser, onBack, onFixImbalanced }: ExcelExporterProps) {
+export default function ExcelExporter({ transactions, receiptNames = {}, batch, currentUser, onBack, onFixImbalanced, initialShowParticularTotals = false, onBackFromParticulars }: ExcelExporterProps) {
   const [downloading, setDownloading] = useState(false);
   const [recordError, setRecordError] = useState<string | null>(null);
   const [showImbalanceWarning, setShowImbalanceWarning] = useState(false);
-  const [showParticularTotals, setShowParticularTotals] = useState(false);
+  const [showParticularTotals, setShowParticularTotals] = useState(initialShowParticularTotals);
   const [downloadingParticularTotals, setDownloadingParticularTotals] = useState(false);
 
   // Group transactions by receipt_id so we can format each receipt as a separate voucher block
@@ -78,13 +63,28 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
     transactions.forEach(transaction => {
       const name = (transaction.ledger_name || transaction.debit_ledger || transaction.credit_ledger || '').trim();
       if (!name) return;
-      const key = name.replace(/\s+/g, ' ').toLocaleLowerCase();
+      const key = name.replace(/[^a-zA-Z0-9]/g, '').toLocaleLowerCase().replace(/s$/, '');
       const current = totals.get(key) || { name, debit: 0, credit: 0 };
       current.debit += Number(transaction.debit_amount) || 0;
       current.credit += Number(transaction.credit_amount) || 0;
       totals.set(key, current);
     });
-    return [...totals.values()]
+
+    // Merge all "Utility - *" entries into a single "Utility" row
+    const UTILITY_KEY = '__utility__';
+    const merged = new Map<string, ParticularTotal>();
+    totals.forEach((total, key) => {
+      if (total.name.trim().toLowerCase().startsWith('utility')) {
+        const existing = merged.get(UTILITY_KEY) || { name: 'Utility', debit: 0, credit: 0 };
+        existing.debit += total.debit;
+        existing.credit += total.credit;
+        merged.set(UTILITY_KEY, existing);
+      } else {
+        merged.set(key, total);
+      }
+    });
+
+    return [...merged.values()]
       .map(total => ({
         ...total,
         debit: Math.round(total.debit * 100) / 100,
@@ -340,15 +340,15 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
       <div className="export-page">
       <div className="row row-between row-wrap" style={{ marginBottom: '20px' }}>
           <div className="row row-wrap">
-            <button className="back-link" onClick={() => setShowParticularTotals(false)}>
+            <button className="back-link" onClick={onBackFromParticulars ?? (() => setShowParticularTotals(false))}>
               <ArrowLeft size={16} />
-              Back to Excel Preview
+              {onBackFromParticulars ? 'Back to Batches' : 'Back to Excel Preview'}
             </button>
           </div>
           <button className="btn btn-primary export-download-btn" onClick={downloadParticularTotalsExcel} disabled={downloadingParticularTotals}>
             {downloadingParticularTotals
               ? <><Loader2 size={17} className="animate-spin" /> Preparing...</>
-              : <><Download size={17} /> Download Excel</>}
+              : <><Download size={17} /> Download Particular Totals (.xlsx)</>}
           </button>
         </div>
         <div className="card">
@@ -409,15 +409,20 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
             Review & Edit
           </button>
         </div>
-        <button
-          className="btn btn-primary export-download-btn"
-          onClick={handleDownloadClick}
-          disabled={downloading}
-        >
-          {downloading
-            ? <><Loader2 size={18} className="animate-spin" /> Preparing...</>
-            : <><Download size={18} /> Download Excel (.xlsx)</>}
-        </button>
+        <div className="row row-wrap" style={{ gap: '10px' }}>
+          <button className="btn btn-teal" onClick={() => setShowParticularTotals(true)}>
+            <BarChart3 size={17} /> Show Particular Totals
+          </button>
+          <button
+            className="btn btn-primary export-download-btn"
+            onClick={handleDownloadClick}
+            disabled={downloading}
+          >
+            {downloading
+              ? <><Loader2 size={18} className="animate-spin" /> Preparing...</>
+              : <><Download size={18} /> Download Excel (.xlsx)</>}
+          </button>
+        </div>
       </div>
 
       {/* Not a blocker. The accountant may know perfectly well that these are
@@ -470,11 +475,7 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
           </div>
         </div>
 
-        <div className="row row-end" style={{ marginBottom: '16px' }}>
-          <button className="btn btn-secondary" onClick={() => setShowParticularTotals(true)}>
-            <BarChart3 size={17} /> Show Particular Totals
-          </button>
-        </div>
+
 
         <div className="table-container export-preview">
           {groups.map((groupTxs, index) => {

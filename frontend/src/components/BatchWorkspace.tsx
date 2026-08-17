@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, Download, Eye, EyeOff, LockKeyhole, ZoomIn, MoreHorizontal, ChevronLeft, ChevronRight, Search } from 'lucide-react';
+import { FolderPlus, FolderOpen, UploadCloud, Play, FileText, CheckCircle2, Clock, Edit2, Trash2, Camera, Loader2, AlertCircle, AlertTriangle, RotateCw, RotateCcw, Archive, ArchiveRestore, FileSpreadsheet, Download, Eye, EyeOff, LockKeyhole, ZoomIn, MoreHorizontal, ChevronLeft, ChevronRight, Search, BarChart3 } from 'lucide-react';
 import { ScanBatch, Receipt, ReceiptDisplayStatus, User, Transaction } from '../types';
 import SearchInput from './SearchInput';
 import StatusFilter from './StatusFilter';
@@ -106,6 +106,8 @@ function receiptFilterStatus(receipt: Receipt): ReceiptFilterStatus {
   if (receipt.upload_state === 'failed') return 'Failed';
   return receiptDisplayStatus(receipt);
 }
+
+
 
 function ReceiptStatusBadge({ receipt }: { receipt: Receipt }) {
   const displayStatus = receiptDisplayStatus(receipt);
@@ -263,9 +265,10 @@ interface BatchWorkspaceProps {
     focusReceiptIds?: string[],
     initialReceiptIndex?: number,
   ) => void;
+  onViewParticularTotals?: (batch: ScanBatch, transactions: Transaction[]) => void;
 }
 
-export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWorkspaceProps) {
+export default function BatchWorkspace({ currentUser, onSelectBatch, onViewParticularTotals }: BatchWorkspaceProps) {
   const [batches, setBatches] = useState<ScanBatch[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -1328,6 +1331,25 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
     }
   };
 
+  const handleViewParticularTotals = async () => {
+    if (!activeBatch || openingReview) return;
+    if (!allReceiptsExtracted) {
+      setSaveError('Particular Totals become available after every file in this batch has finished extraction.');
+      return;
+    }
+    setOpeningReview(true);
+    try {
+      const transactionMap = await fetchTransactionsForBatch(activeBatch.id);
+      setReceiptTransactionsMap(transactionMap);
+      const allTx = Object.values(transactionMap).flat();
+      onViewParticularTotals?.(activeBatch, allTx);
+    } catch (err: any) {
+      setSaveError(err?.message || 'Could not load the extracted data.');
+    } finally {
+      setOpeningReview(false);
+    }
+  };
+
   const handleDownloadExport = async (record: ExportRecord) => {
     if (!record.file_path) {
       setSaveError('This older export has no stored file. Use Review & Edit to generate a new downloadable copy.');
@@ -1763,6 +1785,20 @@ export default function BatchWorkspace({ currentUser, onSelectBatch }: BatchWork
                 </>
               )}
               </button>
+              {allReceiptsExtracted && onViewParticularTotals && (
+                <button
+                  type="button"
+                  className="btn btn-icon btn-icon-teal"
+                  onClick={handleViewParticularTotals}
+                  disabled={openingReview}
+                  title="View Particular Totals for this batch"
+                  aria-label="View Particular Totals for this batch"
+                >
+                  {openingReview
+                    ? <Loader2 size={22} className="animate-spin" />
+                    : <BarChart3 size={22} />}
+                </button>
+              )}
               {allReceiptsExtracted && exportHistory[0]?.file_path && (
                 <button
                   type="button"
