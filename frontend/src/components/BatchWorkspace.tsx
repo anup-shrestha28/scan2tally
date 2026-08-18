@@ -1180,7 +1180,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch, onViewParti
   const handleDeleteSelectedReceipts = async () => {
     if (!activeBatch || isArchived) return;
     const ids = filteredReceipts
-      .filter(receipt => selectedReceiptIds.has(receipt.id) && !uploadIsBusy(receipt) && receipt.status !== 'Processing' && receipt.status !== 'Extracting')
+      .filter(receipt => selectedReceiptIds.has(receipt.id) && !uploadIsBusy(receipt) && receipt.status !== 'Processing')
       .map(receipt => receipt.id);
     if (!ids.length) return;
     setPendingDeleteReceiptIds(ids);
@@ -1953,7 +1953,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch, onViewParti
                             <input
                               type="checkbox"
                               checked={selectedReceiptIds.has(rcpt.id)}
-                              disabled={isArchived || uploadIsBusy(rcpt) || rcpt.status === 'Processing' || rcpt.status === 'Extracting'}
+                              disabled={isArchived || uploadIsBusy(rcpt) || rcpt.status === 'Processing'}
                               onChange={event => setSelectedReceiptIds(previous => {
                                 const next = new Set(previous);
                                 if (event.target.checked) next.add(rcpt.id);
@@ -2042,7 +2042,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch, onViewParti
                                 className="btn btn-danger btn-sm"
                                 onClick={() => handleDeleteReceipt(rcpt.id)}
                                 title="Delete Receipt"
-                                disabled={uploadIsBusy(rcpt) || rcpt.status === 'Extracting'}
+                                disabled={uploadIsBusy(rcpt)}
                               >
                                 <Trash2 size={14} />
                               </button>
