@@ -160,6 +160,12 @@ function ReceiptStatusBadge({ receipt }: { receipt: Receipt }) {
   );
 }
 
+// How many extraction requests may be in flight at once when a batch is
+// started. These only hand work to the server's queue — the extraction itself
+// is paced by the backend — so this is sized to keep the queue fed without
+// opening a connection per file in a large batch.
+const ENQUEUE_CONCURRENCY = 6;
+
 function uploadIsBusy(receipt: Receipt): boolean {
   return receipt.upload_state === 'waiting' || receipt.upload_state === 'uploading';
 }
@@ -1254,11 +1260,31 @@ export default function BatchWorkspace({ currentUser, onSelectBatch, onViewParti
     autoOpenRef.current = { batchId, receiptIds: targets.map(r => r.id) };
     setStartingExtraction(true);
     try {
-      // Enqueue requests are handed off in receipt order. One rejection is
-      // contained by beginExtraction and cannot prevent later receipts.
-      for (const receipt of targets) {
-        await beginExtraction(batchId, receipt);
-      }
+      // Enqueue requests overlap rather than going out one after another.
+      //
+      // Each one is an HTTP round trip to the backend, which itself makes
+      // several Supabase calls, so it costs a second or two. Awaiting them in
+      // sequence meant a six-file batch spent over half a minute merely being
+      // accepted — the receipts appeared to sit there doing nothing, and the
+      // extraction worker had no queued work to get on with for most of it.
+      //
+      // Still dispatched oldest-first, and still capped: a fifty-file batch
+      // should not open fifty simultaneous connections. One rejection stays
+      // contained inside beginExtraction and cannot prevent the others.
+      const pending = [...targets];
+      const enqueueNext = async (): Promise<void> => {
+        for (;;) {
+          const receipt = pending.shift();
+          if (!receipt) return;
+          await beginExtraction(batchId, receipt);
+        }
+      };
+      await Promise.all(
+        Array.from(
+          { length: Math.min(ENQUEUE_CONCURRENCY, pending.length) },
+          enqueueNext
+        )
+      );
     } finally {
       setStartingExtraction(false);
     }

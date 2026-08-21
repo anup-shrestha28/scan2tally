@@ -681,6 +681,24 @@ WORKER_RESTART_MAX_DELAY_SECONDS = 60.0
 # delay again, so an outage hours ago does not leave the worker slow to recover.
 WORKER_HEALTHY_RUN_SECONDS = 300.0
 
+# Whether this process consumes the extraction queue at all.
+#
+# The queue is global: every backend pointed at the same Supabase project — a
+# laptop and a deployed instance included — competes for the same singleton
+# lease, and whichever polls first does the work. That is correct for
+# reliability and confusing for development, because a receipt started from a
+# local browser is frequently extracted by the deployed instance instead, so the
+# local terminal shows the request being accepted and then nothing at all.
+#
+# Setting this to false leaves this process serving HTTP and enqueueing normally
+# while another one does the extracting. It is deliberately loud: a deployment
+# that sets it by accident has stopped extracting for everybody, so it is
+# announced at startup and reported by /api/health.
+EXTRACTION_WORKER_ENABLED = (
+    (os.getenv("EXTRACTION_WORKER_ENABLED") or "true").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+
 # What the health endpoint reports, and the only place the supervisor's view of
 # each worker is recorded.
 _worker_state: dict = {}
@@ -756,29 +774,45 @@ async def lifespan(app: FastAPI):
 
     # Supervised rather than fired and forgotten. Passed as callables, because a
     # restart needs a fresh coroutine — an already-awaited one cannot be re-run.
-    extraction_factory = (
-        consume_extraction_queue
-        if extraction_queue_ready is True
-        else run_legacy_extraction_maintenance
-        if extraction_queue_ready is False
-        else wait_for_extraction_queue_schema
-    )
-    extraction_worker = asyncio.create_task(
-        _supervise("extraction-worker", extraction_factory)
-    )
+    extraction_worker = None
+    if EXTRACTION_WORKER_ENABLED:
+        extraction_factory = (
+            consume_extraction_queue
+            if extraction_queue_ready is True
+            else run_legacy_extraction_maintenance
+            if extraction_queue_ready is False
+            else wait_for_extraction_queue_schema
+        )
+        extraction_worker = asyncio.create_task(
+            _supervise("extraction-worker", extraction_factory)
+        )
+    else:
+        # Recorded directly rather than through the supervisor, which would
+        # report a worker that returned immediately as having "finished
+        # normally" — true, and thoroughly misleading. Announced on every start:
+        # the failure mode of setting this by accident is that nothing anywhere
+        # extracts while the service still looks healthy.
+        _worker_state["extraction-worker"] = {"status": "disabled", "restarts": 0}
+        log(
+            "🚫 EXTRACTION_WORKER_ENABLED=false — this process will accept and "
+            "queue receipts but will NOT extract any. Another backend on the "
+            "same Supabase project must be running the worker."
+        )
     capacity_alert_publisher = asyncio.create_task(
         _supervise("capacity-alerts", publish_capacity_alerts)
     )
     try:
         yield
     finally:
-        extraction_worker.cancel()
-        capacity_alert_publisher.cancel()
-        await asyncio.gather(
-            extraction_worker,
-            capacity_alert_publisher,
-            return_exceptions=True,
-        )
+        # extraction_worker is None when the worker is switched off, so the
+        # shutdown path must not assume there is a task to cancel.
+        running = [
+            task for task in (extraction_worker, capacity_alert_publisher)
+            if task is not None
+        ]
+        for task in running:
+            task.cancel()
+        await asyncio.gather(*running, return_exceptions=True)
 
 
 app = FastAPI(
