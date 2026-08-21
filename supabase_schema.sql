@@ -789,10 +789,14 @@ CREATE INDEX IF NOT EXISTS idx_receipts_extraction_queued_at
     ON public.receipts(extraction_queued_at, id)
     WHERE extraction_queue_message_id IS NOT NULL;
 
--- There is deliberately one row and one slot.  Increasing the number of rows
--- would change the platform-wide concurrency contract.
+-- One row per receipt that may be extracted at the same time.  Capacity is a
+-- property of this table: a worker that cannot take a free row is told there is
+-- none and goes back to polling, so nothing outside the database can exceed it.
+-- Migration 017 raised it from the single row migration 007 created; change it
+-- with set_extraction_slot_count() rather than by hand, which refuses to remove
+-- a slot that is mid-extraction.
 CREATE TABLE IF NOT EXISTS public.extraction_worker_slot (
-    slot_id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (slot_id = 1),
+    slot_id SMALLINT PRIMARY KEY CHECK (slot_id >= 1 AND slot_id <= 16),
     worker_id TEXT,
     lease_token UUID,
     lease_expires_at TIMESTAMPTZ,
@@ -818,6 +822,16 @@ CREATE TABLE IF NOT EXISTS public.extraction_worker_slot (
 
 -- Rebuild the constraint as well as creating it, so rerunning this migration
 -- also repairs an interrupted/older draft without leaving a weaker invariant.
+-- Rebuilt rather than only created, so re-running this file over a database
+-- still carrying migration 007's "there is exactly one slot" check replaces it.
+ALTER TABLE public.extraction_worker_slot
+    DROP CONSTRAINT IF EXISTS extraction_worker_slot_slot_id_check;
+ALTER TABLE public.extraction_worker_slot
+    ADD CONSTRAINT extraction_worker_slot_slot_id_check
+    CHECK (slot_id >= 1 AND slot_id <= 16);
+ALTER TABLE public.extraction_worker_slot
+    ALTER COLUMN slot_id DROP DEFAULT;
+
 ALTER TABLE public.extraction_worker_slot
     DROP CONSTRAINT IF EXISTS extraction_worker_slot_all_or_none;
 ALTER TABLE public.extraction_worker_slot
@@ -837,8 +851,11 @@ ALTER TABLE public.extraction_worker_slot
          AND receipt_id IS NOT NULL)
     );
 
+-- Three to begin with, matching migration 017.  Raise or lower it with
+-- set_extraction_slot_count(); the backend's EXTRACTION_QUEUE_WORKERS decides
+-- how many of them one process will actually try to use.
 INSERT INTO public.extraction_worker_slot (slot_id)
-VALUES (1)
+SELECT generate_series(1, 3)
 ON CONFLICT (slot_id) DO NOTHING;
 
 ALTER TABLE public.extraction_worker_slot ENABLE ROW LEVEL SECURITY;
@@ -922,6 +939,137 @@ REVOKE ALL ON FUNCTION public.guard_queued_receipt_file_path()
     FROM PUBLIC, anon, authenticated;
 
 -- A cheap feature probe for backend startup and diagnostics.
+CREATE OR REPLACE FUNCTION public.set_extraction_slot_count(p_slots INTEGER)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+    still_busy INTEGER;
+    total INTEGER;
+BEGIN
+    IF p_slots < 1 OR p_slots > 16 THEN
+        RAISE EXCEPTION 'Extraction slots must be between 1 and 16'
+            USING ERRCODE = '22023';
+    END IF;
+
+    INSERT INTO public.extraction_worker_slot (slot_id)
+    SELECT generate_series(1, p_slots)
+    ON CONFLICT (slot_id) DO NOTHING;
+
+    -- Only idle slots are removable. A busy one is holding a fencing token that
+    -- its worker will present on completion; deleting it would turn a finished
+    -- extraction into a discarded one.
+    DELETE FROM public.extraction_worker_slot AS s
+    WHERE s.slot_id > p_slots
+      AND s.worker_id IS NULL;
+
+    SELECT count(*) FILTER (WHERE slot_id > p_slots), count(*)
+    INTO still_busy, total
+    FROM public.extraction_worker_slot;
+
+    RETURN jsonb_build_object(
+        'requested', p_slots,
+        'in_effect', total,
+        'awaiting_release', still_busy
+    );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.release_extraction_slot(p_lease_token UUID)
+RETURNS VOID
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+    UPDATE public.extraction_worker_slot AS s
+    SET worker_id = NULL,
+        lease_token = NULL,
+        lease_expires_at = NULL,
+        heartbeat_at = NULL,
+        queue_message_id = NULL,
+        receipt_id = NULL
+    WHERE s.lease_token = p_lease_token;
+$$;
+
+CREATE OR REPLACE FUNCTION public.reclaim_stale_receipt_extraction(
+    p_stale_after_seconds INTEGER DEFAULT 120
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pgmq
+AS $$
+DECLARE
+    stale_slot public.extraction_worker_slot%ROWTYPE;
+    queue_message RECORD;
+    silent_for NUMERIC;
+BEGIN
+    -- The floor must stay well above the heartbeat interval, or a worker that is
+    -- merely busy between beats would have its voucher taken away mid-read.
+    IF p_stale_after_seconds < 60 OR p_stale_after_seconds > 86400 THEN
+        RAISE EXCEPTION 'Stale threshold must be between 60 and 86400 seconds'
+            USING ERRCODE = '22023';
+    END IF;
+
+    SELECT s.*
+    INTO stale_slot
+    FROM public.extraction_worker_slot AS s
+    WHERE s.worker_id IS NOT NULL
+      AND s.heartbeat_at <= clock_timestamp()
+                            - make_interval(secs => p_stale_after_seconds)
+    ORDER BY s.heartbeat_at
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1;
+
+    -- Nothing stale: the ordinary case, and by far the most common.
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+
+    silent_for := EXTRACT(EPOCH FROM (clock_timestamp() - stale_slot.heartbeat_at));
+
+    -- Hand the message straight back to the queue. Without this it stays
+    -- invisible for the remainder of its visibility timeout even once the slot
+    -- is free, which is what made recovery take the full window.
+    SELECT message.*
+    INTO queue_message
+    FROM pgmq.set_vt('receipt_extraction', stale_slot.queue_message_id, 0) AS message;
+
+    -- A message that no longer exists means the previous worker's terminal write
+    -- committed and only the slot release was lost. Releasing the slot is then
+    -- the whole repair, so this is not an error.
+    IF NOT FOUND THEN
+        RAISE NOTICE 'Extraction queue message % no longer exists; releasing its slot only',
+            stale_slot.queue_message_id;
+    END IF;
+
+    -- Back to Pending so the receipt reads as waiting rather than as being
+    -- worked on by a process that is gone. Guarded on the dead worker's own
+    -- lease token so a receipt already re-claimed by someone else is untouched.
+    UPDATE public.receipts AS r
+    SET status = 'Pending',
+        extraction_worker = NULL,
+        extraction_claimed_at = NULL,
+        extraction_lease_token = NULL
+    WHERE r.id = stale_slot.receipt_id
+      AND r.extraction_queue_message_id = stale_slot.queue_message_id
+      AND r.extraction_lease_token = stale_slot.lease_token
+      AND r.status = 'Processing';
+
+    PERFORM public.release_extraction_slot(stale_slot.lease_token);
+
+    RETURN jsonb_build_object(
+        'worker_id', stale_slot.worker_id,
+        'receipt_id', stale_slot.receipt_id,
+        'queue_message_id', stale_slot.queue_message_id,
+        'slot_id', stale_slot.slot_id,
+        'silent_for_seconds', ROUND(silent_for)
+    );
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION public.extraction_queue_health()
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -930,17 +1078,22 @@ SET search_path = pg_catalog, public, pgmq
 AS $$
 DECLARE
     queue_depth BIGINT := 0;
-    current_slot public.extraction_worker_slot%ROWTYPE;
+    slot_total INTEGER := 0;
+    slot_busy INTEGER := 0;
+    active_receipts UUID[];
+    next_expiry TIMESTAMPTZ;
     prerequisites_ready BOOLEAN := FALSE;
 BEGIN
     SELECT COALESCE(metrics.queue_length, 0)
     INTO queue_depth
     FROM pgmq.metrics('receipt_extraction') AS metrics;
 
-    SELECT *
-    INTO current_slot
-    FROM public.extraction_worker_slot
-    WHERE slot_id = 1;
+    SELECT count(*),
+           count(*) FILTER (WHERE s.worker_id IS NOT NULL),
+           COALESCE(array_agg(s.receipt_id) FILTER (WHERE s.receipt_id IS NOT NULL), '{}'),
+           min(s.lease_expires_at)
+    INTO slot_total, slot_busy, active_receipts, next_expiry
+    FROM public.extraction_worker_slot AS s;
 
     SELECT to_regtype('public.ledger_match') IS NOT NULL
        AND NOT EXISTS (
@@ -969,11 +1122,16 @@ BEGIN
     INTO prerequisites_ready;
 
     RETURN jsonb_build_object(
-        'ready', prerequisites_ready AND COALESCE(current_slot.slot_id = 1, FALSE),
+        'ready', prerequisites_ready AND slot_total > 0,
         'queue_name', 'receipt_extraction',
         'queue_length', COALESCE(queue_depth, 0),
-        'active_receipt_id', current_slot.receipt_id,
-        'lease_expires_at', current_slot.lease_expires_at
+        'slot_capacity', slot_total,
+        'slots_busy', slot_busy,
+        'active_receipt_ids', to_jsonb(active_receipts),
+        -- Kept for readers written against the single-slot shape: the first
+        -- active receipt, and the soonest lease to expire.
+        'active_receipt_id', active_receipts[1],
+        'lease_expires_at', next_expiry
     );
 END;
 $$;
@@ -1131,7 +1289,8 @@ SECURITY DEFINER
 SET search_path = pg_catalog, public, pgmq
 AS $$
 DECLARE
-    current_slot public.extraction_worker_slot%ROWTYPE;
+    target_slot_id SMALLINT;
+    expired_slot public.extraction_worker_slot%ROWTYPE;
     queue_message RECORD;
     target_receipt public.receipts%ROWTYPE;
     target_receipt_id UUID;
@@ -1152,29 +1311,47 @@ BEGIN
         RAISE EXCEPTION 'Max attempts must be between 1 and 100' USING ERRCODE = '22023';
     END IF;
 
-    SELECT s.*
-    INTO current_slot
+    -- SKIP LOCKED, not a plain FOR UPDATE: with one slot, blocking was the
+    -- mechanism that serialised claimers, but with several it would make a
+    -- worker wait behind another worker's slot selection for no reason. Skipping
+    -- a row someone else is already looking at is what keeps them off each
+    -- other's toes while still guaranteeing no slot is handed out twice.
+    SELECT s.slot_id
+    INTO target_slot_id
     FROM public.extraction_worker_slot AS s
-    WHERE s.slot_id = 1
-    FOR UPDATE;
+    WHERE s.worker_id IS NULL
+    ORDER BY s.slot_id
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1;
 
-    -- A live owner means platform capacity is exactly one and already occupied.
-    IF current_slot.worker_id IS NOT NULL
-       AND current_slot.lease_expires_at > clock_timestamp() THEN
-        RETURN;
-    END IF;
+    IF target_slot_id IS NULL THEN
+        -- Every slot is held. One may belong to a worker that died: take over
+        -- the longest-expired lease so a crash costs one lease window rather
+        -- than permanently reducing capacity.
+        SELECT s.*
+        INTO expired_slot
+        FROM public.extraction_worker_slot AS s
+        WHERE s.worker_id IS NOT NULL
+          AND s.lease_expires_at <= clock_timestamp()
+        ORDER BY s.lease_expires_at
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1;
 
-    -- Fence an expired owner immediately.  The message becomes readable again
-    -- at its PGMQ visibility timeout and will receive a fresh token on reclaim.
-    IF current_slot.worker_id IS NOT NULL THEN
+        -- Genuinely at capacity: every slot is held by a live worker.
+        IF NOT FOUND THEN
+            RETURN;
+        END IF;
+
+        -- Fence the dead owner. Guarded on its own lease token, so a receipt
+        -- that has since been picked up by somebody else is left alone.
         UPDATE public.receipts AS r
         SET status = 'Pending',
             extraction_worker = NULL,
             extraction_claimed_at = NULL,
             extraction_lease_token = NULL
-        WHERE r.id = current_slot.receipt_id
-          AND r.extraction_queue_message_id = current_slot.queue_message_id
-          AND r.extraction_lease_token = current_slot.lease_token
+        WHERE r.id = expired_slot.receipt_id
+          AND r.extraction_queue_message_id = expired_slot.queue_message_id
+          AND r.extraction_lease_token = expired_slot.lease_token
           AND r.status = 'Processing';
 
         UPDATE public.extraction_worker_slot AS s
@@ -1184,7 +1361,9 @@ BEGIN
             heartbeat_at = NULL,
             queue_message_id = NULL,
             receipt_id = NULL
-        WHERE s.slot_id = 1;
+        WHERE s.slot_id = expired_slot.slot_id;
+
+        target_slot_id := expired_slot.slot_id;
     END IF;
 
     LOOP
@@ -1195,11 +1374,15 @@ BEGIN
             RETURN;
         END IF;
 
+        -- pgmq.read takes its own FOR UPDATE SKIP LOCKED and sets the message
+        -- invisible for p_visibility_seconds, so concurrent claimers are handed
+        -- different messages. That is what makes the loop safe to run in
+        -- parallel now that the slot no longer serialises it.
         SELECT message.*
         INTO queue_message
         FROM pgmq.read('receipt_extraction', p_visibility_seconds, 1) AS message;
 
-        -- No work: leave the singleton slot free immediately.
+        -- No work: leave the slot free immediately.
         IF NOT FOUND THEN
             RETURN;
         END IF;
@@ -1323,7 +1506,7 @@ BEGIN
             heartbeat_at = clock_timestamp(),
             queue_message_id = queue_message.msg_id,
             receipt_id = target_receipt.id
-        WHERE s.slot_id = 1;
+        WHERE s.slot_id = target_slot_id;
 
         UPDATE public.receipts AS r
         SET status = 'Processing',
@@ -1375,8 +1558,7 @@ BEGIN
     UPDATE public.extraction_worker_slot AS s
     SET lease_expires_at = clock_timestamp() + make_interval(secs => p_visibility_seconds),
         heartbeat_at = clock_timestamp()
-    WHERE s.slot_id = 1
-      AND s.worker_id = p_worker_id
+    WHERE s.worker_id = p_worker_id
       AND s.lease_token = p_lease_token
       AND s.queue_message_id = p_queue_message_id
       AND s.lease_expires_at > clock_timestamp();
@@ -1448,10 +1630,15 @@ BEGIN
         RAISE EXCEPTION 'Verification warnings must be a JSON array' USING ERRCODE = '22023';
     END IF;
 
+    -- By lease token, not by slot: the token is unique per claim, so it names
+    -- exactly one slot without this function needing to know which. A token
+    -- that matches nothing leaves current_slot all-NULL, and the guard below
+    -- then refuses the write — which is the correct answer for a result whose
+    -- lease was already released or taken over.
     SELECT s.*
     INTO current_slot
     FROM public.extraction_worker_slot AS s
-    WHERE s.slot_id = 1
+    WHERE s.lease_token = p_lease_token
     FOR UPDATE;
 
     IF current_slot.worker_id IS DISTINCT FROM p_worker_id
@@ -1566,14 +1753,7 @@ BEGIN
         RAISE EXCEPTION 'Could not delete completed extraction message %', p_queue_message_id;
     END IF;
 
-    UPDATE public.extraction_worker_slot AS s
-    SET worker_id = NULL,
-        lease_token = NULL,
-        lease_expires_at = NULL,
-        heartbeat_at = NULL,
-        queue_message_id = NULL,
-        receipt_id = NULL
-    WHERE s.slot_id = 1;
+    PERFORM public.release_extraction_slot(p_lease_token);
 
     RETURN TRUE;
 END;
@@ -1600,10 +1780,15 @@ DECLARE
     affected_rows INTEGER;
     removed BOOLEAN;
 BEGIN
+    -- By lease token, not by slot: the token is unique per claim, so it names
+    -- exactly one slot without this function needing to know which. A token
+    -- that matches nothing leaves current_slot all-NULL, and the guard below
+    -- then refuses the write — which is the correct answer for a result whose
+    -- lease was already released or taken over.
     SELECT s.*
     INTO current_slot
     FROM public.extraction_worker_slot AS s
-    WHERE s.slot_id = 1
+    WHERE s.lease_token = p_lease_token
     FOR UPDATE;
 
     IF current_slot.worker_id IS DISTINCT FROM p_worker_id
@@ -1644,14 +1829,7 @@ BEGIN
         RAISE EXCEPTION 'Could not delete failed extraction message %', p_queue_message_id;
     END IF;
 
-    UPDATE public.extraction_worker_slot AS s
-    SET worker_id = NULL,
-        lease_token = NULL,
-        lease_expires_at = NULL,
-        heartbeat_at = NULL,
-        queue_message_id = NULL,
-        receipt_id = NULL
-    WHERE s.slot_id = 1;
+    PERFORM public.release_extraction_slot(p_lease_token);
 
     RETURN TRUE;
 END;
@@ -1667,16 +1845,31 @@ REVOKE ALL ON FUNCTION public.claim_next_receipt_extraction(TEXT, INTEGER, INTEG
     FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.heartbeat_receipt_extraction(TEXT, UUID, BIGINT, INTEGER)
     FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.complete_receipt_extraction(TEXT, UUID, BIGINT, UUID, JSONB, JSONB, JSONB)
+-- Nine arguments, matching the CREATE above: p_has_signature and p_extracted_by
+-- arrived with migrations 013 and 014. Naming the old seven-argument signature
+-- here made this file impossible to run from scratch — the REVOKE failed
+-- because no such function existed, and the GRANT below then never reached the
+-- function that did, leaving service_role unable to complete an extraction on a
+-- freshly built database.
+REVOKE ALL ON FUNCTION public.complete_receipt_extraction(TEXT, UUID, BIGINT, UUID, JSONB, JSONB, JSONB, BOOLEAN, UUID)
     FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.fail_receipt_extraction(TEXT, UUID, BIGINT, UUID, TEXT, JSONB)
     FROM PUBLIC, anon, authenticated;
 
+REVOKE ALL ON FUNCTION public.set_extraction_slot_count(INTEGER)
+    FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.release_extraction_slot(UUID)
+    FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.set_extraction_slot_count(INTEGER) TO service_role;
+GRANT EXECUTE ON FUNCTION public.release_extraction_slot(UUID) TO service_role;
+REVOKE ALL ON FUNCTION public.reclaim_stale_receipt_extraction(INTEGER)
+    FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.reclaim_stale_receipt_extraction(INTEGER) TO service_role;
 GRANT EXECUTE ON FUNCTION public.extraction_queue_health() TO service_role;
 GRANT EXECUTE ON FUNCTION public.enqueue_receipt_extraction(UUID, UUID) TO service_role;
 GRANT EXECUTE ON FUNCTION public.claim_next_receipt_extraction(TEXT, INTEGER, INTEGER) TO service_role;
 GRANT EXECUTE ON FUNCTION public.heartbeat_receipt_extraction(TEXT, UUID, BIGINT, INTEGER) TO service_role;
-GRANT EXECUTE ON FUNCTION public.complete_receipt_extraction(TEXT, UUID, BIGINT, UUID, JSONB, JSONB, JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.complete_receipt_extraction(TEXT, UUID, BIGINT, UUID, JSONB, JSONB, JSONB, BOOLEAN, UUID) TO service_role;
 GRANT EXECUTE ON FUNCTION public.fail_receipt_extraction(TEXT, UUID, BIGINT, UUID, TEXT, JSONB) TO service_role;
 
 -- Move work stranded by the pre-queue backend into PGMQ.  Plain Pending rows

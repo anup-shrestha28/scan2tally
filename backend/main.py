@@ -774,7 +774,7 @@ async def lifespan(app: FastAPI):
 
     # Supervised rather than fired and forgotten. Passed as callables, because a
     # restart needs a fresh coroutine — an already-awaited one cannot be re-run.
-    extraction_worker = None
+    extraction_workers: List[asyncio.Task] = []
     if EXTRACTION_WORKER_ENABLED:
         extraction_factory = (
             consume_extraction_queue
@@ -783,9 +783,24 @@ async def lifespan(app: FastAPI):
             if extraction_queue_ready is False
             else wait_for_extraction_queue_schema
         )
-        extraction_worker = asyncio.create_task(
-            _supervise("extraction-worker", extraction_factory)
+        # Several loops only on the durable queue, where the database hands each
+        # one a distinct slot and refuses the rest. The legacy path has no such
+        # arbitration, so it stays at exactly one to preserve its own contract.
+        loops = (
+            EXTRACTION_QUEUE_WORKERS if extraction_queue_ready is True else 1
         )
+        # Named by index so /api/health and the crash log say which loop.
+        for index in range(1, loops + 1):
+            name = "extraction-worker" if loops == 1 else f"extraction-worker-{index}"
+            extraction_workers.append(
+                asyncio.create_task(_supervise(name, extraction_factory))
+            )
+        if loops > 1:
+            log(
+                f"⚙️ Extracting up to {loops} receipts at a time "
+                "(EXTRACTION_QUEUE_WORKERS); the database's slot count is the "
+                "real ceiling."
+            )
     else:
         # Recorded directly rather than through the supervisor, which would
         # report a worker that returned immediately as having "finished
@@ -804,12 +819,9 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        # extraction_worker is None when the worker is switched off, so the
+        # extraction_workers is empty when the worker is switched off, so the
         # shutdown path must not assume there is a task to cancel.
-        running = [
-            task for task in (extraction_worker, capacity_alert_publisher)
-            if task is not None
-        ]
+        running = [*extraction_workers, capacity_alert_publisher]
         for task in running:
             task.cancel()
         await asyncio.gather(*running, return_exceptions=True)
@@ -2503,10 +2515,30 @@ async def delete_user(user_id: str, authorization: Optional[str] = Header(None))
 
 STORAGE_BUCKET = "receipts"
 
-# The durable queue enforces one extraction across the whole deployment. The
-# semaphore remains for databases that have not applied migration 007, where it
-# deliberately forces the backwards-compatible path to one job per process.
+# The semaphore below applies only to databases that have not applied migration
+# 007, where it deliberately forces the backwards-compatible path to one job per
+# process. On the durable queue, capacity is the database's to decide.
 EXTRACTION_CONCURRENCY = 1
+
+# How many receipts this process will extract at the same time.
+#
+# The real limit is the number of rows in extraction_worker_slot: a consumer loop
+# that cannot get a slot is told there is none and goes back to polling, so this
+# can never exceed what the database permits. Running fewer loops than there are
+# slots simply leaves capacity unused; running more is harmless.
+#
+# Worth having because a receipt spends nearly all of its ~6s waiting on the
+# vision provider, and the provider fan-out is flat — four concurrent calls
+# measured 4.4s against 4.1s for one. Six receipts took ~38s to do ~6s of work
+# six times.
+#
+# All loops share WORKER_ID, which is safe because a lease_token is unique per
+# claim: heartbeat, complete and fail identify their lease by that token, not by
+# the worker or the slot.
+EXTRACTION_QUEUE_WORKERS = max(
+    1,
+    min(16, int(_positive_env_number("EXTRACTION_QUEUE_WORKERS", 3.0))),
+)
 
 # PGMQ polling and visibility are controlled by the backend worker, while the
 # database owns the singleton lease and fencing token. The initial lease must
