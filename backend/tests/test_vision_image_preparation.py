@@ -59,32 +59,27 @@ def quiet(monkeypatch):
 
 @pytest.fixture
 def gemini(monkeypatch):
-    """Captures the parts `_gemini_vision_json` hands the SDK.
-
-    Patches the attribute on the real module rather than swapping sys.modules:
-    `import google.generativeai as genai` resolves through
-    getattr(google, "generativeai"), so a sys.modules entry is never consulted
-    and the live SDK would be used instead.
-    """
-    import google.generativeai as genai
-
+    """Captures what `_gemini_vision_json` hands the SDK, against a canned reply."""
     captured = {}
 
     def install(text):
-        class FakeModel:
-            def __init__(self, *args, **kwargs):
-                pass
+        def generate_content(*, model, contents, config):
+            captured["model"] = model
+            captured["contents"] = contents
+            captured["config"] = config
+            return types.SimpleNamespace(
+                candidates=[types.SimpleNamespace(
+                    finish_reason=types.SimpleNamespace(name="STOP")
+                )],
+                text=text,
+            )
 
-            def generate_content(self, parts, **kwargs):
-                captured["parts"] = parts
-                return types.SimpleNamespace(
-                    candidates=[types.SimpleNamespace(
-                        finish_reason=types.SimpleNamespace(name="STOP")
-                    )],
-                    text=text,
-                )
-
-        monkeypatch.setattr(genai, "GenerativeModel", FakeModel)
+        monkeypatch.setattr(
+            main, "genai_client",
+            types.SimpleNamespace(
+                models=types.SimpleNamespace(generate_content=generate_content)
+            ),
+        )
         return captured
 
     return install
@@ -104,12 +99,12 @@ def test_gemini_is_handed_bytes_and_never_a_pil_image(gemini, quiet):
 
     main.gemini_transcribe(raw, "image/jpeg")
 
-    prompt, image_part = captured["parts"]
-    assert isinstance(prompt, str)
+    prompt_part, image_part = captured["contents"]
+    assert prompt_part.text
     assert not isinstance(image_part, Image.Image), (
         "a PIL Image here makes the SDK re-encode to lossless WebP on every call"
     )
-    assert image_part == {"mime_type": "image/jpeg", "data": raw}
+    assert image_part.inline_data.data == raw, "the original bytes, not a re-encode"
 
 
 def test_the_totals_request_uses_the_same_shape(gemini, quiet):
@@ -118,7 +113,7 @@ def test_the_totals_request_uses_the_same_shape(gemini, quiet):
     raw = photo(800, 600)
 
     assert main.gemini_read_totals(raw, "image/jpeg") == {"stated_total_debit": 1.0}
-    assert not isinstance(captured["parts"][1], Image.Image)
+    assert not isinstance(captured["contents"][1], Image.Image)
 
 
 def test_the_declared_media_type_reaches_the_provider(gemini, quiet):
@@ -127,7 +122,87 @@ def test_the_declared_media_type_reaches_the_provider(gemini, quiet):
 
     main.gemini_transcribe(b"\x89PNG fake", "image/png")
 
-    assert captured["parts"][1]["mime_type"] == "image/png"
+    assert captured["contents"][1].inline_data.mime_type == "image/png"
+
+
+def test_the_request_asks_for_reduced_thinking(gemini, quiet):
+    """The largest single lever on how long a receipt takes.
+
+    Reading a voucher is perception, not reasoning, and the deliberation was
+    measured at 26.3s per pass against 6.0s with it turned down.
+    """
+    captured = gemini('{"transactions": []}')
+
+    main.gemini_transcribe(photo(800, 600), "image/jpeg")
+
+    thinking = captured["config"].thinking_config
+    assert thinking is not None, "no thinking config means the model decides, slowly"
+    assert str(thinking.thinking_level).upper().endswith("LOW")
+
+
+def test_thinking_can_be_handed_back_to_the_model(gemini, monkeypatch, quiet):
+    """An escape hatch, in case a voucher genuinely needs more deliberation."""
+    monkeypatch.setattr(main, "GEMINI_THINKING_LEVEL", "default")
+    captured = gemini('{"transactions": []}')
+
+    main.gemini_transcribe(photo(800, 600), "image/jpeg")
+
+    assert captured["config"].thinking_config is None
+
+
+def test_a_higher_thinking_level_is_passed_through(gemini, monkeypatch, quiet):
+    monkeypatch.setattr(main, "GEMINI_THINKING_LEVEL", "high")
+    captured = gemini('{"transactions": []}')
+
+    main.gemini_transcribe(photo(800, 600), "image/jpeg")
+
+    assert str(captured["config"].thinking_config.thinking_level).upper().endswith("HIGH")
+
+
+def test_function_calling_is_disabled(gemini, quiet):
+    """No tools are declared, so leaving it on only costs a warning and a scan."""
+    captured = gemini('{"transactions": []}')
+
+    main.gemini_transcribe(photo(800, 600), "image/jpeg")
+
+    assert captured["config"].automatic_function_calling.disable is True
+
+
+def test_a_truncated_response_is_not_mistaken_for_an_unreadable_voucher(monkeypatch, quiet):
+    """Same contract as before the SDK change: MAX_TOKENS raises, it never
+    silently reads as "there is nothing on this page"."""
+    def generate_content(*, model, contents, config):
+        return types.SimpleNamespace(
+            candidates=[types.SimpleNamespace(
+                finish_reason=types.SimpleNamespace(name="MAX_TOKENS")
+            )],
+            text="",
+        )
+
+    monkeypatch.setattr(
+        main, "genai_client",
+        types.SimpleNamespace(
+            models=types.SimpleNamespace(generate_content=generate_content)
+        ),
+    )
+
+    with pytest.raises(main.VisionResponseTruncated):
+        main.gemini_transcribe(photo(800, 600), "image/jpeg")
+
+
+def test_an_empty_response_reads_as_nothing_found_rather_than_an_error(gemini, quiet):
+    gemini(None)
+
+    assert main.gemini_transcribe(photo(800, 600), "image/jpeg") == []
+
+
+def test_a_markdown_fenced_response_is_still_parsed(gemini, quiet):
+    """Gemini sometimes fences the JSON despite the JSON response type."""
+    gemini('```json\n{"transactions": [{"ledger_name": "Cash"}]}\n```')
+
+    rows = main.gemini_transcribe(photo(800, 600), "image/jpeg")
+
+    assert [r["ledger_name"] for r in rows] == ["Cash"]
 
 
 # --------------------------------------------------------------- the resize

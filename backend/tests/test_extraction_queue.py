@@ -193,27 +193,56 @@ def test_openai_client_has_finite_timeout_and_no_automatic_retries(monkeypatch):
     }
 
 
-def test_gemini_request_runs_off_loop_with_finite_timeout(monkeypatch):
+def test_gemini_request_runs_off_the_event_loop(monkeypatch):
+    """A blocking SDK call on the event loop would freeze the whole backend.
+
+    The Gemini request is synchronous, so it has to be driven through
+    _run_blocking_provider_calls — which is also what makes the concurrent
+    consensus passes concurrent.
+    """
     event_loop_thread = threading.get_ident()
     captured = {}
-    expected_response = object()
 
-    class FakeModel:
-        def generate_content(self, content, request_options):
-            captured["thread"] = threading.get_ident()
-            captured["content"] = content
-            captured["request_options"] = request_options
-            return expected_response
+    def fake_vision_call(marker):
+        captured["thread"] = threading.get_ident()
+        return marker
 
-    monkeypatch.setattr(main, "VISION_PROVIDER_TIMEOUT_SECONDS", 123.0)
-    response = asyncio.run(main._gemini_generate_content(
-        FakeModel(), "read this", "receipt-image"
-    ))
+    results = asyncio.run(
+        main._run_blocking_provider_calls([(fake_vision_call, ("read this",), {})])
+    )
 
-    assert response is expected_response
-    assert captured["content"] == ["read this", "receipt-image"]
-    assert captured["request_options"] == {"timeout": 123.0}
+    assert results == ["read this"]
     assert captured["thread"] != event_loop_thread
+
+
+@pytest.mark.skipif(
+    main.genai_client is None,
+    reason="only meaningful when AI_PROVIDER=gemini actually built a client",
+)
+def test_the_real_gemini_client_carries_a_finite_timeout_in_milliseconds():
+    """This SDK counts the timeout in MILLISECONDS, the previous one in seconds.
+
+    Reading it back off the live client rather than re-deriving it here is the
+    point: passing seconds would leave a 300ms deadline that fails every single
+    vision request, and a test that rebuilds the value itself would agree with
+    the bug instead of catching it.
+    """
+    configured = main.genai_client._api_client._http_options.timeout
+
+    assert configured == pytest.approx(main.VISION_PROVIDER_TIMEOUT_SECONDS * 1000)
+    # A sanity floor: anything this small can only be a seconds/ms mix-up.
+    assert configured >= 10_000
+
+
+def test_gemini_asks_for_less_deliberation_than_the_model_default():
+    """Thinking on a transcription task was the single largest source of delay.
+
+    Measured on one pass of a six-row voucher: 26.3s at the model default
+    against 6.0s at thinking_level=low, with the same amounts read. The default
+    here must therefore not be "let the model decide".
+    """
+    assert main.GEMINI_THINKING_LEVEL == "low"
+    assert main.GEMINI_THINKING_LEVEL in main._GEMINI_THINKING_LEVELS
 
 
 @pytest.mark.parametrize("extension", ["jpg", "jpeg", "png", "webp", "pdf", "JPG"])

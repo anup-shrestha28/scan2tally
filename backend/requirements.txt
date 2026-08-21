@@ -11,4 +11,8 @@ numpy>=1.26.0
 pydantic>=2.6.4
 python-dotenv>=1.0.1
 openai>=1.14.0
-google-generativeai>=0.4.0
+# google-genai, not the retired google-generativeai. Beyond that package being
+# unsupported, its GenerationConfig has no thinking field, so on a thinking model
+# there was no way to ask for less deliberation — which measured as 26s per
+# transcription pass against 6s once it could be turned down.
+google-genai>=1.0.0

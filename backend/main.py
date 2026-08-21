@@ -327,7 +327,25 @@ if AI_PROVIDER not in _SUPPORTED_AI_PROVIDERS:
 # Vision model, overridable without a code change. gpt-5.5 reads marginal /
 # low-resolution vouchers noticeably better than gpt-4o in side-by-side tests.
 OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-5.5")
-GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-3.6-flash")
+
+# gemini-3.5-flash-lite rather than gemini-3.6-flash, on measured latency.
+#
+# A receipt waits for the SLOWEST of OCR_CONSENSUS_RUNS+1 concurrent requests, so
+# what matters is not the median but the tail — and on the same voucher, same
+# image, same thinking level:
+#
+#     gemini-3.6-flash        4.4s .. 39s per call   4 at once → 20-30s
+#     gemini-3.5-flash-lite   2.6s ..  5s per call   4 at once →  4.4s
+#
+# flash-lite is not merely quicker, it is *predictable*: the fan-out costs
+# essentially nothing over a single call, whereas flash's long tail meant one
+# unlucky pass held up the whole receipt (and produced the occasional 503).
+# Both read every amount correctly on every test voucher, clean and degraded.
+#
+# Set GEMINI_VISION_MODEL=gemini-3.6-flash to go back — it is one env var, and
+# worth doing if real vouchers show more disagreement between passes than they
+# used to. That disagreement is reported on the receipt, so it is visible.
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-3.5-flash-lite")
 
 # The outer extraction deadline owns the whole receipt. Provider requests need
 # their own shorter finite deadline as well: cancelling asyncio.to_thread does
@@ -365,13 +383,36 @@ OPENAI_MAX_COMPLETION_TOKENS = max(
     int(_positive_env_number("OPENAI_MAX_COMPLETION_TOKENS", 32000.0)),
 )
 
-# Same idea, for Gemini. Gemini 1.5 Flash is not a reasoning model, so this is
-# a plain output budget rather than one shared with hidden "thinking" tokens
-# the way OPENAI_MAX_COMPLETION_TOKENS is.
+# Same idea, for Gemini: the ceiling on one response.
 GEMINI_MAX_OUTPUT_TOKENS = max(
     2000,
     int(_positive_env_number("GEMINI_MAX_OUTPUT_TOKENS", 8192.0)),
 )
+
+# How much the Gemini model is allowed to think before answering.
+#
+# This is by far the largest lever on how long a receipt takes. Measured on one
+# transcription pass of a six-row voucher, same model, same image:
+#
+#     thinking left at the model default   26.3s median   (1,140 thinking tokens)
+#     thinking_level=low                    6.0s median   (0 thinking tokens)
+#
+# Reading a voucher is perception, not reasoning: the answer is on the page, so
+# the deliberation was being spent re-deriving what the pixels already said. Both
+# settings transcribed every amount on the test voucher identically.
+#
+# The accuracy net does not depend on this. OCR_CONSENSUS_RUNS independent passes
+# are still compared against each other and against the voucher's own जम्मा
+# totals, which is what catches a misread — raise this to "medium" or "high" if
+# real vouchers show more disagreement between passes than they used to.
+_GEMINI_THINKING_LEVELS = {"minimal", "low", "medium", "high"}
+GEMINI_THINKING_LEVEL = (os.getenv("GEMINI_THINKING_LEVEL") or "low").strip().lower()
+if GEMINI_THINKING_LEVEL not in _GEMINI_THINKING_LEVELS | {"default"}:
+    log(
+        f"⚠️ GEMINI_THINKING_LEVEL='{GEMINI_THINKING_LEVEL}' is not one of "
+        f"{sorted(_GEMINI_THINKING_LEVELS)} or 'default'. Using 'low'."
+    )
+    GEMINI_THINKING_LEVEL = "low"
 
 # Longest edge, in pixels, of the image actually handed to the vision provider.
 #
@@ -584,14 +625,47 @@ if AI_PROVIDER == "openai":
         log("⚠️ AI_PROVIDER is 'openai' but OPENAI_API_KEY is missing or a placeholder")
 
 # Check Gemini Availability
+#
+# Built on google-genai rather than google-generativeai. The older package is
+# retired ("All support for the google.generativeai package has ended") and,
+# more to the point here, its GenerationConfig has no thinking field at all — so
+# on a thinking model there was no way to ask for less deliberation, and every
+# transcription pass paid for reasoning it did not need. See
+# GEMINI_THINKING_LEVEL.
 genai_available = False
+genai_client = None
+# Imported unconditionally, and outside the AI_PROVIDER branch: the request
+# builder below needs these types whenever a Gemini call is made, and binding
+# them only on one provider's path is how `openai_client` came to be missing on
+# a Gemini-configured machine.
+try:
+    from google import genai as google_genai
+    from google.genai import types as genai_types
+except ImportError as err:  # pragma: no cover - a broken install, not a config
+    google_genai = None
+    genai_types = None
+    log(f"⚠️ The google-genai package is not importable: {err}")
+
 if AI_PROVIDER == "gemini":
-    if GEMINI_API_KEY and GEMINI_API_KEY != "placeholder-gemini-api-key":
+    if google_genai is None:
+        log("⚠️ AI_PROVIDER is 'gemini' but the google-genai package is missing")
+    elif GEMINI_API_KEY and GEMINI_API_KEY != "placeholder-gemini-api-key":
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=GEMINI_API_KEY)
+            # One client for the process, as with the OpenAI one: it holds a
+            # connection pool, and building it per request would add a TLS
+            # handshake to every one of the concurrent passes.
+            genai_client = google_genai.Client(
+                api_key=GEMINI_API_KEY,
+                http_options=genai_types.HttpOptions(
+                    # This SDK counts the timeout in MILLISECONDS.
+                    timeout=int(VISION_PROVIDER_TIMEOUT_SECONDS * 1000),
+                ),
+            )
             genai_available = True
-            log(f"✅ Gemini Vision AI engine activated! (model: {GEMINI_VISION_MODEL})")
+            log(
+                f"✅ Gemini Vision AI engine activated! (model: {GEMINI_VISION_MODEL}, "
+                f"thinking: {GEMINI_THINKING_LEVEL})"
+            )
         except Exception as e:
             log(f"Warning: Could not configure Gemini AI: {e}")
     else:
@@ -1137,20 +1211,6 @@ async def _run_blocking_provider_calls(calls, on_settled=None) -> list:
         raise
 
 
-async def _gemini_generate_content(model, prompt: str, image):
-    results = await _run_blocking_provider_calls([
-        (
-            model.generate_content,
-            ([prompt, image],),
-            {"request_options": {"timeout": VISION_PROVIDER_TIMEOUT_SECONDS}},
-        )
-    ])
-    response = results[0]
-    if isinstance(response, BaseException):
-        raise response
-    return response
-
-
 def _gemini_finish_reason_name(response) -> Optional[str]:
     candidates = getattr(response, "candidates", None) or []
     if not candidates:
@@ -1175,19 +1235,31 @@ def _gemini_vision_json(prompt: str, image_bytes: bytes, media_type: str) -> dic
     lossless WebP on the way out, once per request, on the same image every
     concurrent request is already holding. See prepare_vision_image().
     """
-    import google.generativeai as genai
+    if genai_client is None:
+        raise RuntimeError("The Gemini client is not configured.")
 
-    model = genai.GenerativeModel(
-        GEMINI_VISION_MODEL,
-        generation_config={
-            "response_mime_type": "application/json",
-            "max_output_tokens": GEMINI_MAX_OUTPUT_TOKENS,
-            "temperature": 0,
-        },
+    config = genai_types.GenerateContentConfig(
+        response_mime_type="application/json",
+        max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS,
+        temperature=0,
+        # No tools are declared, so leaving automatic function calling on only
+        # buys a warning and a round of response inspection per request.
+        automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(
+            disable=True
+        ),
     )
-    response = model.generate_content(
-        [prompt, {"mime_type": media_type, "data": image_bytes}],
-        request_options={"timeout": VISION_PROVIDER_TIMEOUT_SECONDS},
+    if GEMINI_THINKING_LEVEL != "default":
+        config.thinking_config = genai_types.ThinkingConfig(
+            thinking_level=GEMINI_THINKING_LEVEL.upper()
+        )
+
+    response = genai_client.models.generate_content(
+        model=GEMINI_VISION_MODEL,
+        contents=[
+            genai_types.Part.from_text(text=prompt),
+            genai_types.Part.from_bytes(data=image_bytes, mime_type=media_type),
+        ],
+        config=config,
     )
 
     if _gemini_finish_reason_name(response) == "MAX_TOKENS":
