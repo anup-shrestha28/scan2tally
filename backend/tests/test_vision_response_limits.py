@@ -46,7 +46,11 @@ def vision(monkeypatch):
                 completions=types.SimpleNamespace(create=lambda **kwargs: response)
             )
         )
-        monkeypatch.setattr(main, "openai_client", client)
+        # raising=False because `openai_client` is only bound when
+        # AI_PROVIDER=openai, so on a developer machine configured for Gemini the
+        # attribute does not exist yet and these tests would fail on the patch
+        # itself rather than on anything they are checking.
+        monkeypatch.setattr(main, "openai_client", client, raising=False)
     return install
 
 
@@ -101,7 +105,11 @@ def test_normal_response_is_parsed(vision):
     vision(_response(json.dumps(payload)))
 
     assert main._openai_vision_json("prompt", "b64", "image/jpeg") == payload
-    assert main.openai_transcribe("b64", "image/jpeg") == payload["transactions"]
+    # Each row carries the voucher number read from the header, falling back to
+    # None when the response omitted it, as this one does.
+    assert main.openai_transcribe("b64", "image/jpeg") == [
+        {"ledger_name": "Freight outward", "debit_amount": 1237.35, "voucher_no": None}
+    ]
 
 
 # ------------------------------------------------------- the budget itself

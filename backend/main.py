@@ -21,7 +21,7 @@ import ledger_matching
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from PIL import Image
+from PIL import Image, ImageOps
 import numpy as np
 import cv2
 from dotenv import load_dotenv
@@ -372,6 +372,27 @@ GEMINI_MAX_OUTPUT_TOKENS = max(
     2000,
     int(_positive_env_number("GEMINI_MAX_OUTPUT_TOKENS", 8192.0)),
 )
+
+# Longest edge, in pixels, of the image actually handed to the vision provider.
+#
+# A phone photographs a voucher at ~4000x3000. Both providers tile images into
+# 768px blocks internally and downsample anything larger before reading it, so
+# every pixel above this ceiling is uploaded, paid for, and then thrown away by
+# the provider. 2200px across an A4 page is ~265 DPI — above the 200 DPI where
+# handwriting OCR starts to degrade, and comfortably more than the tiling keeps.
+#
+# The cost of NOT doing this is not the bandwidth, it is the CPU: see
+# prepare_vision_image() for what the Gemini SDK does with an oversized image.
+# Set to 0 to hand the original bytes over untouched.
+VISION_IMAGE_MAX_EDGE = max(0, int(_positive_env_number("VISION_IMAGE_MAX_EDGE", 2200.0)))
+
+# Only used when the image has to be re-encoded anyway. High deliberately:
+# this is handwriting, and JPEG ringing around thin pen strokes is exactly the
+# artefact that turns a 3 into an 8. The saving here comes from the resize, not
+# from the quality setting, so there is nothing to gain by lowering it.
+VISION_IMAGE_JPEG_QUALITY = min(100, max(60, int(
+    _positive_env_number("VISION_IMAGE_JPEG_QUALITY", 90.0)
+)))
 
 
 # ------------------------------------------------- extraction progress logging
@@ -905,6 +926,116 @@ Return ONLY a JSON object of this shape:
 """
 
 
+_EXIF_ORIENTATION_TAG = 274
+
+
+def _needs_exif_rotation(image: "Image.Image") -> bool:
+    """Whether this image's pixels are stored in some rotation of upright.
+
+    Phones record orientation as a tag and leave the pixels as the sensor read
+    them. Anything that re-encodes without honouring the tag hands the model a
+    sideways voucher, so the tag has to be baked into the pixels rather than
+    carried along and hoped for.
+    """
+    try:
+        return image.getexif().get(_EXIF_ORIENTATION_TAG) in (2, 3, 4, 5, 6, 7, 8)
+    except Exception:
+        return False
+
+
+def prepare_vision_image(raw_bytes: bytes, content_type: str) -> tuple:
+    """The bytes to send the vision provider, and their media type.
+
+    Two separate problems, both invisible until measured:
+
+    1. Passing a PIL Image to google-generativeai does NOT upload the file. The
+       SDK re-encodes it as LOSSLESS WEBP first (``_pil_to_blob``), which on a
+       4032x3024 photo measured 7s of CPU and grew 3MB into 8MB. That cost is
+       paid once per request, so the OCR_CONSENSUS_RUNS+1 concurrent requests
+       paid it four times over on the very same image — ~28 CPU-seconds and 32MB
+       of upload per receipt, on a 512MB shared-CPU instance. Handing over a
+       blob of bytes instead skips the re-encode entirely.
+
+    2. Nothing downsized the image, so those bytes were full sensor resolution,
+       which both providers tile and downsample on arrival anyway.
+
+    So: resize once, here, and let all the concurrent calls share the result.
+
+    Never raises. Every branch that cannot improve the image returns the
+    original bytes unchanged — this is an optimisation, and an optimisation that
+    can fail an extraction is worse than no optimisation.
+    """
+    # A PDF is not ours to resize and must reach the provider as one.
+    if content_type == "application/pdf":
+        return (raw_bytes, content_type)
+
+    # Anything else is treated as an image and labelled as one even if the
+    # declared type is vague, matching what the callers already did: storage
+    # sometimes reports a generic type for a perfectly good JPEG, and PIL
+    # identifies the format from the bytes rather than from this string.
+    fallback = (raw_bytes, content_type if content_type.startswith("image/") else "image/jpeg")
+    if not VISION_IMAGE_MAX_EDGE:
+        return fallback
+
+    try:
+        image = Image.open(io.BytesIO(raw_bytes))
+        # Safe before any pixel access: draft() is contractually not allowed to
+        # return a size below the one requested, so it can only ever save decode
+        # work on images far larger than the ceiling, never cost resolution.
+        image.draft("RGB", (VISION_IMAGE_MAX_EDGE, VISION_IMAGE_MAX_EDGE))
+
+        rotate = _needs_exif_rotation(image)
+        resize = max(image.size) > VISION_IMAGE_MAX_EDGE
+
+        # Already small and already upright: re-encoding could only lose
+        # detail, so hand the untouched original over.
+        if not rotate and not resize:
+            return fallback
+
+        original_size = image.size
+        if rotate:
+            image = ImageOps.exif_transpose(image)
+
+        # Alpha onto white rather than RGB's default black — a scan with a
+        # transparent margin must not come out as ink on a black page.
+        if image.mode in ("RGBA", "LA", "PA") or (
+            image.mode == "P" and "transparency" in image.info
+        ):
+            image = image.convert("RGBA")
+            flattened = Image.new("RGB", image.size, (255, 255, 255))
+            flattened.paste(image, mask=image.split()[-1])
+            image = flattened
+        elif image.mode != "RGB":
+            image = image.convert("RGB")
+
+        if max(image.size) > VISION_IMAGE_MAX_EDGE:
+            scale = VISION_IMAGE_MAX_EDGE / max(image.size)
+            image = image.resize(
+                (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+                Image.LANCZOS,
+            )
+
+        buffer = io.BytesIO()
+        image.save(
+            buffer,
+            format="JPEG",
+            quality=VISION_IMAGE_JPEG_QUALITY,
+            optimize=True,
+        )
+        prepared = buffer.getvalue()
+    except Exception as err:
+        log(f"⚠️ Could not resize the image for the vision provider, sending it as uploaded: {_describe_error(err)}")
+        return fallback
+
+    log(
+        f"🖼️ Prepared image for the vision provider: {original_size[0]}x{original_size[1]} "
+        f"{len(raw_bytes) / 1024:.0f} KB → {image.width}x{image.height} "
+        f"{len(prepared) / 1024:.0f} KB"
+        + (" (rotated upright)" if rotate else "")
+    )
+    return (prepared, "image/jpeg")
+
+
 def _openai_vision_json(prompt: str, base64_image: str, media_type: str) -> dict:
     """One vision request returning parsed JSON."""
     response = openai_client.chat.completions.create(
@@ -1030,7 +1161,7 @@ def _gemini_finish_reason_name(response) -> Optional[str]:
     return getattr(reason, "name", str(reason))
 
 
-def _gemini_vision_json(prompt: str, raw_bytes: bytes) -> dict:
+def _gemini_vision_json(prompt: str, image_bytes: bytes, media_type: str) -> dict:
     """One vision request returning parsed JSON — Gemini's counterpart to
     _openai_vision_json, deliberately kept to the same shape: a truncated
     response raises the same VisionResponseTruncated rather than being
@@ -1038,10 +1169,14 @@ def _gemini_vision_json(prompt: str, raw_bytes: bytes) -> dict:
     rather than an error, and this is a plain sync call so
     _run_blocking_provider_calls can drive N of them concurrently exactly as
     it already does for OpenAI.
+
+    Takes bytes and passes them as an inline blob. It used to take a PIL Image,
+    which looks equivalent and is not: the SDK re-encodes a PIL Image as
+    lossless WebP on the way out, once per request, on the same image every
+    concurrent request is already holding. See prepare_vision_image().
     """
     import google.generativeai as genai
 
-    pil_img = Image.open(io.BytesIO(raw_bytes))
     model = genai.GenerativeModel(
         GEMINI_VISION_MODEL,
         generation_config={
@@ -1051,7 +1186,7 @@ def _gemini_vision_json(prompt: str, raw_bytes: bytes) -> dict:
         },
     )
     response = model.generate_content(
-        [prompt, pil_img],
+        [prompt, {"mime_type": media_type, "data": image_bytes}],
         request_options={"timeout": VISION_PROVIDER_TIMEOUT_SECONDS},
     )
 
@@ -1077,8 +1212,8 @@ def _gemini_vision_json(prompt: str, raw_bytes: bytes) -> dict:
     return json.loads(cleaned)
 
 
-def gemini_transcribe(raw_bytes: bytes) -> List[dict]:
-    parsed = _gemini_vision_json(TRANSCRIBE_PROMPT, raw_bytes)
+def gemini_transcribe(image_bytes: bytes, media_type: str) -> List[dict]:
+    parsed = _gemini_vision_json(TRANSCRIBE_PROMPT, image_bytes, media_type)
     if isinstance(parsed, dict):
         rows = parsed.get("transactions") or []
         voucher_no = parsed.get("voucher_no")
@@ -1091,9 +1226,9 @@ def gemini_transcribe(raw_bytes: bytes) -> List[dict]:
     return []
 
 
-def gemini_read_totals(raw_bytes: bytes) -> dict:
+def gemini_read_totals(image_bytes: bytes, media_type: str) -> dict:
     """The raw parsed response: stated totals AND the signature flag, read once."""
-    return _gemini_vision_json(TOTALS_PROMPT, raw_bytes)
+    return _gemini_vision_json(TOTALS_PROMPT, image_bytes, media_type)
 
 
 def _row_amount(row: dict) -> float:
@@ -1378,12 +1513,23 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
     consensus_notes: List[str] = []
     progress = extraction_progress()
 
+    # Resized ONCE, here, and shared by every concurrent request below. Doing it
+    # per request meant every pass re-did identical work on identical bytes.
+    if openai_available or genai_available:
+        image_bytes, media_type = prepare_vision_image(raw_bytes, content_type)
+    else:
+        image_bytes, media_type = raw_bytes, content_type
+
     # 1. Live OpenAI Extraction
     if openai_available:
-        log(f"🤖 Sending image to OpenAI {OPENAI_VISION_MODEL}... (size: {len(raw_bytes)} bytes)")
+        log(f"🤖 Sending image to OpenAI {OPENAI_VISION_MODEL}... (size: {len(image_bytes)} bytes)")
         try:
-            base64_image = base64.b64encode(raw_bytes).decode('utf-8')
-            media_type = content_type if content_type.startswith("image/") else "image/jpeg"
+            base64_image = base64.b64encode(image_bytes).decode('utf-8')
+            # A data: URL in an image_url part has to claim an image type, so a
+            # PDF that reached here is labelled as one, exactly as before.
+            openai_media_type = (
+                media_type if media_type.startswith("image/") else "image/jpeg"
+            )
 
             # Transcription and total-reading are issued as SEPARATE requests, run
             # concurrently. Keeping the जम्मा total out of the transcription prompt
@@ -1393,10 +1539,10 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
             # Several independent transcriptions then let us see which individual
             # cells the model cannot read consistently.
             calls = [
-                (openai_transcribe, (base64_image, media_type), {})
+                (openai_transcribe, (base64_image, openai_media_type), {})
                 for _ in range(OCR_CONSENSUS_RUNS)
             ]
-            calls.append((openai_read_totals, (base64_image, media_type), {}))
+            calls.append((openai_read_totals, (base64_image, openai_media_type), {}))
             progress.vision_sent(
                 len(calls), f"OpenAI {OPENAI_VISION_MODEL}", OCR_CONSENSUS_RUNS
             )
@@ -1459,13 +1605,13 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
         # passes reconciled by build_consensus) so the two providers produce
         # equivalent output and neither one is checked less carefully than
         # the other.
-        log(f"🤖 Sending image to Gemini {GEMINI_VISION_MODEL}... (size: {len(raw_bytes)} bytes)")
+        log(f"🤖 Sending image to Gemini {GEMINI_VISION_MODEL}... (size: {len(image_bytes)} bytes)")
         try:
             calls = [
-                (gemini_transcribe, (raw_bytes,), {})
+                (gemini_transcribe, (image_bytes, media_type), {})
                 for _ in range(OCR_CONSENSUS_RUNS)
             ]
-            calls.append((gemini_read_totals, (raw_bytes,), {}))
+            calls.append((gemini_read_totals, (image_bytes, media_type), {}))
             progress.vision_sent(
                 len(calls), f"Gemini {GEMINI_VISION_MODEL}", OCR_CONSENSUS_RUNS
             )
