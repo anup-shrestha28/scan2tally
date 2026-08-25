@@ -17,7 +17,7 @@ import { transform } from 'esbuild';
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(resolve(here, '../src/lib/reviewerNavigation.ts'), 'utf8');
 const { code } = await transform(source, { loader: 'ts', format: 'esm' });
-const { groupTransactionsByReceipt, resolveStartIndex } = await import(
+const { groupTransactionsByReceipt, resolveStartIndex, amountVerdictIsStale } = await import(
   `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`
 );
 
@@ -135,6 +135,26 @@ const row = (id, receipt_id, amount) => ({ id, receipt_id, debit_amount: amount 
   const snapshot = JSON.stringify(previous);
   groupTransactionsByReceipt([row('t1', 'r1', 999)], previous);
   equal('the previous map is left untouched', snapshot, JSON.stringify(previous));
+}
+
+// ===================================================================
+// When the extraction's own verdict about a row stops applying.
+//
+// Reported as inconsistent colouring: one voucher showed an amber amount, the
+// next a rose one, the next nothing, with no way to tell why. Part of it was
+// this — an amber "the passes disagreed" flag left sitting on a figure the
+// reviewer had since typed themselves, describing a number that no longer
+// existed.
+// ===================================================================
+{
+  check('editing a debit amount discards it', amountVerdictIsStale('debit_amount'));
+  check('editing a credit amount discards it', amountVerdictIsStale('credit_amount'));
+
+  // Everything else leaves it alone: the verdict is about the amount, and
+  // renaming a ledger or retyping a narration says nothing about the figure.
+  for (const field of ['ledger_name', 'narration', 'entry_type', 'voucher_no', 'voucher_date']) {
+    check(`editing ${field} keeps it`, !amountVerdictIsStale(field));
+  }
 }
 
 // ===================================================================

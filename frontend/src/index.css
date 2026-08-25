@@ -1293,6 +1293,16 @@ input:-webkit-autofill:focus {
   align-items: flex-start;
   line-height: 1.35;
 }
+/* The amber counterpart: the scan itself was unclear, as opposed to the
+   arithmetic saying this figure is wrong. */
+.amount-hint-uncertain {
+  color: var(--accent-amber);
+  align-items: flex-start;
+  line-height: 1.35;
+}
+.amount-hint-uncertain > span { min-width: 0; }
+.amount-hint-uncertain svg { margin-top: 2px; }
+
 .amount-hint-suggest > span { min-width: 0; }
 .amount-hint-suggest svg { margin-top: 2px; }
 .amount-hint-suggest strong { font-variant-numeric: tabular-nums; }

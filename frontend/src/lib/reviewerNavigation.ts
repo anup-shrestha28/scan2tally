@@ -45,6 +45,23 @@ export function groupTransactionsByReceipt<Row extends ReceiptScopedRow>(
 }
 
 /**
+ * Whether editing `field` invalidates the extraction's own verdict about a row.
+ *
+ * needs_review means the extraction's independent passes read that row's AMOUNT
+ * differently from each other. It is a statement about a number the extraction
+ * produced, so the moment a person types a different number it describes
+ * something that no longer exists — and left attached it puts a warning colour
+ * on a figure the reviewer entered themselves, which is indistinguishable from
+ * the app doubting their typing.
+ *
+ * The same reasoning the reviewer already applies to a ledger match when the
+ * ledger name is edited.
+ */
+export function amountVerdictIsStale(field: string): boolean {
+  return field === 'debit_amount' || field === 'credit_amount';
+}
+
+/**
  * Which page the reviewer should open on.
  *
  * `requested` is the caller having an opinion — "review the whole batch" asks

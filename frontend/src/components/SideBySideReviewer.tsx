@@ -11,7 +11,7 @@ import {
   ImbalanceSuspect,
   StatedVoucherTotals,
 } from '../lib/imbalance';
-import { resolveStartIndex } from '../lib/reviewerNavigation';
+import { resolveStartIndex, amountVerdictIsStale } from '../lib/reviewerNavigation';
 
 /** Ties the ledger inputs to the single datalist rendered at the bottom. */
 const LEDGER_OPTIONS_ID = 'chart-of-accounts';
@@ -713,6 +713,11 @@ export default function SideBySideReviewer({
             updated.debit_amount = 0;
           }
         }
+        // The same reasoning as the ledger verdict above — see
+        // amountVerdictIsStale for why an edited amount discards it.
+        if (amountVerdictIsStale(field as string)) {
+          updated.needs_review = false;
+        }
         return updated;
       }
       return t;
@@ -1359,6 +1364,22 @@ export default function SideBySideReviewer({
                               ? That balances this voucher.
                             </span>
                           </button>
+                        )}
+
+                        {/* Every coloured amount says why it is coloured. This
+                            one used to explain itself only in a tooltip, which
+                            left an amber cell next to a rose one looking like
+                            two shades of the same unexplained thing. Not shown
+                            beside the suggestion above, which already covers
+                            this row and is the more useful of the two. */}
+                        {!suspect && tx.needs_review && (
+                          <div
+                            className="ledger-hint amount-hint-uncertain"
+                            title="The extraction read this amount differently on separate passes, so one of those readings is wrong. Check it against the image."
+                          >
+                            <HelpCircle size={11} />
+                            <span>The scan was unclear here — check this amount.</span>
+                          </div>
                         )}
                       </td>
                       <td>
