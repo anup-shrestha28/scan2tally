@@ -165,13 +165,84 @@ equal('a 100000x decimal shift is not', null, classifyMisread(3.21, 321000));
   );
 }
 {
-  // ...but a weak match is still better than silence when it is all there is.
+  // A single changed digit is never offered, however few rows match it.
+  // 52,137 and 32,137 are 20,000 apart and each explains the gap as one digit,
+  // which is precisely the relationship that means nothing.
   const { rows, difference } = voucher(Dr(52137), Cr(32137));
   const found = findImbalanceSuspects(rows, difference);
-  check(
-    'a lone weak match is still offered',
-    found.length > 0 && found.every(s => s.kind === 'one-digit-different'),
-    JSON.stringify(found)
+  equal('a one-digit difference is never offered on its own', [], found);
+  equal(
+    '...though it is still reported honestly when asked directly',
+    'one-digit-different',
+    classifyMisread(52137, 32137)
+  );
+}
+
+// ===================================================================
+// Regression: bill7.jpg, reported as "why is a correct amount red?"
+//
+// Twelve lines, 80.00 out. The debits sum to 45,068.76, exactly the जम्मा the
+// voucher itself states, so the error is on the credit side — Aakash Bhairab
+// reads 3,480.00 where the voucher says 3,400.00.
+//
+// The trap: 80 is a single digit times a power of ten, so "one digit
+// different" holds for EVERY row with a tens digit that can absorb 8 without
+// borrowing. Four rows matched, three of them perfectly correct. A shortlist
+// of four out of twelve, with red on rows that are right, is worse than
+// staying quiet.
+// ===================================================================
+{
+  const { rows, difference } = voucher(
+    Dr(8703.76),                      // Freight outward
+    Dr(9800),                         // Carriage outward - Transportation
+    Dr(26565),                        // Carriage outward - labor
+    Cr(114.88),                       // TDS payable
+    Cr(1127),                         // VAT payable
+    Cr(265),                          // TDS payable
+    Cr(3480),                         // Aakash Bhairab — should read 3,400.00
+    Cr(278.76),                       // National Carriers
+    Cr(3395.17),                      // Krishna Transport
+    Cr(1204.20),                      // Shree Carriers
+    Cr(310.75),                       // Cash
+    Cr(34973)                         // Sundry payable
+  );
+
+  equal('bill7: the voucher is 80.00 out', -80, difference);
+  equal('bill7: no row is accused', [], findImbalanceSuspects(rows, difference));
+
+  // The individual coincidences are still there; they are simply not evidence.
+  equal('bill7: the correct Freight row would have matched', 'one-digit-different',
+    classifyMisread(8703.76, 8783.76));
+  equal('bill7: the correct Krishna row would have matched', 'one-digit-different',
+    classifyMisread(3395.17, 3315.17));
+  equal('bill7: so would the genuinely wrong row', 'one-digit-different',
+    classifyMisread(3480, 3400));
+}
+
+// ===================================================================
+// The cap: too many candidates means there is no finger to point.
+// ===================================================================
+{
+  // Off by 40,000, which every row here can explain as a dropped leading 4.
+  // Four equally good answers is not an answer.
+  const { rows, difference } = voucher(Dr(47000), Cr(4000), Cr(2000), Cr(1000));
+  equal('the cap case is 40,000 out as intended', 40000, difference);
+  // The debit reads one digit too many; the credits each read one too few.
+  // Different names, both strong, all four equally believable.
+  equal(
+    'each of the four rows really does match',
+    ['extra-digit', 'digit-missing', 'digit-missing', 'digit-missing'],
+    [
+      classifyMisread(47000, 7000),
+      classifyMisread(4000, 44000),
+      classifyMisread(2000, 42000),
+      classifyMisread(1000, 41000),
+    ]
+  );
+  equal(
+    'more than two candidates means none is shown',
+    [],
+    findImbalanceSuspects(rows, difference)
   );
 }
 {

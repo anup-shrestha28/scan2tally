@@ -64,12 +64,41 @@ const BALANCED_WITHIN = 0.05;
  */
 const MAX_DECIMAL_SHIFT = 1000;
 
+/**
+ * The relationships specific enough to be worth raising.
+ *
+ * Each constrains the DIGIT SEQUENCE — one string is the other with a character
+ * deleted, or the same characters with the point moved, or the same characters
+ * with two adjacent ones swapped. Those do not hold by accident.
+ *
+ * 'one-digit-different' is deliberately NOT here, and is never offered.
+ * Changing one digit position changes a number by exactly d x 10^k, so the
+ * relationship can only hold when the imbalance ITSELF is d x 10^k — and the
+ * moment it is, it holds for every row carrying a digit able to absorb it
+ * without borrowing, which is roughly a fifth of amounts. A real voucher 80.00
+ * out lit up four of its twelve rows this way, three of them perfectly correct.
+ *
+ * It is a fact about the imbalance, not about the row, so it can never single
+ * one out. It stays in MisreadKind because classifyMisread still reports it
+ * honestly and the tests pin that reasoning; it simply is not evidence.
+ */
 const STRONG_KINDS: readonly MisreadKind[] = [
   'digit-missing',
   'extra-digit',
   'decimal-point',
   'digits-swapped',
 ];
+
+/**
+ * More candidates than this and there is no finger to point.
+ *
+ * Two can be genuine — a debit reading high and a credit reading low explain
+ * the same gap equally well, and saying "one of these two" is honest. Beyond
+ * that the reviewer is being asked to search a shortlist barely smaller than
+ * the voucher, with red on rows that are right, which costs more trust than the
+ * occasional catch is worth.
+ */
+const MAX_SUSPECTS = 2;
 
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
@@ -155,9 +184,11 @@ export function classifyMisread(current: number, suggested: number): MisreadKind
  * difference, so both sides are considered; usually only one produces a
  * positive amount, and rarely does more than one produce a plausible misreading.
  *
- * Returns the strongest tier that matched. A dropped digit and a misplaced
- * decimal point are near-certain; "one digit different" happens by coincidence
- * often enough that it is only offered when nothing better did.
+ * Returns only relationships that constrain the digit sequence (STRONG_KINDS),
+ * and only while there are few enough of them to constitute pointing at
+ * something. Frequently that is nothing at all, which is the correct answer far
+ * more often than it looks: red on a row that is right costs more than a missed
+ * catch, because the next red one gets ignored too.
  */
 export function findImbalanceSuspects(
   rows: readonly ImbalanceCandidateRow[],
@@ -185,8 +216,8 @@ export function findImbalanceSuspects(
     });
   }
 
-  const strong = suspects.filter(suspect => STRONG_KINDS.includes(suspect.kind));
-  return strong.length ? strong : suspects;
+  const evidence = suspects.filter(suspect => STRONG_KINDS.includes(suspect.kind));
+  return evidence.length <= MAX_SUSPECTS ? evidence : [];
 }
 
 /** Why this row is being questioned, in words a reviewer can check against the photo. */
