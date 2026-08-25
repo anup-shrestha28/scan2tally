@@ -79,7 +79,6 @@ function AmountInput({
   tone,
   uncertain,
   suspect,
-  sideMismatch,
   onChange,
   onEnter
 }: {
@@ -89,8 +88,6 @@ function AmountInput({
   uncertain?: boolean;
   /** This amount is the one that would explain the voucher not balancing. */
   suspect?: boolean;
-  /** This whole column disagrees with the voucher's own जम्मा total. */
-  sideMismatch?: boolean;
   onChange: (amount: number) => void;
   onEnter?: () => void;
 }) {
@@ -110,19 +107,14 @@ function AmountInput({
       className={
         `cell-input amount-input amount-${tone}` +
         `${uncertain ? ' amount-uncertain' : ''}` +
-        // The specific accusation outranks the column-wide one: if this amount
-        // is the one that explains the gap, saying so is more use than saying
-        // its column is out.
-        `${suspect ? ' amount-suspect' : sideMismatch ? ' amount-side-mismatch' : ''}`
+        `${suspect ? ' amount-suspect' : ''}`
       }
       title={
         suspect
           ? 'This is the amount that would explain the voucher not balancing. Check it against the image.'
-          : sideMismatch
-            ? 'These amounts do not add up to the total written on the voucher. Check them against the image.'
-            : uncertain
-              ? 'This amount may be inaccurate. Please verify it with the receipt.'
-              : undefined
+          : uncertain
+            ? 'This amount may be inaccurate. Please verify it with the receipt.'
+            : undefined
       }
       placeholder="0.00"
       value={draft !== null ? draft : formatted}
@@ -911,6 +903,18 @@ export default function SideBySideReviewer({
   const money = (value: number) =>
     value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+  const discrepancyTitle = (side: 'debit' | 'credit'): string | undefined => {
+    const found = sideDiscrepancies.find(item => item.side === side);
+    if (!found) return undefined;
+    return (
+      `This voucher's जम्मा row reads Rs. ${money(found.stated)} for ${side}, ` +
+      `Rs. ${money(Math.abs(found.difference))} ` +
+      `${found.difference > 0 ? 'less than' : 'more than'} these rows add up to.`
+    );
+  };
+  const debitDiscrepancyTitle = discrepancyTitle('debit');
+  const creditDiscrepancyTitle = discrepancyTitle('credit');
+
   /** Takes the suggested reading. Routed through the normal edit path, so it
    *  is undoable and autosaves exactly as typing the number would. */
   const applySuggestedAmount = (suspect: ImbalanceSuspect) => {
@@ -1243,8 +1247,9 @@ export default function SideBySideReviewer({
                       </span>
                       , but this voucher&apos;s जम्मा row reads Rs. {money(item.stated)} —
                       Rs. {money(Math.abs(item.difference))}{' '}
-                      {item.difference > 0 ? 'too much' : 'too little'}. Check the marked
-                      amounts against the image.
+                      {item.difference > 0 ? 'too much' : 'too little'}. Check the{' '}
+                      {item.side} column against the image; which of its amounts is
+                      wrong cannot be told from the totals alone.
                     </span>
                   ))}
                 </span>
@@ -1257,8 +1262,16 @@ export default function SideBySideReviewer({
                   <tr>
                     <th className="tx-col-type">Type</th>
                     <th>Particulars</th>
-                    <th className="tx-col-amount">Debit (Rs.)</th>
-                    <th className="tx-col-amount">Credit (Rs.)</th>
+                    {/* Marked on the column, not on its cells. What is known is
+                        that this column's total is wrong — which of its amounts
+                        is, is not, and putting a border on all nine of them
+                        says the opposite. One fact, one mark. */}
+                    <th className={`tx-col-amount${mismatchedSides.has('debit') ? ' col-total-mismatch' : ''}`}>
+                      Debit (Rs.)
+                    </th>
+                    <th className={`tx-col-amount${mismatchedSides.has('credit') ? ' col-total-mismatch' : ''}`}>
+                      Credit (Rs.)
+                    </th>
                     <th className="tx-col-actions"></th>
                   </tr>
                 </thead>
@@ -1354,7 +1367,6 @@ export default function SideBySideReviewer({
                             tone="debit"
                             uncertain={tx.needs_review}
                             suspect={Boolean(suspect)}
-                            sideMismatch={mismatchedSides.has('debit')}
                             value={tx.debit_amount || 0}
                             onChange={(amount) => handleUpdateTransaction(tx.id, 'debit_amount', amount)}
                             onEnter={() => void handleSaveProgress()}
@@ -1369,7 +1381,6 @@ export default function SideBySideReviewer({
                             tone="credit"
                             uncertain={tx.needs_review}
                             suspect={Boolean(suspect)}
-                            sideMismatch={mismatchedSides.has('credit')}
                             value={tx.credit_amount || 0}
                             onChange={(amount) => handleUpdateTransaction(tx.id, 'credit_amount', amount)}
                             onEnter={() => void handleSaveProgress()}
@@ -1408,13 +1419,19 @@ export default function SideBySideReviewer({
               <div className={`totals-panel ${isBalanced ? 'totals-ok' : 'totals-warn'}`}>
                 <div>
                   <span className="total-label">Total Debit:</span>
-                  <span className="total-value total-debit">
+                  <span
+                    className={`total-value total-debit${mismatchedSides.has('debit') ? ' total-mismatch' : ''}`}
+                    title={debitDiscrepancyTitle}
+                  >
                     Rs. {totalDebit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                   </span>
                 </div>
                 <div className="total-divider">
                   <span className="total-label">Total Credit:</span>
-                  <span className="total-value total-credit">
+                  <span
+                    className={`total-value total-credit${mismatchedSides.has('credit') ? ' total-mismatch' : ''}`}
+                    title={creditDiscrepancyTitle}
+                  >
                     Rs. {totalCredit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                   </span>
                 </div>

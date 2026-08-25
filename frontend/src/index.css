@@ -1251,13 +1251,23 @@ input:-webkit-autofill:focus {
 
 /* A column that does not add up to the total written on the voucher.
    Amber, not rose: this says "the error is somewhere in here", where rose says
-   "it is this one". Weaker claim, weaker mark. */
-.amount-side-mismatch {
-  background-color: rgba(245, 158, 11, 0.14);
-  border-color: rgba(245, 158, 11, 0.6);
+   "it is this one". Weaker claim, weaker mark.
+
+   On the column's heading and its total — NOT on each of its amounts. Which
+   amount is wrong is exactly what this evidence cannot say, and a border on
+   every cell in the column claims otherwise. */
+.col-total-mismatch {
+  color: var(--accent-amber);
+  box-shadow: inset 0 -2px 0 0 var(--accent-amber);
 }
-.amount-side-mismatch:hover,
-.amount-side-mismatch:focus { border-color: var(--accent-amber); }
+.total-value.total-mismatch {
+  color: var(--accent-amber);
+  text-decoration: underline;
+  text-decoration-style: wavy;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+  cursor: help;
+}
 
 /* Sits directly above the rows it is talking about rather than at the top of
    the screen, because which column it names is the whole content. */
