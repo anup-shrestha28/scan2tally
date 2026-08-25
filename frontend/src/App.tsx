@@ -19,6 +19,7 @@ import {
 } from './lib/db';
 import { LEDGER_MATCHING } from './lib/features';
 import { usePolling } from './lib/usePolling';
+import { groupTransactionsByReceipt } from './lib/reviewerNavigation';
 
 type AppView = 'batches' | 'reviewer' | 'exporter' | 'users' | 'overview' | 'ledgers';
 const APP_VIEW_STORAGE_KEY = 'scan2tally-current-view';
@@ -90,6 +91,11 @@ export default function App() {
   const [allReceiptTransactions, setAllReceiptTransactions] = useState<Record<string, Transaction[]>>(savedState.receiptTransactions || {});
   const [reviewOnlyImbalanced, setReviewOnlyImbalanced] = useState(false);
   const [focusedImbalancedReceiptIds, setFocusedImbalancedReceiptIds] = useState<string[]>([]);
+  // Which page the reviewer should open on, when the caller has an opinion.
+  // "Review the whole batch" asks for 0; opening one particular receipt asks
+  // for nothing and is positioned by selectedReceipt instead. Undefined is
+  // therefore meaningful and must not be replaced with a number.
+  const [reviewerStartIndex, setReviewerStartIndex] = useState<number | undefined>(undefined);
   const [showParticularsOnExport, setShowParticularsOnExport] = useState(false);
   const [isDark, setIsDark] = useState<boolean>(() => {
     try {
@@ -290,6 +296,7 @@ export default function App() {
   ) => {
     setReviewOnlyImbalanced(focusImbalanced);
     setFocusedImbalancedReceiptIds(focusImbalanced ? focusReceiptIds : []);
+    setReviewerStartIndex(initialReceiptIndex);
     setActiveBatch(batch);
     if (receipt) {
       setSelectedReceipt(receipt);
@@ -323,6 +330,22 @@ export default function App() {
 
   const handleExportExcel = (transactions: Transaction[]) => {
     setActiveTransactions(transactions);
+
+    // Navigating to the export screen unmounts the reviewer, and its in-memory
+    // edits go with it. These rows ARE those edits — already written to the
+    // database — so they have to be adopted here as well, because they are what
+    // the reviewer re-seeds itself from when Back sends the user straight to it
+    // again. Without this the reviewer came back showing the pre-edit values
+    // while the database held the corrected ones.
+    const regrouped = groupTransactionsByReceipt(transactions, allReceiptTransactions);
+    setAllReceiptTransactions(regrouped);
+    // Seeding gives initialTransactions priority over the map for whichever
+    // receipt is selected, so refreshing only the map would leave that one
+    // receipt — usually the one just edited — still stale.
+    setLiveExtractedTransactions(
+      selectedReceipt ? regrouped[selectedReceipt.id] || [] : []
+    );
+
     setShowParticularsOnExport(false);
     setCurrentView('exporter');
   };
@@ -341,14 +364,16 @@ export default function App() {
     // The export screen contains the latest saved reviewer values. Rebuild the
     // map from that data so focused review does not resurrect an older balanced
     // or imbalanced state from the original batch load.
-    const latestTransactions = { ...allReceiptTransactions };
-    for (const transaction of activeTransactions) {
-      if (!transaction.receipt_id) continue;
-      latestTransactions[transaction.receipt_id] = [
-        ...(latestTransactions[transaction.receipt_id] || []).filter(row => row.id !== transaction.id),
-        transaction,
-      ];
-    }
+    //
+    // Whole-receipt replacement, not row-by-row merging. The previous version
+    // filtered each row out of the old array and appended it back, which left
+    // rows the reviewer had DELETED still present — so a voucher balanced by
+    // deleting a duplicate line came back here still out of balance — and moved
+    // every edited row to the end of its voucher.
+    const latestTransactions = groupTransactionsByReceipt(
+      activeTransactions,
+      allReceiptTransactions,
+    );
     handleSelectBatch(
       activeBatch,
       receipt,
@@ -471,7 +496,12 @@ export default function App() {
             batch={activeBatch}
             currentUser={currentUser}
             selectedReceipt={selectedReceipt}
-            initialReceiptIndex={0}
+            // Passed through, not pinned. Hardcoding 0 here made every entry
+            // into the reviewer open on the first receipt, whichever one had
+            // actually been chosen — so "Review & Edit" on a row, and the
+            // redirect after "Fix imbalanced receipts", both showed somebody
+            // else's voucher and photo.
+            initialReceiptIndex={reviewerStartIndex}
             initialTransactions={liveExtractedTransactions}
             allReceiptTransactions={allReceiptTransactions}
             reviewOnlyImbalanced={reviewOnlyImbalanced}

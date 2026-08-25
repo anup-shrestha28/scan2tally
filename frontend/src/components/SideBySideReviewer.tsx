@@ -5,6 +5,7 @@ import { saveTransactionsForReceipt, getReceiptImageUrl, deleteReceipt, fetchLed
 import { LEDGER_MATCHING } from '../lib/features';
 import { duplicateVoucherGroups, sortReceiptsByVoucherNo } from '../lib/receiptOrder';
 import { findImbalanceSuspects, describeMisread, ImbalanceSuspect } from '../lib/imbalance';
+import { resolveStartIndex } from '../lib/reviewerNavigation';
 
 /** Ties the ledger inputs to the single datalist rendered at the bottom. */
 const LEDGER_OPTIONS_ID = 'chart-of-accounts';
@@ -231,11 +232,13 @@ export default function SideBySideReviewer({
 
   // Find the starting index inside the currently visible set. In focused mode
   // this prevents the image panel from opening on a non-imbalanced receipt.
-  const startIndex = initialReceiptIndex ?? (selectedReceipt
-    ? visibleReceipts.findIndex(r => r.id === selectedReceipt.id)
-    : 0);
+  const startIndex = resolveStartIndex(
+    visibleReceipts,
+    selectedReceipt?.id,
+    initialReceiptIndex,
+  );
 
-  const [currentIndex, setCurrentIndex] = useState(Math.max(0, startIndex));
+  const [currentIndex, setCurrentIndex] = useState(startIndex);
   const currentReceipt = visibleReceipts[currentIndex] || null;
   // Voucher-number edits can reorder visibleReceipts while the reviewer is
   // open. Keep the page identity separate from its numeric position so page 2
@@ -418,9 +421,29 @@ export default function SideBySideReviewer({
     currentReceiptIdRef.current = visibleReceipts[currentIndex]?.id || null;
   }, [visibleReceiptSignature, currentIndex]);
 
+  // Move to the page the CALLER asked for, and only when that request actually
+  // changes.
+  //
+  // Keying this on startIndex instead would re-fire whenever visibleReceipts
+  // reorders, because startIndex is looked up inside that list: editing a
+  // voucher number re-sorts it, entering focused mode shrinks it, and either
+  // would jump the reviewer away from the receipt being worked on. Holding the
+  // receipt still while the list moves underneath it is the job of the effect
+  // above, which follows the id rather than the position.
+  const requestedStartRef = useRef<string | null>(null);
   useEffect(() => {
-    setCurrentIndex(Math.max(0, startIndex));
-  }, [startIndex]);
+    const request = `${initialReceiptIndex ?? ''}|${selectedReceipt?.id ?? ''}`;
+    if (requestedStartRef.current === request) return;
+    requestedStartRef.current = request;
+
+    setCurrentIndex(startIndex);
+    // Adopted here too, so the id-following effect agrees with the move
+    // instead of immediately pulling the reviewer back to the old receipt.
+    currentReceiptIdRef.current = visibleReceipts[startIndex]?.id || null;
+    // startIndex and visibleReceipts are read, not depended on: this must react
+    // to the request changing, never to the list rearranging.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialReceiptIndex, selectedReceipt?.id]);
 
   // Restore the saved orientation whenever the reviewer moves to another
   // receipt. The orientation is kept per receipt, including after a reload.
