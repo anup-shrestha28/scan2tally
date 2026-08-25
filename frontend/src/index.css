@@ -1236,6 +1236,39 @@ input:-webkit-autofill:focus {
   background-color: rgba(245, 158, 11, 0.06);
 }
 
+/* The one amount that would explain a voucher not balancing.
+   Rose rather than the amber used for "the passes disagreed": amber means
+   nobody is sure, this means the arithmetic says something here is wrong. */
+.amount-suspect {
+  background-color: rgba(244, 63, 94, 0.14);
+  border-color: rgba(244, 63, 94, 0.65);
+  font-weight: 700;
+}
+.amount-suspect:hover,
+.amount-suspect:focus {
+  border-color: var(--accent-rose);
+}
+
+/* Same shape as the ledger suggestion below the account name — one clickable
+   hint pattern, so a reviewer learns it once. */
+.amount-hint-suggest {
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  color: var(--accent-rose);
+  /* Top-aligned and wrapping: this sentence is longer than the ledger hints
+     and the cell it sits in clips overflow, so it has to be allowed to run
+     onto a second line rather than be cut off mid-amount. */
+  align-items: flex-start;
+  line-height: 1.35;
+}
+.amount-hint-suggest > span { min-width: 0; }
+.amount-hint-suggest svg { margin-top: 2px; }
+.amount-hint-suggest strong { font-variant-numeric: tabular-nums; }
+.amount-hint-suggest:hover { text-decoration: underline; }
+
 /* Placeholder shown in the unused side of a Dr/Cr row */
 .amount-empty {
   display: block;
@@ -1323,6 +1356,15 @@ input[type='number']::-webkit-inner-spin-button {
    specificity rather than left to source order, because the two rules now sit
    on the same element and a later edit could silently flip which one shows. */
 .tx-row-debit.row-needs-review td { background-color: rgba(245, 158, 11, 0.06); }
+
+/* Last, and deliberately so. A row can be both "the passes disagreed" and "the
+   arithmetic says this amount is wrong", and these carry equal specificity, so
+   source order is what decides. The arithmetic wins: it is the more certain of
+   the two and the one with an action attached. */
+.row-imbalance-suspect td,
+.tx-row-debit.row-imbalance-suspect td {
+  background-color: rgba(244, 63, 94, 0.07);
+}
 
 .status-pill-strong { font-weight: 700; }
 .btn-icon { padding: 4px 6px; }

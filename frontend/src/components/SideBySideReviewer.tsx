@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2, RotateCcw, RotateCw, ZoomIn, ChevronLeft, ChevronRight, Loader2, HelpCircle, FileSignature } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2, RotateCcw, RotateCw, ZoomIn, ChevronLeft, ChevronRight, Loader2, HelpCircle, FileSignature, Scale } from 'lucide-react';
 import { ScanBatch, Receipt, Transaction, User, Ledger } from '../types';
 import { saveTransactionsForReceipt, getReceiptImageUrl, deleteReceipt, fetchLedgers, resolveLedgerName } from '../lib/db';
 import { LEDGER_MATCHING } from '../lib/features';
 import { duplicateVoucherGroups, sortReceiptsByVoucherNo } from '../lib/receiptOrder';
+import { findImbalanceSuspects, describeMisread, ImbalanceSuspect } from '../lib/imbalance';
 
 /** Ties the ledger inputs to the single datalist rendered at the bottom. */
 const LEDGER_OPTIONS_ID = 'chart-of-accounts';
@@ -70,12 +71,16 @@ function AmountInput({
   value,
   tone,
   uncertain,
+  suspect,
   onChange,
   onEnter
 }: {
   value: number;
   tone: 'debit' | 'credit';
+  /** The extraction's own passes disagreed on this cell. */
   uncertain?: boolean;
+  /** This amount is the one that would explain the voucher not balancing. */
+  suspect?: boolean;
   onChange: (amount: number) => void;
   onEnter?: () => void;
 }) {
@@ -92,8 +97,18 @@ function AmountInput({
       // size=1 kills the ~20ch intrinsic width an <input> otherwise demands,
       // which would override the table's column widths.
       size={1}
-      className={`cell-input amount-input amount-${tone}${uncertain ? ' amount-uncertain' : ''}`}
-      title={uncertain ? 'This amount may be inaccurate. Please verify it with the receipt.' : undefined}
+      className={
+        `cell-input amount-input amount-${tone}` +
+        `${uncertain ? ' amount-uncertain' : ''}` +
+        `${suspect ? ' amount-suspect' : ''}`
+      }
+      title={
+        suspect
+          ? 'This is the amount that would explain the voucher not balancing. Check it against the image.'
+          : uncertain
+            ? 'This amount may be inaccurate. Please verify it with the receipt.'
+            : undefined
+      }
       placeholder="0.00"
       value={draft !== null ? draft : formatted}
       onFocus={() => setDraft(value ? String(value) : '')}
@@ -817,6 +832,25 @@ export default function SideBySideReviewer({
   const totalCredit = transactions.reduce((acc, curr) => acc + (Number(curr.credit_amount) || 0), 0);
   const isBalanced = Math.abs(totalDebit - totalCredit) < 0.05;
 
+  // Which amount, if any, is worth re-reading against the photo. Recomputed as
+  // the grid is edited, so correcting the row makes its own hint disappear.
+  const suspectsByRow = useMemo(() => {
+    const found = isBalanced
+      ? []
+      : findImbalanceSuspects(transactions, totalDebit - totalCredit);
+    return new Map(found.map(suspect => [suspect.transactionId, suspect]));
+  }, [transactions, totalDebit, totalCredit, isBalanced]);
+
+  /** Takes the suggested reading. Routed through the normal edit path, so it
+   *  is undoable and autosaves exactly as typing the number would. */
+  const applySuggestedAmount = (suspect: ImbalanceSuspect) => {
+    handleUpdateTransaction(
+      suspect.transactionId,
+      suspect.side === 'debit' ? 'debit_amount' : 'credit_amount',
+      suspect.suggested
+    );
+  };
+
   const imbalancedReceiptIds = visibleReceipts.filter(receipt => {
     // The currently open voucher may have unsaved edits; use the live grid.
     const rows = receipt.id === currentReceipt?.id ? transactions : rowsForReceipt(receipt.id);
@@ -1065,11 +1099,30 @@ export default function SideBySideReviewer({
                 </span>
               )}
             </div>
-            <span className={`balance-pill ${isBalanced ? 'balance-ok' : 'balance-warn'}`}>
+            <span
+              className={`balance-pill ${isBalanced ? 'balance-ok' : 'balance-warn'}`}
+              // Naming the gap matters most when no row could be singled out:
+              // the reviewer at least knows what they are hunting for.
+              title={
+                isBalanced
+                  ? undefined
+                  : `${totalDebit > totalCredit ? 'Credit' : 'Debit'} is short by Rs. ` +
+                    `${Math.abs(totalDebit - totalCredit).toLocaleString('en-IN', {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}`
+              }
+            >
               {isBalanced ? (
                 <><CheckCircle2 size={14} /> Voucher balanced</>
               ) : (
-                <><AlertTriangle size={14} /> Voucher out of balance</>
+                <>
+                  <AlertTriangle size={14} /> Out of balance by Rs.{' '}
+                  {Math.abs(totalDebit - totalCredit).toLocaleString('en-IN', {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </>
               )}
             </span>
           </div>
@@ -1117,12 +1170,15 @@ export default function SideBySideReviewer({
                   </tr>
                 </thead>
                 <tbody>
-                  {transactions.map((tx) => (
+                  {transactions.map((tx) => {
+                    const suspect = suspectsByRow.get(tx.id);
+                    return (
                     <tr
                       key={tx.id}
                       className={
                         `${tx.entry_type === 'Dr' ? 'tx-row-debit' : ''}` +
-                        `${tx.needs_review ? ' row-needs-review' : ''}`
+                        `${tx.needs_review ? ' row-needs-review' : ''}` +
+                        `${suspect ? ' row-imbalance-suspect' : ''}`
                       }
                     >
                       <td>
@@ -1173,12 +1229,38 @@ export default function SideBySideReviewer({
                             <span>Not in your chart of accounts</span>
                           </div>
                         )}
+
+                        {/* Sits beside the ledger name rather than under the
+                            amount because the amount column is 112px wide and
+                            clips. The amount itself is tinted to match, which
+                            is what ties the two together. */}
+                        {suspect && (
+                          <button
+                            type="button"
+                            className="ledger-hint amount-hint-suggest"
+                            onClick={() => applySuggestedAmount(suspect)}
+                            title={describeMisread(suspect)}
+                          >
+                            <Scale size={11} />
+                            <span>
+                              Did you mean{' '}
+                              <strong>
+                                {suspect.suggested.toLocaleString('en-IN', {
+                                  minimumFractionDigits: 2,
+                                  maximumFractionDigits: 2,
+                                })}
+                              </strong>
+                              ? That balances this voucher.
+                            </span>
+                          </button>
+                        )}
                       </td>
                       <td>
                         {tx.entry_type === 'Dr' ? (
                           <AmountInput
                             tone="debit"
                             uncertain={tx.needs_review}
+                            suspect={Boolean(suspect)}
                             value={tx.debit_amount || 0}
                             onChange={(amount) => handleUpdateTransaction(tx.id, 'debit_amount', amount)}
                             onEnter={() => void handleSaveProgress()}
@@ -1192,6 +1274,7 @@ export default function SideBySideReviewer({
                           <AmountInput
                             tone="credit"
                             uncertain={tx.needs_review}
+                            suspect={Boolean(suspect)}
                             value={tx.credit_amount || 0}
                             onChange={(amount) => handleUpdateTransaction(tx.id, 'credit_amount', amount)}
                             onEnter={() => void handleSaveProgress()}
@@ -1211,7 +1294,8 @@ export default function SideBySideReviewer({
                         </button>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
