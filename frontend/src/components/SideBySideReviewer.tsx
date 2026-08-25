@@ -1,10 +1,16 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { ArrowLeft, Save, CheckCircle2, AlertTriangle, FileSpreadsheet, Plus, Trash2, RotateCcw, RotateCw, ZoomIn, ChevronLeft, ChevronRight, Loader2, HelpCircle, FileSignature, Scale } from 'lucide-react';
 import { ScanBatch, Receipt, Transaction, User, Ledger } from '../types';
-import { saveTransactionsForReceipt, getReceiptImageUrl, deleteReceipt, fetchLedgers, resolveLedgerName } from '../lib/db';
+import { saveTransactionsForReceipt, getReceiptImageUrl, deleteReceipt, fetchLedgers, resolveLedgerName, fetchStatedVoucherTotals } from '../lib/db';
 import { LEDGER_MATCHING } from '../lib/features';
 import { duplicateVoucherGroups, sortReceiptsByVoucherNo } from '../lib/receiptOrder';
-import { findImbalanceSuspects, describeMisread, ImbalanceSuspect } from '../lib/imbalance';
+import {
+  findImbalanceSuspects,
+  findStatedTotalDiscrepancies,
+  describeMisread,
+  ImbalanceSuspect,
+  StatedVoucherTotals,
+} from '../lib/imbalance';
 import { resolveStartIndex } from '../lib/reviewerNavigation';
 
 /** Ties the ledger inputs to the single datalist rendered at the bottom. */
@@ -73,6 +79,7 @@ function AmountInput({
   tone,
   uncertain,
   suspect,
+  sideMismatch,
   onChange,
   onEnter
 }: {
@@ -82,6 +89,8 @@ function AmountInput({
   uncertain?: boolean;
   /** This amount is the one that would explain the voucher not balancing. */
   suspect?: boolean;
+  /** This whole column disagrees with the voucher's own जम्मा total. */
+  sideMismatch?: boolean;
   onChange: (amount: number) => void;
   onEnter?: () => void;
 }) {
@@ -101,14 +110,19 @@ function AmountInput({
       className={
         `cell-input amount-input amount-${tone}` +
         `${uncertain ? ' amount-uncertain' : ''}` +
-        `${suspect ? ' amount-suspect' : ''}`
+        // The specific accusation outranks the column-wide one: if this amount
+        // is the one that explains the gap, saying so is more use than saying
+        // its column is out.
+        `${suspect ? ' amount-suspect' : sideMismatch ? ' amount-side-mismatch' : ''}`
       }
       title={
         suspect
           ? 'This is the amount that would explain the voucher not balancing. Check it against the image.'
-          : uncertain
-            ? 'This amount may be inaccurate. Please verify it with the receipt.'
-            : undefined
+          : sideMismatch
+            ? 'These amounts do not add up to the total written on the voucher. Check them against the image.'
+            : uncertain
+              ? 'This amount may be inaccurate. Please verify it with the receipt.'
+              : undefined
       }
       placeholder="0.00"
       value={draft !== null ? draft : formatted}
@@ -197,6 +211,10 @@ export default function SideBySideReviewer({
   // The organisation's real ledgers, so a name can be picked rather than typed
   // and so the reviewer is told when one will not survive the trip into Tally.
   const [ledgers, setLedgers] = useState<Ledger[]>([]);
+  // What each voucher's own जम्मा row claims its totals are, keyed by receipt.
+  // Absent for vouchers whose totals could not be read, and for databases that
+  // predate migration 002 — in both cases the reviewer simply says less.
+  const [statedTotals, setStatedTotals] = useState<Record<string, StatedVoucherTotals>>({});
 
   const allVisibleReceipts = sortReceiptsByVoucherNo(
     receipts.filter(receipt => !deletedReceiptIds.has(receipt.id)),
@@ -564,6 +582,18 @@ export default function SideBySideReviewer({
     return () => { cancelled = true; };
   }, []);
 
+  // One query per batch. Failure is silent by design — see the note on
+  // fetchStatedVoucherTotals; this only ever adds an explanation.
+  useEffect(() => {
+    const batchId = batch?.id;
+    if (!batchId) { setStatedTotals({}); return; }
+    let cancelled = false;
+    fetchStatedVoucherTotals(batchId)
+      .then(totals => { if (!cancelled) setStatedTotals(totals); })
+      .catch(() => { /* the reviewer simply says less about where to look */ });
+    return () => { cancelled = true; };
+  }, [batch?.id]);
+
   const ledgerById = (id?: string | null) => ledgers.find(l => l.id === id);
 
   const rotateBy = (degrees: number) => {
@@ -863,6 +893,23 @@ export default function SideBySideReviewer({
       : findImbalanceSuspects(transactions, totalDebit - totalCredit);
     return new Map(found.map(suspect => [suspect.transactionId, suspect]));
   }, [transactions, totalDebit, totalCredit, isBalanced]);
+
+  // Which side of this voucher disagrees with the voucher's OWN जम्मा total.
+  // Unlike the debit-versus-credit gap, this actually says where to look.
+  const sideDiscrepancies = useMemo(
+    () => findStatedTotalDiscrepancies(
+      transactions,
+      currentReceipt ? statedTotals[currentReceipt.id] : null,
+    ),
+    [transactions, statedTotals, currentReceipt?.id],
+  );
+  const mismatchedSides = useMemo(
+    () => new Set(sideDiscrepancies.map(item => item.side)),
+    [sideDiscrepancies],
+  );
+
+  const money = (value: number) =>
+    value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   /** Takes the suggested reading. Routed through the normal edit path, so it
    *  is undoable and autosaves exactly as typing the number would. */
@@ -1181,6 +1228,29 @@ export default function SideBySideReviewer({
                 />
               </div>
             </div>
+            {/* The voucher's own जम्मा row, disagreeing with what was read out
+                of the column beneath it. This is the only thing on screen that
+                can say WHICH side is wrong — comparing the two columns to each
+                other never can — so it names the side and marks its amounts. */}
+            {sideDiscrepancies.length > 0 && (
+              <div className="alert alert-warning text-xs voucher-total-alert" role="alert">
+                <AlertTriangle size={15} className="alert-icon" />
+                <span className="alert-body">
+                  {sideDiscrepancies.map(item => (
+                    <span key={item.side} className="voucher-total-line">
+                      <span className="alert-title">
+                        The {item.side} amounts below add up to Rs. {money(item.computed)}
+                      </span>
+                      , but this voucher&apos;s जम्मा row reads Rs. {money(item.stated)} —
+                      Rs. {money(Math.abs(item.difference))}{' '}
+                      {item.difference > 0 ? 'too much' : 'too little'}. Check the marked
+                      amounts against the image.
+                    </span>
+                  ))}
+                </span>
+              </div>
+            )}
+
             <div className="table-container">
               <table className="custom-table tx-table">
                 <thead>
@@ -1284,6 +1354,7 @@ export default function SideBySideReviewer({
                             tone="debit"
                             uncertain={tx.needs_review}
                             suspect={Boolean(suspect)}
+                            sideMismatch={mismatchedSides.has('debit')}
                             value={tx.debit_amount || 0}
                             onChange={(amount) => handleUpdateTransaction(tx.id, 'debit_amount', amount)}
                             onEnter={() => void handleSaveProgress()}
@@ -1298,6 +1369,7 @@ export default function SideBySideReviewer({
                             tone="credit"
                             uncertain={tx.needs_review}
                             suspect={Boolean(suspect)}
+                            sideMismatch={mismatchedSides.has('credit')}
                             value={tx.credit_amount || 0}
                             onChange={(amount) => handleUpdateTransaction(tx.id, 'credit_amount', amount)}
                             onEnter={() => void handleSaveProgress()}

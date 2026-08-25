@@ -21,9 +21,12 @@ import { transform } from 'esbuild';
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(resolve(here, '../src/lib/imbalance.ts'), 'utf8');
 const { code } = await transform(source, { loader: 'ts', format: 'esm' });
-const { findImbalanceSuspects, classifyMisread, describeMisread } = await import(
-  `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`
-);
+const {
+  findImbalanceSuspects,
+  findStatedTotalDiscrepancies,
+  classifyMisread,
+  describeMisread,
+} = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
 
 let failures = 0;
 const results = [];
@@ -310,6 +313,81 @@ check('missing amounts do not throw', (() => {
     return false;
   }
 })());
+
+// ===================================================================
+// Which SIDE disagrees with the voucher's own जम्मा row.
+//
+// This is the one thing that can say where an imbalance lives. Comparing debit
+// to credit only proves they differ; the जम्मा row is a third opinion, written
+// on the voucher, and it decides which column is at fault.
+// ===================================================================
+{
+  // bill7 again, with the totals the extraction actually read off it.
+  const { rows } = voucher(
+    Dr(8703.76), Dr(9800), Dr(26565),
+    Cr(114.88), Cr(1127), Cr(265), Cr(3480), Cr(278.76),
+    Cr(3395.17), Cr(1204.20), Cr(310.75), Cr(34973)
+  );
+  const stated = { debit: 45068.76, credit: 45068.76 };
+  const found = findStatedTotalDiscrepancies(rows, stated);
+
+  equal('bill7: exactly one side is named', 1, found.length);
+  equal('bill7: and it is the credit column', 'credit', found[0]?.side);
+  equal('bill7: reported as 80.00 too much', 80, found[0]?.difference);
+  equal('bill7: quoting what the rows add up to', 45148.76, found[0]?.computed);
+  equal('bill7: and what the voucher says', 45068.76, found[0]?.stated);
+  check(
+    'bill7: the debit column is NOT accused — it matches the जम्मा exactly',
+    !found.some(item => item.side === 'debit')
+  );
+}
+{
+  // Correcting the row clears the warning, since it is recomputed from the grid.
+  const { rows } = voucher(
+    Dr(8703.76), Dr(9800), Dr(26565),
+    Cr(114.88), Cr(1127), Cr(265), Cr(3400), Cr(278.76),
+    Cr(3395.17), Cr(1204.20), Cr(310.75), Cr(34973)
+  );
+  equal(
+    'bill7: fixing 3,480 to 3,400 silences it',
+    [],
+    findStatedTotalDiscrepancies(rows, { debit: 45068.76, credit: 45068.76 })
+  );
+}
+{
+  const { rows } = voucher(Dr(500), Cr(500));
+  equal('a voucher matching its जम्मा says nothing', [],
+    findStatedTotalDiscrepancies(rows, { debit: 500, credit: 500 }));
+
+  // Balanced against itself but wrong against the voucher: two errors that
+  // cancel out, which the debit-versus-credit check cannot see at all.
+  const both = findStatedTotalDiscrepancies(rows, { debit: 600, credit: 600 });
+  equal('a balanced voucher can still disagree with its जम्मा', 2, both.length);
+  equal('...naming both columns', ['debit', 'credit'], both.map(i => i.side));
+  equal('...each 100.00 short', [-100, -100], both.map(i => i.difference));
+}
+{
+  const { rows } = voucher(Dr(500), Cr(400));
+  equal('an unreadable जम्मा row says nothing', [],
+    findStatedTotalDiscrepancies(rows, { debit: null, credit: null }));
+  equal('no totals at all says nothing', [], findStatedTotalDiscrepancies(rows, null));
+  equal('undefined says nothing', [], findStatedTotalDiscrepancies(rows, undefined));
+
+  // Half a reading is still worth using.
+  const half = findStatedTotalDiscrepancies(rows, { debit: null, credit: 500 });
+  equal('one readable side is still checked', ['credit'], half.map(i => i.side));
+  equal('...reported as 100.00 too little', -100, half[0]?.difference);
+}
+{
+  const { rows } = voucher(Dr(500.02), Cr(500));
+  equal('a rounding-sized difference is not a discrepancy', [],
+    findStatedTotalDiscrepancies(rows, { debit: 500, credit: 500 }));
+}
+{
+  equal('no rows against a stated total reports the shortfall',
+    [-100, -100],
+    findStatedTotalDiscrepancies([], { debit: 100, credit: 100 }).map(i => i.difference));
+}
 
 // ===================================================================
 for (const { name, ok, detail } of results) {

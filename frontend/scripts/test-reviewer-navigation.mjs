@@ -21,6 +21,12 @@ const { groupTransactionsByReceipt, resolveStartIndex } = await import(
   `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`
 );
 
+const orderSource = readFileSync(resolve(here, '../src/lib/receiptOrder.ts'), 'utf8');
+const { code: orderCode } = await transform(orderSource, { loader: 'ts', format: 'esm' });
+const { sortReceiptsByVoucherNo } = await import(
+  `data:text/javascript;base64,${Buffer.from(orderCode).toString('base64')}`
+);
+
 let failures = 0;
 const results = [];
 
@@ -129,6 +135,61 @@ const row = (id, receipt_id, amount) => ({ id, receipt_id, debit_amount: amount 
   const snapshot = JSON.stringify(previous);
   groupTransactionsByReceipt([row('t1', 'r1', 999)], previous);
   equal('the previous map is left untouched', snapshot, JSON.stringify(previous));
+}
+
+// ===================================================================
+// Opening the reviewer once a batch finishes extracting.
+//
+// Reported as "6 receipts extracted and it opened on number 2". The batch
+// workspace picked the first receipt of the run in UPLOAD order and handed it
+// over; the reviewer paginates by VOUCHER number, so that receipt landed on
+// whatever page it sorted to. Both sides have to mean the same thing by "the
+// first one", which they now do by using the same sort.
+// ===================================================================
+{
+  // Uploaded bill1..bill4, but their voucher numbers run in another order.
+  const uploaded = [
+    { id: 'bill1', created_at: '2026-08-25T10:00:00Z' },
+    { id: 'bill2', created_at: '2026-08-25T10:01:00Z' },
+    { id: 'bill3', created_at: '2026-08-25T10:02:00Z' },
+    { id: 'bill4', created_at: '2026-08-25T10:03:00Z' },
+  ];
+  const txByReceipt = {
+    bill1: [{ voucher_no: '17' }],
+    bill2: [{ voucher_no: '4' }],
+    bill3: [{ voucher_no: '9' }],
+    bill4: [{ voucher_no: '22' }],
+  };
+
+  const displayed = sortReceiptsByVoucherNo(uploaded, txByReceipt);
+  equal('the reviewer displays them by voucher number',
+    ['bill2', 'bill3', 'bill1', 'bill4'], displayed.map(r => r.id));
+
+  // What the workspace hands over after the whole batch extracts.
+  const chosen = sortReceiptsByVoucherNo(uploaded, txByReceipt)[0];
+  equal('the batch opens on the receipt the reviewer shows first', 'bill2', chosen.id);
+  equal('...which is page 1', 0, resolveStartIndex(displayed, chosen.id));
+
+  // The old behaviour, kept here to show what it cost: upload order picked
+  // bill1, which is the third page.
+  equal('picking by upload order would have opened page 3', 2,
+    resolveStartIndex(displayed, uploaded[0].id));
+}
+{
+  // A partial retry should still land on the first RETRIED receipt, not on
+  // page 1 of the batch.
+  const all = [
+    { id: 'a', created_at: '2026-08-25T10:00:00Z' },
+    { id: 'b', created_at: '2026-08-25T10:01:00Z' },
+    { id: 'c', created_at: '2026-08-25T10:02:00Z' },
+  ];
+  const tx = { a: [{ voucher_no: '1' }], b: [{ voucher_no: '2' }], c: [{ voucher_no: '3' }] };
+  const displayed = sortReceiptsByVoucherNo(all, tx);
+  const rerun = all.filter(r => r.id === 'c' || r.id === 'b');
+
+  const chosen = sortReceiptsByVoucherNo(rerun, tx)[0];
+  equal('a retry of b and c opens on b', 'b', chosen.id);
+  equal('...at its real page', 1, resolveStartIndex(displayed, chosen.id));
 }
 
 // ===================================================================

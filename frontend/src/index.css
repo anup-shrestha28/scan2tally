@@ -1249,6 +1249,25 @@ input:-webkit-autofill:focus {
   border-color: var(--accent-rose);
 }
 
+/* A column that does not add up to the total written on the voucher.
+   Amber, not rose: this says "the error is somewhere in here", where rose says
+   "it is this one". Weaker claim, weaker mark. */
+.amount-side-mismatch {
+  background-color: rgba(245, 158, 11, 0.14);
+  border-color: rgba(245, 158, 11, 0.6);
+}
+.amount-side-mismatch:hover,
+.amount-side-mismatch:focus { border-color: var(--accent-amber); }
+
+/* Sits directly above the rows it is talking about rather than at the top of
+   the screen, because which column it names is the whole content. */
+.voucher-total-alert {
+  margin: 0 0 10px;
+  align-items: flex-start;
+}
+.voucher-total-line { display: block; }
+.voucher-total-line + .voucher-total-line { margin-top: 4px; }
+
 /* Same shape as the ledger suggestion below the account name — one clickable
    hint pattern, so a reviewer learns it once. */
 .amount-hint-suggest {

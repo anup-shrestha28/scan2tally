@@ -992,6 +992,53 @@ export async function fetchTransactionsForBatch(
 }
 
 /**
+ * The जम्मा totals each voucher states about itself, as the extraction read them.
+ *
+ * These are the only evidence available for WHICH SIDE of an unbalanced voucher
+ * is wrong. Comparing debit to credit says the two disagree and never which one
+ * is at fault; the जम्मा row is a third opinion, written on the voucher, and it
+ * settles the question.
+ *
+ * Read out of raw_extraction rather than from columns of their own. That column
+ * already holds the whole extraction result and PostgREST can project the one
+ * path out of it, so a receipt costs a few numbers here instead of the entire
+ * audit blob — and no migration is needed to reach data that has been stored
+ * all along.
+ *
+ * Never throws. raw_extraction arrives with migration 002, and a database
+ * without it should quietly lose this hint rather than fail the reviewer: the
+ * feature it powers is advisory, and everything else on the screen still works.
+ */
+export async function fetchStatedVoucherTotals(
+  batchId: string
+): Promise<Record<string, { debit: number | null; credit: number | null }>> {
+  const numeric = (value: unknown): number | null =>
+    typeof value === 'number' && Number.isFinite(value) ? value : null;
+
+  try {
+    const { data, error } = await supabase
+      .from('receipts')
+      .select('id, verification:raw_extraction->verification')
+      .eq('batch_id', batchId);
+    if (error) return {};
+
+    const totals: Record<string, { debit: number | null; credit: number | null }> = {};
+    for (const row of (data || []) as any[]) {
+      const verification = row.verification;
+      if (!verification || typeof verification !== 'object') continue;
+      const debit = numeric(verification.stated_debit);
+      const credit = numeric(verification.stated_credit);
+      // A voucher whose जम्मा row could not be read at all has nothing to say.
+      if (debit === null && credit === null) continue;
+      totals[row.id] = { debit, credit };
+    }
+    return totals;
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Replaces every line for a receipt.
  *
  * Delete-then-insert rather than diffing: a voucher is a small, self-contained

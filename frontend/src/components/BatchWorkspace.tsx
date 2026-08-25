@@ -747,9 +747,13 @@ export default function BatchWorkspace({ currentUser, onSelectBatch, onViewParti
     }
 
     autoOpenRef.current = null;
-    const firstExtracted = runReceipts.find(
-      r => pending.receiptIds.includes(r.id) && r.status === 'Extracted'
-    );
+    // Sorted the way the reviewer will display them, not the order they were
+    // uploaded in. The reviewer paginates by voucher number, so handing it the
+    // first receipt of the run in upload order opened it on whatever page that
+    // receipt happened to land on — a freshly extracted batch would announce
+    // itself on page 2. Sorting the run through the same helper the reviewer
+    // uses makes "the first one" mean the same thing on both sides.
+    const firstExtracted = sortReceiptsByVoucherNo(runReceipts, receiptTransactionsMap)[0];
     if (firstExtracted) {
       onSelectBatch(
         batch,

@@ -220,6 +220,68 @@ export function findImbalanceSuspects(
   return evidence.length <= MAX_SUSPECTS ? evidence : [];
 }
 
+/**
+ * The जम्मा totals written on the voucher itself, as the extraction read them.
+ *
+ * Null where that row could not be read. These are themselves a reading, not
+ * ground truth, so anything said on the strength of them has to be attributed
+ * to the voucher rather than asserted.
+ */
+export interface StatedVoucherTotals {
+  debit: number | null;
+  credit: number | null;
+}
+
+export interface SideDiscrepancy {
+  side: 'debit' | 'credit';
+  /** What the rows on this side currently add up to. */
+  computed: number;
+  /** What the voucher's own जम्मा row says they should. */
+  stated: number;
+  /** computed - stated. Positive means the rows total more than the voucher says. */
+  difference: number;
+}
+
+/**
+ * Which SIDE of the voucher disagrees with the voucher's own जम्मा total.
+ *
+ * This is the one piece of real evidence about where an imbalance lives.
+ * Debit-versus-credit only says the two disagree, never which is wrong; the
+ * जम्मा row is a third opinion, written by the person who made the voucher, and
+ * it settles it. On the receipt that prompted this, the debits summed to
+ * exactly the stated 45,068.76 while the credits came to 45,098.76 — so the
+ * credit column was where to look, and no amount of comparing the two columns
+ * to each other could have said so.
+ *
+ * Both sides can be reported at once: two errors, or a misread जम्मा row.
+ * Recomputed from the live grid, so correcting a row clears its own warning.
+ */
+export function findStatedTotalDiscrepancies(
+  rows: readonly ImbalanceCandidateRow[],
+  stated: StatedVoucherTotals | null | undefined,
+): SideDiscrepancy[] {
+  if (!stated) return [];
+
+  const totals = { debit: 0, credit: 0 };
+  for (const row of rows) {
+    totals.debit += Number(row.debit_amount) || 0;
+    totals.credit += Number(row.credit_amount) || 0;
+  }
+
+  const found: SideDiscrepancy[] = [];
+  for (const side of ['debit', 'credit'] as const) {
+    const statedTotal = stated[side];
+    if (statedTotal === null || statedTotal === undefined || !Number.isFinite(statedTotal)) {
+      continue;
+    }
+    const computed = round2(totals[side]);
+    const difference = round2(computed - statedTotal);
+    if (Math.abs(difference) < BALANCED_WITHIN) continue;
+    found.push({ side, computed, stated: round2(statedTotal), difference });
+  }
+  return found;
+}
+
 /** Why this row is being questioned, in words a reviewer can check against the photo. */
 export function describeMisread(suspect: ImbalanceSuspect): string {
   const money = (value: number) =>
