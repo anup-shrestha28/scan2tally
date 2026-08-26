@@ -1275,8 +1275,25 @@ input:-webkit-autofill:focus {
   margin: 0 0 10px;
   align-items: flex-start;
 }
-.voucher-total-line { display: block; }
-.voucher-total-line + .voucher-total-line { margin-top: 4px; }
+.voucher-total-line {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.voucher-total-line + .voucher-total-line { margin-top: 8px; }
+/* A short title, then the figures side by side — bold and tabular so the two
+   amounts can be compared at a glance instead of read out of a sentence. */
+.voucher-total-figures {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  font-variant-numeric: tabular-nums;
+}
+.voucher-total-figures strong { font-weight: 700; }
+.voucher-total-dot { opacity: 0.45; }
+.voucher-total-delta { font-weight: 700; }
+.voucher-total-hint { font-size: 0.72rem; opacity: 0.8; }
 
 /* Same shape as the ledger suggestion below the account name — one clickable
    hint pattern, so a reviewer learns it once. */

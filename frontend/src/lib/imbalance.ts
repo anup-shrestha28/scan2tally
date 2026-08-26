@@ -282,6 +282,42 @@ export function findStatedTotalDiscrepancies(
   return found;
 }
 
+/**
+ * How a set of जम्मा disagreements should be presented.
+ *
+ * 'column'  — a specific side disagrees with the voucher; name it, and mark
+ *             that column.
+ * 'voucher' — both sides disagree with the जम्मा by the same amount while the
+ *             rows balance between themselves. Two errors cancelling out to
+ *             the rupee is vanishingly rare; what this pattern actually means
+ *             is that the rows AS A WHOLE do not match the total written on
+ *             the voucher — usually a misread जम्मा row, or rows that were
+ *             re-entered. Rendering it as two column warnings said the same
+ *             thing twice, accused both columns, and sat under a green
+ *             "Voucher balanced" badge, which read as the app contradicting
+ *             itself.
+ */
+export type StatedTotalsSummary =
+  | { kind: 'column'; sides: SideDiscrepancy[] }
+  | { kind: 'voucher'; stated: number; computed: number };
+
+export function summarizeStatedDiscrepancies(
+  discrepancies: readonly SideDiscrepancy[],
+): StatedTotalsSummary | null {
+  if (discrepancies.length === 0) return null;
+
+  if (discrepancies.length === 2) {
+    const [first, second] = discrepancies;
+    const statedAgree = Math.abs(first.stated - second.stated) < BALANCED_WITHIN;
+    const rowsBalance = Math.abs(first.computed - second.computed) < BALANCED_WITHIN;
+    if (statedAgree && rowsBalance) {
+      return { kind: 'voucher', stated: first.stated, computed: first.computed };
+    }
+  }
+
+  return { kind: 'column', sides: [...discrepancies] };
+}
+
 /** Why this row is being questioned, in words a reviewer can check against the photo. */
 export function describeMisread(suspect: ImbalanceSuspect): string {
   const money = (value: number) =>

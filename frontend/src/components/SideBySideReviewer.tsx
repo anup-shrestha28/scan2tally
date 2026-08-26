@@ -7,6 +7,7 @@ import { duplicateVoucherGroups, sortReceiptsByVoucherNo } from '../lib/receiptO
 import {
   findImbalanceSuspects,
   findStatedTotalDiscrepancies,
+  summarizeStatedDiscrepancies,
   describeMisread,
   ImbalanceSuspect,
   StatedVoucherTotals,
@@ -412,10 +413,23 @@ export default function SideBySideReviewer({
     };
   }, [currentReceipt?.id]);
 
-  // When currentIndex changes, load that receipt's transactions
+  // Load the open receipt's rows whenever the receipt on screen ACTUALLY
+  // changes.
+  //
+  // Keyed by receipt id, not page index. The receipt at a given index can
+  // change identity without the index moving: clicking "Fix imbalanced
+  // receipts" while already on page 1 shrinks the visible list, so a different
+  // receipt slides into position 0 — and an index-keyed load never fired. The
+  // image, filename and जम्मा totals all follow the receipt, so the screen
+  // showed one voucher's photo with another voucher's rows, and the जम्मा
+  // check dutifully reported that they disagreed.
   useEffect(() => {
-    setTransactions(getTxForReceipt(visibleReceipts[currentIndex] || null));
-  }, [currentIndex, deletedReceiptIds]);
+    setTransactions(getTxForReceipt(currentReceipt));
+    // The grid now mirrors this receipt's stored rows; nothing on it is an
+    // unsaved edit. A dirty flag left over from the previous receipt must not
+    // autosave these freshly loaded rows straight back.
+    dirtyRef.current = false;
+  }, [currentReceipt?.id, deletedReceiptIds]);
 
   // Editing a voucher number changes the sort order. Re-find the receipt by
   // id before allowing the numeric page index to identify a different one.
@@ -900,15 +914,27 @@ export default function SideBySideReviewer({
     ),
     [transactions, statedTotals, currentReceipt?.id],
   );
-  const mismatchedSides = useMemo(
-    () => new Set(sideDiscrepancies.map(item => item.side)),
+  const statedSummary = useMemo(
+    () => summarizeStatedDiscrepancies(sideDiscrepancies),
     [sideDiscrepancies],
+  );
+  // Column marks only when a specific column is implicated. When the whole
+  // voucher disagrees with its जम्मा, neither column is more suspect than the
+  // other, and marking both would just say the one thing twice.
+  const mismatchedSides = useMemo(
+    () => new Set(
+      statedSummary?.kind === 'column'
+        ? statedSummary.sides.map(item => item.side)
+        : []
+    ),
+    [statedSummary],
   );
 
   const money = (value: number) =>
     value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   const discrepancyTitle = (side: 'debit' | 'credit'): string | undefined => {
+    if (!mismatchedSides.has(side)) return undefined;
     const found = sideDiscrepancies.find(item => item.side === side);
     if (!found) return undefined;
     return (
@@ -1237,26 +1263,48 @@ export default function SideBySideReviewer({
                 />
               </div>
             </div>
-            {/* The voucher's own जम्मा row, disagreeing with what was read out
-                of the column beneath it. This is the only thing on screen that
-                can say WHICH side is wrong — comparing the two columns to each
-                other never can — so it names the side and marks its amounts. */}
-            {sideDiscrepancies.length > 0 && (
+            {/* The voucher's own जम्मा row disagreeing with the rows beneath
+                it. Two shapes: a specific COLUMN is out (name it, one line of
+                figures), or the rows as a whole do not match the जम्मा even
+                though they balance — said once, calmly, because that usually
+                means the जम्मा was misread or the rows re-entered, not that
+                both columns are wrong. */}
+            {statedSummary && (
               <div className="alert alert-warning text-xs voucher-total-alert" role="alert">
                 <AlertTriangle size={15} className="alert-icon" />
                 <span className="alert-body">
-                  {sideDiscrepancies.map(item => (
-                    <span key={item.side} className="voucher-total-line">
+                  {statedSummary.kind === 'voucher' ? (
+                    <span className="voucher-total-line">
                       <span className="alert-title">
-                        The {item.side} amounts below add up to Rs. {money(item.computed)}
+                        These rows don&apos;t match the total written on the voucher.
                       </span>
-                      , but this voucher&apos;s जम्मा row reads Rs. {money(item.stated)} —
-                      Rs. {money(Math.abs(item.difference))}{' '}
-                      {item.difference > 0 ? 'too much' : 'too little'}. Check the{' '}
-                      {item.side} column against the image; which of its amounts is
-                      wrong cannot be told from the totals alone.
+                      <span className="voucher-total-figures">
+                        <span>Voucher जम्मा: <strong>Rs. {money(statedSummary.stated)}</strong></span>
+                        <span className="voucher-total-dot">·</span>
+                        <span>These rows: <strong>Rs. {money(statedSummary.computed)}</strong></span>
+                      </span>
+                      <span className="voucher-total-hint">
+                        Check the amounts against the image — or ignore this if the जम्मा itself was read wrongly.
+                      </span>
                     </span>
-                  ))}
+                  ) : (
+                    statedSummary.sides.map(item => (
+                      <span key={item.side} className="voucher-total-line">
+                        <span className="alert-title">
+                          The {item.side} column doesn&apos;t match the voucher.
+                        </span>
+                        <span className="voucher-total-figures">
+                          <span>Voucher जम्मा: <strong>Rs. {money(item.stated)}</strong></span>
+                          <span className="voucher-total-dot">·</span>
+                          <span>These rows: <strong>Rs. {money(item.computed)}</strong></span>
+                          <span className="voucher-total-dot">·</span>
+                          <span className="voucher-total-delta">
+                            Rs. {money(Math.abs(item.difference))} {item.difference > 0 ? 'extra' : 'missing'}
+                          </span>
+                        </span>
+                      </span>
+                    ))
+                  )}
                 </span>
               </div>
             )}

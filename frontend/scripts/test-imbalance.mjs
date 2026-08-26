@@ -24,6 +24,7 @@ const { code } = await transform(source, { loader: 'ts', format: 'esm' });
 const {
   findImbalanceSuspects,
   findStatedTotalDiscrepancies,
+  summarizeStatedDiscrepancies,
   classifyMisread,
   describeMisread,
 } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
@@ -388,6 +389,53 @@ check('missing amounts do not throw', (() => {
     [-100, -100],
     findStatedTotalDiscrepancies([], { debit: 100, credit: 100 }).map(i => i.difference));
 }
+
+// ===================================================================
+// How the जम्मा disagreements are presented.
+//
+// Reported: a voucher whose rows balanced at 45,068.76 while its जम्मा read
+// 14,408.35 showed TWO long column warnings under a green "Voucher balanced"
+// badge. Both sides off by the same amount with balanced rows is one fact
+// about the whole voucher, not two facts about its columns.
+// ===================================================================
+{
+  const { rows } = voucher(Dr(45068.76), Cr(45068.76));
+  const summary = summarizeStatedDiscrepancies(
+    findStatedTotalDiscrepancies(rows, { debit: 14408.35, credit: 14408.35 })
+  );
+  equal('balanced rows vs a different जम्मा collapse to one notice', 'voucher', summary?.kind);
+  equal('...quoting the जम्मा', 14408.35, summary?.stated);
+  equal('...and what the rows add up to', 45068.76, summary?.computed);
+}
+{
+  // The earlier real case: debit matches the जम्मा exactly, credit is 30 over.
+  const { rows } = voucher(Dr(45068.76), Cr(45098.76));
+  const summary = summarizeStatedDiscrepancies(
+    findStatedTotalDiscrepancies(rows, { debit: 45068.76, credit: 45068.76 })
+  );
+  equal('a single side stays a column notice', 'column', summary?.kind);
+  equal('...naming only the credit column', ['credit'], summary?.sides?.map(s => s.side) ?? null);
+}
+{
+  // Both sides wrong by DIFFERENT amounts (the rows do not balance): two real
+  // column problems, and collapsing them would hide one.
+  const { rows } = voucher(Dr(150), Cr(170));
+  const summary = summarizeStatedDiscrepancies(
+    findStatedTotalDiscrepancies(rows, { debit: 100, credit: 100 })
+  );
+  equal('unequal disagreements stay per-column', 'column', summary?.kind);
+  equal('...with both columns named', ['debit', 'credit'], summary?.sides?.map(s => s.side) ?? null);
+}
+{
+  // A जम्मा that states two different totals is itself suspect; collapsing to
+  // one figure would misquote one of them.
+  const { rows } = voucher(Dr(150), Cr(150));
+  const summary = summarizeStatedDiscrepancies(
+    findStatedTotalDiscrepancies(rows, { debit: 100, credit: 120 })
+  );
+  equal('differing stated totals stay per-column', 'column', summary?.kind);
+}
+equal('nothing to summarize is null', null, summarizeStatedDiscrepancies([]));
 
 // ===================================================================
 for (const { name, ok, detail } of results) {
