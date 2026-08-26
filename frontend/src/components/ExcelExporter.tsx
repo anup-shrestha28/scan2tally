@@ -4,6 +4,7 @@ import ExcelJS from 'exceljs';
 import { ScanBatch, Transaction, User } from '../types';
 import { recordExport } from '../lib/db';
 import { LEDGER_MATCHING } from '../lib/features';
+import { orderGroupedReceiptIds } from '../lib/receiptOrder';
 
 interface ExcelExporterProps {
   transactions: Transaction[];
@@ -50,11 +51,12 @@ export default function ExcelExporter({ transactions, receiptNames = {}, batch, 
     if (!groupedTransactions[key]) groupedTransactions[key] = [];
     groupedTransactions[key].push(t);
   });
-  const groups = Object.values(groupedTransactions).sort((a, b) => {
-    const aNo = ((a[0] as any)?.voucher_no ?? '') as string;
-    const bNo = ((b[0] as any)?.voucher_no ?? '') as string;
-    return aNo.localeCompare(bNo, undefined, { numeric: true, sensitivity: 'base' });
-  });
+  // The voucher blocks in the SAME order the batch table and the reviewer show
+  // their receipts, so page 3 of the reviewer is voucher 3 here and in the
+  // downloaded .xlsx. This screen used to run its own sort, which put receipts
+  // WITHOUT a voucher number first — the exact opposite of everywhere else.
+  const groups = orderGroupedReceiptIds(batch?.receipts ?? [], groupedTransactions)
+    .map(id => groupedTransactions[id]);
   // Batch-level summary based on the values after reviewer edits. Voucher
   // boundaries do not apply here: repeated particulars across the batch are
   // intentionally combined into one Dr/Cr total.

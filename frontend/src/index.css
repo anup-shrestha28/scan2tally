@@ -1392,6 +1392,26 @@ input[type='number']::-webkit-inner-spin-button {
   table-layout: fixed;
 }
 
+/* A long voucher scrolls inside its panel, and the column headings used to
+   scroll away with it — twelve rows in, nothing said which column was Debit.
+   They now stay put while the rows move underneath. The header tint is
+   translucent by design, so it is layered over the opaque card colour here;
+   without that, rows ghost through the pinned heading. */
+.tx-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: linear-gradient(var(--bg-table-header), var(--bg-table-header)), var(--bg-card);
+}
+
+/* The table is the flexible child of the panel: banners and hints above it
+   squeeze it. A floor keeps several rows visible however much appears above —
+   past that, the panel body itself scrolls, which it already knows how to do. */
+.reviewer-body .table-container {
+  min-height: 240px;
+  overflow-y: auto;
+}
+
 .tx-table th,
 .tx-table td {
   padding: 8px 10px;

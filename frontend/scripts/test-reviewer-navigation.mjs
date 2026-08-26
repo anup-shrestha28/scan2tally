@@ -23,7 +23,7 @@ const { groupTransactionsByReceipt, resolveStartIndex, amountVerdictIsStale } = 
 
 const orderSource = readFileSync(resolve(here, '../src/lib/receiptOrder.ts'), 'utf8');
 const { code: orderCode } = await transform(orderSource, { loader: 'ts', format: 'esm' });
-const { sortReceiptsByVoucherNo } = await import(
+const { sortReceiptsByVoucherNo, orderGroupedReceiptIds } = await import(
   `data:text/javascript;base64,${Buffer.from(orderCode).toString('base64')}`
 );
 
@@ -135,6 +135,78 @@ const row = (id, receipt_id, amount) => ({ id, receipt_id, debit_amount: amount 
   const snapshot = JSON.stringify(previous);
   groupTransactionsByReceipt([row('t1', 'r1', 999)], previous);
   equal('the previous map is left untouched', snapshot, JSON.stringify(previous));
+}
+
+// ===================================================================
+// The canonical receipt order: voucher number first, then file name.
+//
+// Reported as "receipts appear in a random order". Two causes: uploads run
+// several files in parallel, so created_at within one burst lands in whatever
+// order the network finished; and the export screen ran its OWN sort that put
+// number-less receipts FIRST — the opposite of the table and the reviewer.
+// ===================================================================
+{
+  // The reported batch: bill7 carries voucher 17; the other five have no
+  // number and their upload timestamps landed scrambled by the parallelism.
+  const scrambled = [
+    { id: 'r-bill3', filename: 'bill3.jpg', created_at: '2026-08-26T15:55:03Z' },
+    { id: 'r-bill7', filename: 'bill7.jpg', created_at: '2026-08-26T15:55:05Z' },
+    { id: 'r-bill',  filename: 'bill.jpg',  created_at: '2026-08-26T15:55:04Z' },
+    { id: 'r-bill6', filename: 'bill6.jpg', created_at: '2026-08-26T15:55:01Z' },
+    { id: 'r-bill2', filename: 'bill2.jpg', created_at: '2026-08-26T15:55:06Z' },
+    { id: 'r-bill4', filename: 'bill4.jpg', created_at: '2026-08-26T15:55:02Z' },
+  ];
+  const tx = { 'r-bill7': [{ voucher_no: '17' }] };
+
+  equal(
+    'the numbered voucher leads; the rest follow in file-name order',
+    ['r-bill7', 'r-bill', 'r-bill2', 'r-bill3', 'r-bill4', 'r-bill6'],
+    sortReceiptsByVoucherNo(scrambled, tx).map(r => r.id)
+  );
+  check(
+    '...and scrambled upload times cannot disturb it',
+    JSON.stringify(sortReceiptsByVoucherNo([...scrambled].reverse(), tx).map(r => r.id)) ===
+      JSON.stringify(sortReceiptsByVoucherNo(scrambled, tx).map(r => r.id))
+  );
+}
+{
+  // Natural comparison, so bill10 does not land between bill1 and bill2.
+  const receipts = [
+    { id: 'a', filename: 'bill10.jpg', created_at: '2026-08-26T10:00:00Z' },
+    { id: 'b', filename: 'bill2.jpg',  created_at: '2026-08-26T10:00:01Z' },
+    { id: 'c', filename: 'bill1.jpg',  created_at: '2026-08-26T10:00:02Z' },
+  ];
+  equal('file names compare numerically, not alphabetically',
+    ['c', 'b', 'a'], sortReceiptsByVoucherNo(receipts, {}).map(r => r.id));
+}
+{
+  // The export screen's view of the same order: it holds grouped rows, not
+  // receipts, and must come out identical — its own sort used to put the
+  // number-less receipts first.
+  const receipts = [
+    { id: 'r1', filename: 'bill.jpg',  created_at: '2026-08-26T10:00:00Z' },
+    { id: 'r2', filename: 'bill7.jpg', created_at: '2026-08-26T10:00:01Z' },
+    { id: 'r3', filename: 'bill2.jpg', created_at: '2026-08-26T10:00:02Z' },
+  ];
+  const grouped = {
+    r1: [{ voucher_no: '' }],
+    r2: [{ voucher_no: '17' }],
+    r3: [{ voucher_no: '' }],
+  };
+  equal('the export orders voucher blocks exactly like the reviewer',
+    ['r2', 'r1', 'r3'], orderGroupedReceiptIds(receipts, grouped));
+
+  equal('rows whose receipt is gone are kept at the end, never dropped',
+    ['r2', 'r1', 'r3', 'orphan'],
+    orderGroupedReceiptIds(receipts, { ...grouped, orphan: [{ voucher_no: '' }] }));
+
+  equal('an empty group is not given a voucher block',
+    ['r2', 'r3'],
+    orderGroupedReceiptIds(receipts, { r2: grouped.r2, r3: grouped.r3, r1: [] }));
+
+  equal('no receipts at all falls back to first-seen order',
+    ['r1', 'r3'],
+    orderGroupedReceiptIds([], { r1: grouped.r1, r3: grouped.r3 }));
 }
 
 // ===================================================================
