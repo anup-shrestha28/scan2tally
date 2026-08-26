@@ -175,8 +175,16 @@ export default function SideBySideReviewer({
     return init;
   });
 
+  // Acknowledges a click of Save Now by turning the button itself into a
+  // check mark for a moment — including when there was nothing left to save,
+  // which is most of the time, since autosave usually beats the click.
   const [savedSuccess, setSavedSuccess] = useState(false);
-  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  // The save narrative, which must always have an answer: 'dirty' from the
+  // first keystroke, 'saving' while a write is in flight, 'saved' until the
+  // next edit. It used to be blank between an edit and the autosave timer, and
+  // "All changes saved" vanished after 2.5 seconds, so the feedback appeared
+  // and disappeared on a schedule nobody could predict.
+  const [saveState, setSaveState] = useState<'idle' | 'dirty' | 'saving' | 'saved' | 'error'>('idle');
   const [saveError, setSaveError] = useState<string | null>(null);
   const [imageUrl, setImageUrl] = useState<string>('');
   const [imageLoading, setImageLoading] = useState(false);
@@ -293,6 +301,16 @@ export default function SideBySideReviewer({
     getTxForReceipt(currentReceipt)
   );
 
+  /** Every edit passes through here. Marking the work dirty and saying so are
+   *  one act, so there is never a moment where changes exist but the screen
+   *  claims nothing is happening. */
+  const markEdited = () => {
+    dirtyRef.current = true;
+    changeVersionRef.current += 1;
+    setSavedSuccess(false);
+    setSaveState('dirty');
+  };
+
   const applyTransactionHistory = (direction: 'undo' | 'redo'): boolean => {
     if (!currentReceipt) return false;
     const sourceHistory = direction === 'undo' ? undoStacksRef.current : redoStacksRef.current;
@@ -306,8 +324,7 @@ export default function SideBySideReviewer({
     destination.push(entry);
     sourceHistory[currentReceipt.id] = source;
     destinationHistory[currentReceipt.id] = destination;
-    dirtyRef.current = true;
-    changeVersionRef.current += 1;
+    markEdited();
     const restoredRows = direction === 'undo' ? entry.before : entry.after;
     // AmountInput keeps an unformatted draft while focused. Blur it before
     // restoring a snapshot so the restored amount is shown immediately.
@@ -330,7 +347,6 @@ export default function SideBySideReviewer({
         .then(() => {
           setSaveState('saved');
           setSaveError(null);
-          window.setTimeout(() => setSaveState('idle'), 2500);
         })
         .catch((err: any) => {
           setSaveState('error');
@@ -427,8 +443,12 @@ export default function SideBySideReviewer({
     setTransactions(getTxForReceipt(currentReceipt));
     // The grid now mirrors this receipt's stored rows; nothing on it is an
     // unsaved edit. A dirty flag left over from the previous receipt must not
-    // autosave these freshly loaded rows straight back.
+    // autosave these freshly loaded rows straight back — and an "Unsaved
+    // changes" pill left over from it must not describe them either. Only the
+    // dirty pill is settled: an in-flight 'saving' or a landed 'saved' from
+    // the previous receipt is still the truth.
     dirtyRef.current = false;
+    setSaveState(previous => (previous === 'dirty' ? 'idle' : previous));
   }, [currentReceipt?.id, deletedReceiptIds]);
 
   // Editing a voucher number changes the sort order. Re-find the receipt by
@@ -512,8 +532,7 @@ export default function SideBySideReviewer({
             dirtyRef.current = false;
             setSaveState('saved');
             setSaveError(null);
-            window.setTimeout(() => setSaveState('idle'), 2500);
-          }
+            }
         })
         .catch((err: any) => {
           setSaveState('error');
@@ -670,7 +689,6 @@ export default function SideBySideReviewer({
       dirtyRef.current = false;
       setSaveState('saved');
       setSaveError(null);
-      window.setTimeout(() => setSaveState('idle'), 2500);
     }
     return true;
   };
@@ -696,7 +714,6 @@ export default function SideBySideReviewer({
       dirtyRef.current = false;
       setSaveState('saved');
       setSaveError(null);
-      window.setTimeout(() => setSaveState('idle'), 2500);
     }
     return true;
   };
@@ -737,8 +754,7 @@ export default function SideBySideReviewer({
       return t;
     });
     recordTransactionChange(before, after);
-    dirtyRef.current = true;
-    changeVersionRef.current += 1;
+    markEdited();
     setTransactions(after);
   };
 
@@ -746,8 +762,7 @@ export default function SideBySideReviewer({
     const before = transactions;
     const after = transactions.map(t => ({ ...t, [field]: value }));
     recordTransactionChange(before, after);
-    dirtyRef.current = true;
-    changeVersionRef.current += 1;
+    markEdited();
     setTransactions(after);
     if (field === 'voucher_no') {
       if (currentReceipt) {
@@ -784,8 +799,7 @@ export default function SideBySideReviewer({
     };
     const after = [...transactions, newTx];
     recordTransactionChange(transactions, after);
-    dirtyRef.current = true;
-    changeVersionRef.current += 1;
+    markEdited();
     setTransactions(after);
   };
 
@@ -795,21 +809,26 @@ export default function SideBySideReviewer({
     const after = transactions.filter(t => t.id !== id);
     if (before.length === after.length) return;
     recordTransactionChange(before, after);
-    dirtyRef.current = true;
-    changeVersionRef.current += 1;
+    markEdited();
     setTransactions(after);
   };
 
   const handleSaveProgress = async () => {
-    if (!dirtyRef.current) return;
-    if (currentReceipt) {
-      setTxMap(prev => ({ ...prev, [currentReceipt.id]: transactions }));
+    // A click always gets an answer. Autosave usually beats a human to the
+    // button, so most clicks arrive with nothing left to write — and this used
+    // to return silently in that case, which read as the button being broken.
+    // Now the honest answer to "save this" when everything is saved is the
+    // same tick the dirty path ends with.
+    if (dirtyRef.current) {
+      if (currentReceipt) {
+        setTxMap(prev => ({ ...prev, [currentReceipt.id]: transactions }));
+      }
+      // Writes through rather than only confirming: this button previously
+      // reported success while nothing left the browser.
+      if (!(await flushPendingSave())) return;
     }
-    // Writes through rather than only confirming: this button previously
-    // reported success while nothing left the browser.
-    if (!(await flushPendingSave())) return;
     setSavedSuccess(true);
-    setTimeout(() => setSavedSuccess(false), 3000);
+    setTimeout(() => setSavedSuccess(false), 2000);
   };
 
   const handleBack = async () => {
@@ -983,8 +1002,7 @@ export default function SideBySideReviewer({
   const handleUpdateNarration = (value: string) => {
     const after = transactions.map(t => ({ ...t, narration: value }));
     recordTransactionChange(transactions, after);
-    dirtyRef.current = true;
-    changeVersionRef.current += 1;
+    markEdited();
     setTransactions(after);
   };
 
@@ -1011,13 +1029,20 @@ export default function SideBySideReviewer({
 
         <div className="row-sm" style={{ gap: '10px' }}>
           {/* Reflects what has actually reached the database, so "Saved" is
-              never claimed for work that only exists in the browser. */}
+              never claimed for work that only exists in the browser. One of
+              these is showing from the first keystroke onwards — the answer to
+              "did my edit save?" must never be a blank space. */}
+          {saveState === 'dirty' && (
+            <span className="save-state save-state-dirty">
+              <span className="save-dot" aria-hidden="true" /> Unsaved changes
+            </span>
+          )}
           {saveState === 'saving' && (
             <span className="save-state save-state-busy">
               <Loader2 size={15} className="animate-spin" /> Saving...
             </span>
           )}
-          {saveState === 'saved' && !savedSuccess && (
+          {saveState === 'saved' && (
             <span className="save-state save-state-ok">
               <CheckCircle2 size={16} /> All changes saved
             </span>
@@ -1027,13 +1052,21 @@ export default function SideBySideReviewer({
               <AlertTriangle size={16} /> Not saved
             </span>
           )}
-          {savedSuccess && (
-            <span className="save-state save-state-ok">
-              <CheckCircle2 size={16} /> Saved!
-            </span>
-          )}
-          <button className="btn btn-secondary" onClick={handleSaveProgress} disabled={saveState === 'saving'}>
-            <Save size={16} /> Save Now
+          {/* The button answers its own click: to the spinner while writing,
+              and to a tick either way — a click with nothing left to save is
+              still a question that deserves "yes, it is saved". */}
+          <button
+            className="btn btn-secondary"
+            onClick={handleSaveProgress}
+            disabled={saveState === 'saving' || savedSuccess}
+          >
+            {savedSuccess ? (
+              <><CheckCircle2 size={16} /> Saved</>
+            ) : saveState === 'saving' ? (
+              <><Loader2 size={16} className="animate-spin" /> Saving...</>
+            ) : (
+              <><Save size={16} /> Save Now</>
+            )}
           </button>
           <button className="btn btn-primary" onClick={handleExportAll}>
             <FileSpreadsheet size={16} /> Review Excel File

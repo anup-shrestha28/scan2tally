@@ -3150,6 +3150,17 @@ body.light .user-form-card .form-label {
 .save-state-busy { gap: 5px; font-weight: 400; color: var(--text-muted); }
 .save-state-ok { color: var(--accent-emerald); }
 .save-state-error { color: var(--accent-rose); }
+/* Edits exist that have not been written yet — quiet amber, not an error:
+   the autosave is about to handle it, this only says the work is not lost-safe
+   quite yet. */
+.save-state-dirty { gap: 6px; font-weight: 500; color: var(--accent-amber); }
+.save-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--accent-amber);
+  flex-shrink: 0;
+}
 
 /* Balance verdict, shown as a pill in the panel header. */
 .balance-pill {
