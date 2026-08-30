@@ -1008,33 +1008,46 @@ export async function fetchTransactionsForBatch(
  * Never throws. raw_extraction arrives with migration 002, and a database
  * without it should quietly lose this hint rather than fail the reviewer: the
  * feature it powers is advisory, and everything else on the screen still works.
+ *
+ * The same projection also carries the pencil regions — where pencil writing
+ * physically sits on each photo, for display-time masking — because both live
+ * in raw_extraction and fetching them apart would double the round trips for
+ * no reason.
  */
 export async function fetchStatedVoucherTotals(
   batchId: string
-): Promise<Record<string, { debit: number | null; credit: number | null }>> {
+): Promise<{
+  statedTotals: Record<string, { debit: number | null; credit: number | null }>;
+  pencilRegions: Record<string, unknown>;
+}> {
   const numeric = (value: unknown): number | null =>
     typeof value === 'number' && Number.isFinite(value) ? value : null;
 
   try {
     const { data, error } = await supabase
       .from('receipts')
-      .select('id, verification:raw_extraction->verification')
+      .select('id, verification:raw_extraction->verification, pencil_regions:raw_extraction->pencil_regions')
       .eq('batch_id', batchId);
-    if (error) return {};
+    if (error) return { statedTotals: {}, pencilRegions: {} };
 
-    const totals: Record<string, { debit: number | null; credit: number | null }> = {};
+    const statedTotals: Record<string, { debit: number | null; credit: number | null }> = {};
+    const pencilRegions: Record<string, unknown> = {};
     for (const row of (data || []) as any[]) {
+      if (Array.isArray(row.pencil_regions) && row.pencil_regions.length) {
+        // Kept raw here; the mask module re-validates before drawing anything.
+        pencilRegions[row.id] = row.pencil_regions;
+      }
       const verification = row.verification;
       if (!verification || typeof verification !== 'object') continue;
       const debit = numeric(verification.stated_debit);
       const credit = numeric(verification.stated_credit);
       // A voucher whose जम्मा row could not be read at all has nothing to say.
       if (debit === null && credit === null) continue;
-      totals[row.id] = { debit, credit };
+      statedTotals[row.id] = { debit, credit };
     }
-    return totals;
+    return { statedTotals, pencilRegions };
   } catch {
-    return {};
+    return { statedTotals: {}, pencilRegions: {} };
   }
 }
 

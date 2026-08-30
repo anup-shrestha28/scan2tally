@@ -13,6 +13,7 @@ import {
   StatedVoucherTotals,
 } from '../lib/imbalance';
 import { resolveStartIndex, amountVerdictIsStale } from '../lib/reviewerNavigation';
+import { maskPencilRegions } from '../lib/pencilMask';
 
 /** Ties the ledger inputs to the single datalist rendered at the bottom. */
 const LEDGER_OPTIONS_ID = 'chart-of-accounts';
@@ -216,6 +217,11 @@ export default function SideBySideReviewer({
   // Absent for vouchers whose totals could not be read, and for databases that
   // predate migration 002 — in both cases the reviewer simply says less.
   const [statedTotals, setStatedTotals] = useState<Record<string, StatedVoucherTotals>>({});
+  // Where pencil writing sits on each photo, so the displayed image can cover
+  // it. Kept raw (unknown) — the mask module validates before drawing.
+  const [pencilRegions, setPencilRegions] = useState<Record<string, unknown>>({});
+  // The untouched photo, kept beside the covered one; empty when nothing was
+  // covered. The toggle below only exists while this is set.
 
   const allVisibleReceipts = sortReceiptsByVoucherNo(
     receipts.filter(receipt => !deletedReceiptIds.has(receipt.id)),
@@ -544,7 +550,12 @@ export default function SideBySideReviewer({
   }, [transactions, currentReceipt?.id, batch?.id]);
 
   // Resolve a signed URL for the stored image; blob URLs from this session are
-  // used as-is, and only the storage path survives a refresh.
+  // used as-is, and only the storage path survives a refresh. Whatever the
+  // source, the URL passes through the pencil mask before being shown: pencil
+  // writing is excluded from the extracted data, and the client wants it
+  // invisible in the photo as well. The stored file itself is never modified —
+  // maskPencilRegions paints over a canvas COPY, and falls back to the
+  // original URL on any failure.
   useEffect(() => {
     let cancelled = false;
     // Do not leave the previous receipt visible while the new signed URL is
@@ -553,10 +564,17 @@ export default function SideBySideReviewer({
     setImageLoading(Boolean(currentReceipt));
     imageRetryReceiptIdRef.current = null;
     if (!currentReceipt) return;
+
+    const regions = pencilRegions[currentReceipt.id];
+    const present = (url: string) =>
+      maskPencilRegions(url, regions).then(masked => {
+        if (!cancelled) setImageUrl(masked);
+      });
+
     if (currentReceipt.previewUrl) {
-      setImageUrl(currentReceipt.previewUrl);
+      void present(currentReceipt.previewUrl);
       void preloadReceipt(currentReceipt).catch(() => undefined);
-      return;
+      return () => { cancelled = true; };
     }
     if (!currentReceipt.storage_path) {
       setImageLoading(false);
@@ -564,7 +582,7 @@ export default function SideBySideReviewer({
     }
     getReceiptImageUrl(currentReceipt.storage_path)
       .then(url => {
-        if (!cancelled) setImageUrl(url);
+        void present(url);
         void preloadReceipt(currentReceipt).catch(() => undefined);
       })
       .catch(() => {
@@ -575,7 +593,7 @@ export default function SideBySideReviewer({
       });
 
     return () => { cancelled = true; };
-  }, [currentReceipt?.id, currentReceipt?.previewUrl, currentReceipt?.storage_path]);
+  }, [currentReceipt?.id, currentReceipt?.previewUrl, currentReceipt?.storage_path, pencilRegions]);
 
   // Fetch and decode the adjacent page before the operator clicks it. This
   // keeps normal next/previous navigation responsive even when signed URL
@@ -608,13 +626,18 @@ export default function SideBySideReviewer({
   }, []);
 
   // One query per batch. Failure is silent by design — see the note on
-  // fetchStatedVoucherTotals; this only ever adds an explanation.
+  // fetchStatedVoucherTotals; this only ever adds an explanation, and the
+  // pencil regions only ever add a visual cover.
   useEffect(() => {
     const batchId = batch?.id;
-    if (!batchId) { setStatedTotals({}); return; }
+    if (!batchId) { setStatedTotals({}); setPencilRegions({}); return; }
     let cancelled = false;
     fetchStatedVoucherTotals(batchId)
-      .then(totals => { if (!cancelled) setStatedTotals(totals); })
+      .then(insights => {
+        if (cancelled) return;
+        setStatedTotals(insights.statedTotals);
+        setPencilRegions(insights.pencilRegions);
+      })
       .catch(() => { /* the reviewer simply says less about where to look */ });
     return () => { cancelled = true; };
   }, [batch?.id]);

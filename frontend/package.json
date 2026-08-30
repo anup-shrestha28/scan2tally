@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "node scripts/test-imbalance.mjs && node scripts/test-reviewer-navigation.mjs"
+    "test": "node scripts/test-imbalance.mjs && node scripts/test-reviewer-navigation.mjs && node scripts/test-pencil-mask.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

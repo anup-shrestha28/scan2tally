@@ -412,6 +412,9 @@ def test_every_concurrent_pass_shares_one_prepared_image(monkeypatch, quiet):
     monkeypatch.setattr(main, "openai_available", False)
     monkeypatch.setattr(main, "genai_available", True)
     monkeypatch.setattr(main, "OCR_CONSENSUS_RUNS", 3)
+    # The pencil locator is a live network call and must never run in a unit
+    # test. It shares the same prepared bytes, which the assertion covers.
+    monkeypatch.setattr(main, "gemini_locate_pencil", lambda b, m: [])
 
     prepares = []
     real_prepare = main.prepare_vision_image

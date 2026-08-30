@@ -21,7 +21,7 @@ import ledger_matching
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 import numpy as np
 import cv2
 from dotenv import load_dotenv
@@ -414,6 +414,38 @@ if GEMINI_THINKING_LEVEL not in _GEMINI_THINKING_LEVELS | {"default"}:
     )
     GEMINI_THINKING_LEVEL = "low"
 
+# Locating pencil writing so the app can cover it in the DISPLAYED image.
+#
+# The extraction prompts already exclude pencil from the data; this finds where
+# the pencil physically is, so the reviewer can hide it visually as well. The
+# stored photo is never modified — masking happens at display time, from these
+# coordinates, and is therefore reversible and can never destroy ink.
+#
+# A separate model from the transcription runs, deliberately. Measured on the
+# client's own vouchers: gemini-3.5-flash-lite boxed INK amounts as pencil
+# (2,595 / 475 / 4,050 / 8,715 on one voucher) — masking those would hide real
+# data — while gemini-3.6-flash boxed every pencil note tightly and no ink at
+# all. Set PENCIL_MASKING=false to skip the extra call entirely.
+PENCIL_MASKING = (
+    (os.getenv("PENCIL_MASKING") or "true").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+GEMINI_PENCIL_MODEL = os.getenv("GEMINI_PENCIL_MODEL", "gemini-3.6-flash")
+# Thinking level for the pencil locator specifically — NOT the transcription
+# knob. Measured on the same voucher: at "low" a locate run oscillated between
+# 2 and 8 notes found (most runs missing most of the pencil), at "medium"
+# every run found the full set. Locating pencil is a search task; reading a
+# voucher is not.
+GEMINI_PENCIL_THINKING = os.getenv("GEMINI_PENCIL_THINKING", "medium").strip().lower()
+if GEMINI_PENCIL_THINKING not in {"minimal", "low", "medium", "high", "default"}:
+    GEMINI_PENCIL_THINKING = "medium"
+# Independent locate passes, unioned. One pass sometimes misses the smallest
+# notes (observed: 8 boxes on one run, 2 on the next, same voucher, same
+# settings) — and for masking, a MISSED box shows the client exactly what they
+# asked to hide, while a duplicate box repaints paper the same colour. So
+# recall is bought the same way transcription accuracy is: independent passes.
+PENCIL_LOCATE_RUNS = max(1, min(3, int(_positive_env_number("PENCIL_LOCATE_RUNS", 3.0))))
+
 # Longest edge, in pixels, of the image actually handed to the vision provider.
 #
 # A phone photographs a voucher at ~4000x3000. Both providers tile images into
@@ -521,11 +553,13 @@ class ExtractionProgress:
         self._calls_total = max(0, int(total_calls))
         self._calls_done = 0
         passes = "pass" if transcription_passes == 1 else "passes"
+        extras = max(0, self._calls_total - transcription_passes)
         self.step(
             _PROGRESS_VISION_SENT,
             "vision requests sent",
             f"{engine}: {transcription_passes} transcription {passes} "
-            f"+ 1 totals/signature read, running concurrently",
+            f"+ {extras} verification {'read' if extras == 1 else 'reads'}, "
+            "running concurrently",
         )
 
     def vision_response(self) -> None:
@@ -987,7 +1021,21 @@ number immediately after the Nepali label "भौचर नं." / "भौचर
 This is NOT the date, a ledger amount, cheque number, or page number. Copy only the digits
 written beside that label. If it is genuinely absent or unreadable, return an empty string.
 
-CRITICAL RULE FOR PENCIL: DO NOT extract any text, numbers, or markings written in PENCIL (faint grey graphite). You MUST completely ignore pencil markings as if they do not exist. ONLY transcribe data written in ink (blue/black pen). If a cell contains ONLY pencil, treat it as EMPTY.
+CRITICAL RULE FOR PENCIL — this overrides everything else, read it twice:
+Vouchers often carry extra notes written in PENCIL: faint grey graphite strokes,
+visibly lighter and greyer than the blue/black ink entries. Pencil content is NOT
+part of the voucher and must be COMPLETELY ABSENT from your answer:
+  - A pencil note written under, beside, above or between ink words must NEVER be
+    merged into the ledger name — not appended, not bracketed, not hyphenated.
+    e.g. the ink says "Office Supplies" and a pencil note "Gluestick" is scribbled
+    beneath it: the ledger name is EXACTLY "Office Supplies" — never
+    "Office Supplies (Gluestick)" and never "Office Supplies - Gluestick".
+  - A cell whose only content is pencil is an EMPTY cell.
+  - Pencil digits are never amounts, totals, dates or voucher numbers.
+  - Pencil words are never narrations.
+Ink written with a light hand is still ink — judge by the grey, shiny,
+pressure-textured look of graphite, not by darkness alone, and never drop a
+faint ink entry.
 
 Ignore the bottom row labelled जम्मा entirely. It is a total, not a transaction; do not report it.
 
@@ -1025,7 +1073,7 @@ Return ONLY a JSON object in this shape:
 # glance at the whole voucher, not something that benefits from the multiple
 # independent passes the line items get.
 TOTALS_PROMPT = """
-Look at this handwritten Nepalese Goshwara voucher and answer two independent questions.
+Look at this handwritten Nepalese Goshwara voucher and answer three independent questions.
 
 1. Find the bottom row labelled जम्मा, which holds the voucher's own stated totals.
 That row has a total under the खर्च (डेबिट) / Debit side and one under the
@@ -1039,10 +1087,17 @@ near the bottom, beside a preparer/approver name, or in a dedicated signature bo
 Answer true only if you can see an actual signature-like mark, not merely a
 printed name or a blank line.
 
-CRITICAL RULE FOR PENCIL: DO NOT consider any text, numbers, or markings written in PENCIL (faint grey graphite). You MUST completely ignore pencil markings as if they do not exist. ONLY consider data written in ink (blue/black pen).
+3. Look carefully for PENCIL writing anywhere on the voucher — faint grey
+graphite strokes, visibly lighter and greyer than the ink entries. Pencil is
+often small: a short note squeezed under or beside an ink ledger line, a sum
+in a margin, a number near the header. Report has_pencil_marks true if ANY
+pencil writing exists, false only if you find none. Do NOT transcribe or
+describe the pencil content itself.
+
+CRITICAL RULE FOR PENCIL: DO NOT consider any text, numbers, or markings written in PENCIL (faint grey graphite) when answering questions 1 and 2. You MUST completely ignore pencil markings as if they do not exist. ONLY consider data written in ink (blue/black pen).
 
 Return ONLY a JSON object of this shape:
-    {"voucher_no": "19", "stated_total_debit": 14408.35, "stated_total_credit": 14408.35, "has_signature": true}
+    {"voucher_no": "19", "stated_total_debit": 14408.35, "stated_total_credit": 14408.35, "has_signature": true, "has_pencil_marks": false}
 """
 
 
@@ -1349,6 +1404,459 @@ def gemini_read_totals(image_bytes: bytes, media_type: str) -> dict:
     return _gemini_vision_json(TOTALS_PROMPT, image_bytes, media_type)
 
 
+PENCIL_NOTES_PROMPT = """
+Find every note written in PENCIL on this voucher photo — grey graphite
+strokes, visibly lighter and greyer than the blue/black ink entries. Pencil is
+often small: a note squeezed under an ink ledger line, sums in a margin, a
+number near the header. Check the WHOLE image including margins and corners.
+
+For each pencil note return what it says and where it is:
+{"pencil_notes": [{"text": "<the pencil text>", "box": [ymin, xmin, ymax, xmax]}, ...]}
+
+Coordinates normalized to 0-1000 of the image height and width; box TIGHT
+around the note. Do NOT list ink handwriting, printed text, stamps or
+signatures. Return {"pencil_notes": []} if there is no pencil.
+"""
+
+# More boxes than any voucher plausibly carries means the model went wrong;
+# masking dozens of regions would wallpaper the photo, so the answer is
+# discarded instead. On the client's own samples the worst genuine case was 8.
+MAX_PENCIL_REGIONS = 40
+
+
+def sanitize_pencil_regions(value) -> List[List[int]]:
+    """Only well-formed, non-degenerate, in-range boxes survive.
+
+    These coordinates cross a trust boundary — a model response, stored, then
+    executed as drawing instructions by the browser — so everything about them
+    is re-derived here rather than believed: clamped to the 0-1000 space,
+    corners reordered, degenerate slivers dropped.
+    """
+    if not isinstance(value, list):
+        return []
+    regions: List[List[int]] = []
+    for entry in value:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 4:
+            continue
+        try:
+            y0, x0, y1, x1 = (max(0, min(1000, int(round(float(v))))) for v in entry)
+        except (TypeError, ValueError):
+            continue
+        y0, y1 = sorted((y0, y1))
+        x0, x1 = sorted((x0, x1))
+        # Anything under 2 units in either direction is a stray line, not a note.
+        if y1 - y0 < 2 or x1 - x0 < 2:
+            continue
+        regions.append([y0, x0, y1, x1])
+    if len(regions) > MAX_PENCIL_REGIONS:
+        return []
+    return regions
+
+
+def sanitize_pencil_notes(value) -> List[dict]:
+    """Only notes with a well-formed box survive; text is optional and capped.
+
+    Each note becomes {"text": str, "box": [ymin, xmin, ymax, xmax]} with the
+    box held to exactly the sanitize_pencil_regions rules.
+    """
+    if not isinstance(value, list):
+        return []
+    notes: List[dict] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        box = sanitize_pencil_regions([entry.get("box")])
+        if not box:
+            continue
+        text = entry.get("text")
+        notes.append({
+            "text": str(text)[:200] if isinstance(text, str) else "",
+            "box": box[0],
+        })
+    if len(notes) > MAX_PENCIL_REGIONS:
+        return []
+    return notes
+
+
+def gemini_locate_pencil(image_bytes: bytes, media_type: str) -> List[dict]:
+    """Every pencil note on the voucher: its text and its box.
+
+    Display-only information: a failure here loses the visual masking for one
+    receipt and nothing else, so callers treat exceptions as an empty answer.
+    Runs on GEMINI_PENCIL_MODEL, not the transcription model — see the
+    PENCIL_MASKING note for the measured reason.
+
+    Asks for the note TEXT alongside the box, for two measured reasons. The
+    text is what makes the false-positive filter possible (a note that reads
+    back as the extracted ink date is not pencil — see
+    filter_pencil_note_candidates). And its own thinking level: at "low" the
+    same voucher oscillated between 2 and 8 notes per run, while at "medium"
+    every run found the full set, so this call does not follow
+    GEMINI_THINKING_LEVEL (tuned for transcription speed) but its own knob.
+    """
+    if genai_client is None:
+        raise RuntimeError("The Gemini client is not configured.")
+
+    config = genai_types.GenerateContentConfig(
+        response_mime_type="application/json",
+        max_output_tokens=4096,
+        temperature=0,
+        automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(
+            disable=True
+        ),
+    )
+    if GEMINI_PENCIL_THINKING != "default":
+        config.thinking_config = genai_types.ThinkingConfig(
+            thinking_level=GEMINI_PENCIL_THINKING.upper()
+        )
+
+    response = genai_client.models.generate_content(
+        model=GEMINI_PENCIL_MODEL,
+        contents=[
+            genai_types.Part.from_text(text=PENCIL_NOTES_PROMPT),
+            genai_types.Part.from_bytes(data=image_bytes, mime_type=media_type),
+        ],
+        config=config,
+    )
+
+    try:
+        content = response.text
+    except ValueError:
+        content = ""
+    if not content or not content.strip():
+        return []
+    cleaned = re.sub(r'^```json\s*', '', content.strip())
+    cleaned = re.sub(r'\s*```$', '', cleaned)
+    parsed = json.loads(cleaned)
+    if not isinstance(parsed, dict):
+        return []
+    return sanitize_pencil_notes(parsed.get("pencil_notes"))
+
+
+# --------------------------------------------------------------------------
+# Filtering the located notes before they are allowed to cover anything.
+#
+# The locator is right about pencil but occasionally lists something written
+# in ink — on the client's own vouchers it listed the ink-written मिति date,
+# and the cover then hid a real field. Asking a second model "is this pencil
+# or ink?" was built and measured first, and thrown away: on dark graphite
+# the verdicts flipped between runs in BOTH directions — one round rejected a
+# real pencil note ("Photocopy", stroke cores as dark as ink) while keeping
+# an injected box over the ink date. No model opinion at this photo quality
+# is stable enough to uncover pencil or to keep covering ink.
+#
+# What IS stable is the extraction itself: the transcription prompts refuse
+# pencil, so anything that made it into the extracted data is ink by
+# construction. A located note whose own text reads back as an extracted
+# date, ledger name or narration is therefore provably not a pencil-only
+# region, and only that proof uncovers a box. Amounts and voucher numbers
+# are deliberately NOT matched: pencil margin sums legitimately duplicate
+# the voucher's totals, and on these vouchers the voucher number itself is
+# often pencil-written.
+# --------------------------------------------------------------------------
+
+# Boxes from different locate runs describing the same note overlap at least
+# this much (IoU); measured near-duplicates score 0.75+.
+PENCIL_MERGE_OVERLAP = 0.4
+# Pixel backstop: stroke cores at or above this fraction of the local paper
+# brightness are unmistakably graphite-grey. Measured on the client's
+# vouchers: ink cores 0.31-0.62, pencil 0.50-0.90 — so above this line a note
+# is kept covered no matter what its text matched.
+PENCIL_GREY_VETO_RATIO = 0.66
+# Normalized texts shorter than this match nothing: single digits and marks
+# ("2", "4" page numerals in pencil) collide with too much real ink data.
+PENCIL_MATCH_MIN_CHARS = 4
+# The shorter of the two texts must be at least this share of the longer for
+# a containment to count as "the same writing" — "cash" alone must not match
+# a pencil note that merely mentions cash.
+PENCIL_MATCH_MIN_LENGTH_SHARE = 0.6
+# Consecutive digits required before a note counts as the extracted date.
+PENCIL_DATE_MIN_DIGITS = 6
+# How far a cover may spread beyond its located box, in pixels of the prepared
+# image, so it also hides the faint anti-aliased edge of the graphite. Spent
+# only across blank paper — see tighten_pencil_region for why a fixed pad was
+# the single worst thing about the covers.
+PENCIL_COVER_PAD_PX = 6
+# Rows/columns this faint count as empty when deciding where writing is.
+PENCIL_CONTENT_DARKNESS = 0.80
+# A row this much darker than the note's own body is a different, darker
+# writing — the ink line the box overlapped. Measured per row INSIDE one box,
+# where every row shares the same paper and the same shadow: the ink rows of
+# the client's vouchers sat at 0.34-0.51 against the note's 0.53-0.70, so the
+# two separate cleanly here even though no global threshold could tell
+# graphite from ballpoint anywhere else on the page.
+PENCIL_INK_ROW_RATIO = 0.85
+# Trimming that would leave less than this share of the box has misread the
+# box rather than fitted it, so the box is kept whole instead.
+PENCIL_MIN_KEPT_SHARE = 0.2
+
+
+def _region_iou(a: List[int], b: List[int]) -> float:
+    top = max(a[0], b[0])
+    left = max(a[1], b[1])
+    bottom = min(a[2], b[2])
+    right = min(a[3], b[3])
+    intersection = max(0, bottom - top) * max(0, right - left)
+    if not intersection:
+        return 0.0
+    area_a = (a[2] - a[0]) * (a[3] - a[1])
+    area_b = (b[2] - b[0]) * (b[3] - b[1])
+    return intersection / (area_a + area_b - intersection)
+
+
+def merge_pencil_notes(candidates: List[dict]) -> List[dict]:
+    """Near-duplicate notes from independent locate runs, fused into one.
+
+    Greedy overlap clustering; each cluster becomes its members' bounding
+    union, so merging can only ever widen a cover, never shrink one. The
+    longest member text speaks for the cluster — independent runs crop the
+    same note differently, and the longest read saw the most of it.
+    """
+    clusters: List[List[dict]] = []
+    for note in candidates:
+        for cluster in clusters:
+            if any(
+                _region_iou(note["box"], member["box"]) >= PENCIL_MERGE_OVERLAP
+                for member in cluster
+            ):
+                cluster.append(note)
+                break
+        else:
+            clusters.append([note])
+    merged = []
+    for cluster in clusters:
+        boxes = [member["box"] for member in cluster]
+        merged.append({
+            "text": max((member["text"] for member in cluster), key=len),
+            "box": [
+                min(b[0] for b in boxes), min(b[1] for b in boxes),
+                max(b[2] for b in boxes), max(b[3] for b in boxes),
+            ],
+        })
+    return merged
+
+
+def graphite_grey_ratio(gray: "np.ndarray", region: List[int]) -> Optional[float]:
+    """How graphite-grey the strokes inside a region are: stroke-core
+    brightness as a fraction of the local paper brightness. None when there
+    is too little to measure (tiny box, no strokes, or a dark photo where
+    paper cannot be told apart)."""
+    height, width = gray.shape[:2]
+    y0, x0, y1, x1 = region
+    top = int(y0 / 1000 * height)
+    left = int(x0 / 1000 * width)
+    bottom = max(top + 2, int(y1 / 1000 * height))
+    right = max(left + 2, int(x1 / 1000 * width))
+    crop = gray[top:bottom, left:right].astype(np.float64)
+    if crop.size < 50:
+        return None
+    paper = float(np.percentile(crop, 75))
+    if paper < 40:
+        return None
+    strokes = crop[crop < paper * 0.85]
+    if strokes.size < 30:
+        return None
+    return float(np.percentile(strokes, 25)) / paper
+
+
+def _free_room(has_content: "np.ndarray", start: int, step: int, limit: int) -> int:
+    """How far past `start` the cover may spread before it would touch
+    writing — at most `limit`."""
+    moved = 0
+    index = start
+    while moved < limit:
+        probe = index + step
+        if probe < 0 or probe >= has_content.size or has_content[probe]:
+            break
+        index = probe
+        moved += 1
+    return moved
+
+
+def _row_core_ratios(window: "np.ndarray", paper: float) -> List[Optional[float]]:
+    """Per row, how dark its strokes are against the local paper — None for a
+    row with nothing on it. Low means dark (ink), high means grey (pencil)."""
+    ratios: List[Optional[float]] = []
+    for row in window:
+        content = row[row < paper * 0.85]
+        if content.size < 3:
+            ratios.append(None)
+        else:
+            ratios.append(float(np.percentile(content, 25)) / paper)
+    return ratios
+
+
+def tighten_pencil_region(gray: "np.ndarray", region: List[int]) -> List[int]:
+    """One located box, trimmed back to the pencil note it was drawn for.
+
+    This is what stops a cover from hiding ink. On these vouchers a pencil
+    note is written directly beneath an ink ledger name, close enough that
+    the two lines touch, and the located box routinely takes the bottom of
+    that ink line with it — which is exactly what the client saw when
+    "Office Supplies" disappeared under a cover.
+
+    Whole-page rules cannot tell graphite from ballpoint here; that was
+    measured at length and is why the covers are opaque boxes in the first
+    place. But WITHIN one box the comparison is fair — same paper, same
+    shadow, same exposure — and there the ink rows are plainly darker than
+    the note's own rows. So rows are trimmed off the top and bottom of the
+    box while they are darker than the note's body, stopping at the first row
+    that belongs to the note. Only then is the cover allowed to spread, and
+    only across paper with nothing on it.
+
+    Trimming only ever shrinks a cover, and the box is returned untouched
+    whenever the measurement is not clear — a slightly generous cover is
+    still better than an exposed pencil note.
+    """
+    height, width = gray.shape[:2]
+    y0 = int(region[0] / 1000 * height)
+    x0 = int(region[1] / 1000 * width)
+    y1 = int(region[2] / 1000 * height)
+    x1 = int(region[3] / 1000 * width)
+    if y1 - y0 < 4 or x1 - x0 < 4:
+        return region
+
+    pad = PENCIL_COVER_PAD_PX
+    top, bottom = max(0, y0 - pad), min(height, y1 + pad)
+    left, right = max(0, x0 - pad), min(width, x1 + pad)
+    window = gray[top:bottom, left:right].astype(np.float64)
+    if window.size < 50:
+        return region
+    paper = float(np.percentile(window, 75))
+    if paper < 40:
+        return region
+
+    box_top, box_bottom = y0 - top, y1 - top
+    ratios = _row_core_ratios(window[box_top:box_bottom], paper)
+    written = [value for value in ratios if value is not None]
+    if len(written) < 4:
+        return region
+
+    # The note's own level, taken from the middle ROWS of the box — the
+    # locator centres the box on the note, so the middle is the note even
+    # when an edge is not. Ranking the values instead of the rows would
+    # average the note together with the very ink this is meant to find.
+    middle = [
+        value for value in ratios[len(ratios) // 4: 3 * len(ratios) // 4 or None]
+        if value is not None
+    ] or written
+    note_level = float(np.median(middle))
+    floor = note_level * PENCIL_INK_ROW_RATIO
+
+    first, last = 0, len(ratios) - 1
+    while first <= last and (ratios[first] is None or ratios[first] < floor):
+        first += 1
+    while last >= first and (ratios[last] is None or ratios[last] < floor):
+        last -= 1
+    if last < first:
+        return region
+    kept = last - first + 1
+    if kept < PENCIL_MIN_KEPT_SHARE * len(ratios):
+        return region
+    box_top, box_bottom = box_top + first, box_top + last + 1
+
+    rows_written = np.array(
+        [value is not None for value in _row_core_ratios(window, paper)]
+    )
+    box_top -= _free_room(rows_written, box_top, -1, pad)
+    box_bottom += _free_room(rows_written, box_bottom - 1, 1, pad)
+
+    dark = window < paper * PENCIL_CONTENT_DARKNESS
+    columns = dark[max(0, box_top):box_bottom].sum(axis=0) >= 1
+    box_left, box_right = x0 - left, x1 - left
+    box_left -= _free_room(columns, box_left, -1, pad)
+    box_right += _free_room(columns, box_right - 1, 1, pad)
+
+    return [
+        max(0, min(1000, round((top + box_top) / height * 1000))),
+        max(0, min(1000, round((left + box_left) / width * 1000))),
+        max(0, min(1000, round((top + box_bottom) / height * 1000))),
+        max(0, min(1000, round((left + box_right) / width * 1000))),
+    ]
+
+
+def _normalize_match_text(value) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def _texts_describe_same_writing(a: str, b: str) -> bool:
+    """Two normalized texts, judged as readings of the same physical writing:
+    one contains the other and they are of comparable length."""
+    if len(a) < PENCIL_MATCH_MIN_CHARS or len(b) < PENCIL_MATCH_MIN_CHARS:
+        return False
+    shorter, longer = sorted((a, b), key=len)
+    if shorter not in longer:
+        return False
+    return len(shorter) >= PENCIL_MATCH_MIN_LENGTH_SHARE * len(longer)
+
+
+def filter_pencil_note_candidates(
+    candidates: List[dict],
+    transactions: List[dict],
+    image_bytes: bytes,
+    log,
+) -> List[List[int]]:
+    """The located notes that are allowed to cover the photo, as plain boxes.
+
+    A note is uncovered only when its own transcribed text reads back as data
+    the extraction stored as ink — the voucher date, a ledger name, or the
+    narration — and the pixels do not measure unmistakably graphite-grey.
+    Everything else stays covered: an unmatched note, an unreadable text, an
+    undecodable image all fail toward hiding, because a covered sliver of ink
+    is still readable in the grid while an exposed pencil note defeats the
+    feature.
+    """
+    merged = merge_pencil_notes(candidates)
+    if not merged:
+        return []
+
+    ink_texts = set()
+    ink_date_digits = set()
+    for row in transactions:
+        for field in ("ledger_name", "narration"):
+            normalized = _normalize_match_text(row.get(field))
+            if len(normalized) >= PENCIL_MATCH_MIN_CHARS:
+                ink_texts.add(normalized)
+        date_digits = re.sub(r"\D", "", str(row.get("voucher_date") or ""))
+        if len(date_digits) >= PENCIL_DATE_MIN_DIGITS:
+            ink_date_digits.add(date_digits)
+
+    gray = None
+    try:
+        gray = np.asarray(Image.open(io.BytesIO(image_bytes)).convert("L"))
+    except Exception:
+        pass  # no pixel backstop, but matching alone can still uncover
+
+    kept: List[List[int]] = []
+    for note in merged:
+        note_text = _normalize_match_text(note["text"])
+        note_digits = re.sub(r"\D", "", note["text"])
+        matches_ink = any(
+            _texts_describe_same_writing(note_text, ink) for ink in ink_texts
+        ) or any(
+            date in note_digits or (
+                len(note_digits) >= PENCIL_DATE_MIN_DIGITS and note_digits in date
+            )
+            for date in ink_date_digits
+        )
+        if matches_ink:
+            ratio = None if gray is None else graphite_grey_ratio(gray, note["box"])
+            if ratio is None or ratio < PENCIL_GREY_VETO_RATIO:
+                log(f"✂️ Not covering {note['box']}: it reads back as extracted "
+                    f"ink data ({note['text']!r}).")
+                continue
+        # Fitted to the writing itself, so the cover cannot spill onto the ink
+        # line a few pixels above or below it.
+        kept.append(note["box"] if gray is None else tighten_pencil_region(gray, note["box"]))
+    # The browser-side sanitizer discards an avalanche wholesale; apply the
+    # same ceiling here so what is stored is what will actually be drawn.
+    if len(kept) > MAX_PENCIL_REGIONS:
+        log(f"⚠️ Discarded an implausible {len(kept)} pencil covers; "
+            "the photo is shown unmasked.")
+        return []
+    return kept
+
+
 def _row_amount(row: dict) -> float:
     """The single amount on a row, whichever side it sits on."""
     return round(_to_float(row.get("debit_amount")) + _to_float(row.get("credit_amount")), 2)
@@ -1438,6 +1946,26 @@ def read_signature_flag(parsed: dict) -> Optional[bool]:
     apart from "we never got to look."
     """
     value = parsed.get("has_signature")
+    return value if isinstance(value, bool) else None
+
+
+# Deliberately a fixed sentence that names the FACT and never the content: the
+# whole point of the exclusion is that pencil text must not reach the operator,
+# and a note that quoted "what was ignored" would re-surface it.
+PENCIL_MARKS_IGNORED_NOTE = (
+    "This voucher has pencil writing on it. Pencil is never extracted — the "
+    "rows above contain only the ink entries."
+)
+
+
+def read_pencil_flag(parsed: dict) -> Optional[bool]:
+    """Whether the voucher carries any pencil writing, per the totals read.
+
+    Same contract as the signature flag: None means the model never answered
+    (the totals request failed), which must stay distinguishable from a
+    definite "no pencil seen".
+    """
+    value = parsed.get("has_pencil_marks")
     return value if isinstance(value, bool) else None
 
 
@@ -1628,6 +2156,15 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
     stated_totals = {}  # the voucher's own जम्मा row, when the engine could read it
     voucher_no: Optional[str] = None  # handwritten number beside भौचर नं.
     has_signature: Optional[bool] = None  # None until the totals request answers it
+    has_pencil_marks: Optional[bool] = None  # ditto — a definite False means "looked, none seen"
+    # Where the pencil physically is, for display-time masking. Normalized
+    # [ymin, xmin, ymax, xmax] boxes, 0-1000 of the upright image. Empty means
+    # none found, masking disabled, or the locate call failed — all of which
+    # only cost the visual cover, never the extraction. The candidates hold
+    # the raw located notes (text + box) until the extracted rows exist to
+    # filter them against.
+    pencil_regions: List[List[int]] = []
+    pencil_note_candidates: List[dict] = []
     consensus_notes: List[str] = []
     progress = extraction_progress()
 
@@ -1708,6 +2245,7 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
                 elif totals_result:
                     stated_totals = read_stated_totals(totals_result)
                     has_signature = read_signature_flag(totals_result)
+                    has_pencil_marks = read_pencil_flag(totals_result)
                     voucher_no = read_voucher_no(totals_result)
                 log(f"✅ Extracted {len(extracted_transactions)} transactions from OpenAI "
                       f"({len(transcripts)}/{OCR_CONSENSUS_RUNS} transcription runs agreed on structure)")
@@ -1730,16 +2268,51 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
                 for _ in range(OCR_CONSENSUS_RUNS)
             ]
             calls.append((gemini_read_totals, (image_bytes, media_type), {}))
+            # The pencil locators ride the same fan-out, so they cost no extra
+            # round trip — but they are display-only, so they must never be
+            # able to fail the extraction: they sit AFTER the totals slot and
+            # are excluded from the failure accounting below.
+            if PENCIL_MASKING:
+                for _ in range(PENCIL_LOCATE_RUNS):
+                    calls.append((gemini_locate_pencil, (image_bytes, media_type), {}))
             progress.vision_sent(
                 len(calls), f"Gemini {GEMINI_VISION_MODEL}", OCR_CONSENSUS_RUNS
             )
             runs = await _run_blocking_provider_calls(
                 calls, on_settled=progress.vision_response
             )
-            transcripts = [r for r in runs[:-1] if not isinstance(r, Exception) and r]
-            totals_result = runs[-1]
+            transcripts = [
+                r for r in runs[:OCR_CONSENSUS_RUNS]
+                if not isinstance(r, Exception) and r
+            ]
+            totals_result = runs[OCR_CONSENSUS_RUNS]
+            if PENCIL_MASKING:
+                locate_failures = 0
+                for notes_result in runs[OCR_CONSENSUS_RUNS + 1:]:
+                    if isinstance(notes_result, Exception):
+                        locate_failures += 1
+                        continue
+                    pencil_note_candidates.extend(notes_result)
+                if locate_failures == PENCIL_LOCATE_RUNS:
+                    log(
+                        "⚠️ Could not locate pencil regions (masking skipped "
+                        "for this receipt)."
+                    )
+                # A union can only over-cover, never under-cover — but past
+                # the sanity ceiling it stops being masking and starts being
+                # wallpaper, so the avalanche rule applies to the union too.
+                # (The filter into pencil_regions runs after consensus, once
+                # the extracted ink data it matches against exists.)
+                if len(pencil_note_candidates) > MAX_PENCIL_REGIONS * PENCIL_LOCATE_RUNS:
+                    log(
+                        f"⚠️ Discarded an implausible {len(pencil_note_candidates)} "
+                        "pencil notes; the photo is shown unmasked."
+                    )
+                    pencil_note_candidates = []
 
-            failures = [r for r in runs if isinstance(r, Exception)]
+            failures = [
+                r for r in runs[:OCR_CONSENSUS_RUNS + 1] if isinstance(r, Exception)
+            ]
             if failures and not transcripts:
                 raise failures[0]
 
@@ -1771,6 +2344,7 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
                 elif totals_result:
                     stated_totals = read_stated_totals(totals_result)
                     has_signature = read_signature_flag(totals_result)
+                    has_pencil_marks = read_pencil_flag(totals_result)
                     voucher_no = read_voucher_no(totals_result)
                 log(f"✅ Extracted {len(extracted_transactions)} transactions from Gemini "
                       f"({len(transcripts)}/{OCR_CONSENSUS_RUNS} transcription runs agreed on structure)")
@@ -1803,6 +2377,25 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
         for transaction in extracted_transactions:
             transaction["voucher_no"] = transaction.get("voucher_no") or voucher_no
 
+    # Only now can the located pencil notes be filtered: the test for a
+    # falsely-located note is whether its text reads back as data the
+    # extraction stored as ink, and that data has just become final.
+    if pencil_note_candidates:
+        try:
+            pencil_regions = filter_pencil_note_candidates(
+                pencil_note_candidates, extracted_transactions, image_bytes, log
+            )
+        except Exception as filter_err:
+            # Filtering exists to REMOVE covers; when it cannot run, the
+            # covers stay — a visible pencil note is the unacceptable outcome.
+            log(f"⚠️ Pencil note filtering unavailable "
+                f"({_describe_error(filter_err)}); keeping all located covers.")
+            pencil_regions = [
+                note["box"] for note in merge_pencil_notes(pencil_note_candidates)
+            ]
+        log(f"✏️ Pencil covers: {len(pencil_regions)} kept from "
+            f"{len(pencil_note_candidates)} located notes.")
+
     # Reconcile against the voucher's own printed totals. Reporting only —
     # a discrepancy never rewrites an amount, it just tells the reviewer where
     # to look, so extraction stays "Extracted" and the rows remain editable.
@@ -1814,6 +2407,12 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
     if consensus_notes:
         verification["warnings"] = consensus_notes + verification["warnings"]
         verification["consensus_disagreement"] = True
+
+    # Said out loud whenever pencil was seen and skipped. Without this, the
+    # operator sees pencil words on the photo and no matching row, concludes
+    # the OCR missed them, and types the excluded content back in by hand.
+    if has_pencil_marks is True and extracted_transactions:
+        verification["warnings"] = verification["warnings"] + [PENCIL_MARKS_IGNORED_NOTE]
     verification["rows_needing_review"] = [
         t.get("ledger_name") or f"row {i + 1}"
         for i, t in enumerate(extracted_transactions) if t.get("needs_review")
@@ -1848,7 +2447,10 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
         "transactions": extracted_transactions,
         "error": error_msg,
         "verification": verification,
-        "has_signature": has_signature
+        "has_signature": has_signature,
+        # Persisted via raw_extraction (no schema change): the reviewer reads
+        # these back to cover pencil in the displayed photo.
+        "pencil_regions": pencil_regions,
     }
 
 
