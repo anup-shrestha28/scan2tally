@@ -242,12 +242,24 @@ ROWS = [{
 }]
 
 
-def filter_with(notes, image_bytes=None, rows=ROWS):
-    """The kept covers. Boxes come back FITTED to the writing, so tests
-    about the keep/drop decision count covers rather than compare boxes;
-    the fitting itself is pinned by its own tests below."""
+# Graphite: light enough that the pen-darkness veto leaves it alone.
+PENCIL_STROKE = 150
+# Ballpoint: dark enough that the veto uncovers it.
+INK_STROKE = 90
+
+
+def filter_with(notes, image_bytes=None, rows=ROWS, runs=None):
+    """The kept covers.
+
+    Notes are handed in as ONE run and repeated, because a spot needs the
+    agreement of several runs to be covered at all; tests that care about
+    disagreement pass `runs` themselves. Boxes come back FITTED to the
+    writing, so tests about the keep/drop decision count covers rather than
+    compare boxes; the fitting is pinned by its own tests below.
+    """
     return main.filter_pencil_note_candidates(
-        notes, rows, image_bytes or _voucher_bytes(90), lambda m: None)
+        runs if runs is not None else [notes, notes],
+        rows, image_bytes or _voucher_bytes(PENCIL_STROKE), lambda m: None)
 
 
 def covers(*args, **kwargs):
@@ -296,6 +308,93 @@ def test_a_note_merely_mentioning_a_ledger_word_stays_covered():
     assert covers([{"text": "cash paid Bora", "box": REGION}], rows=rows) == 1
 
 
+# --------------------------------------------- agreement between locate runs
+
+def test_a_spot_only_one_run_claims_is_not_covered():
+    """THE false-positive shape, measured on the client's voucher: the ink
+    मिति date was claimed by exactly one of three runs, while every genuine
+    pencil note was claimed by all three."""
+    real = {"text": "- Photocopy", "box": REGION}
+    mistake = {"text": "2083-04-99", "box": [100, 400, 160, 800]}
+    kept = filter_with(None, runs=[[real, mistake], [real], [real]])
+    assert len(kept) == 1
+    assert main._region_iou(kept[0], REGION) > 0.3, "lost the real note"
+    assert all(main._region_iou(box, mistake["box"]) == 0 for box in kept)
+
+
+def test_two_of_three_is_enough():
+    real = {"text": "- Photocopy", "box": REGION}
+    assert len(filter_with(None, runs=[[real], [real], []])) == 1
+
+
+def test_runs_that_split_the_same_writing_differently_still_agree():
+    """One run answered "TDS 60.75 / Net Payable 4515.75" as two notes and
+    another as four. Counting boxes would call those a disagreement and
+    expose the pencil; counting the spot itself does not."""
+    whole = {"text": "TDS 60.75 Net Payable", "box": [400, 400, 600, 600]}
+    halves = [
+        {"text": "TDS 60.75", "box": [400, 400, 500, 600]},
+        {"text": "Net Payable", "box": [500, 400, 600, 600]},
+    ]
+    kept = filter_with(None, runs=[[whole], halves, [whole]])
+    assert kept, "the block lost its cover because the runs described it differently"
+    covered = max(kept, key=lambda box: (box[2] - box[0]) * (box[3] - box[1]))
+    assert covered[0] <= 405 and covered[2] >= 595, covered
+
+
+def test_a_lone_run_note_is_rescued_when_its_strokes_are_graphite():
+    """Head-counting alone dropped the pencil voucher number on the client's
+    second voucher, which one run of three had found. The pixels overrule the
+    head count in that direction, because an exposed pencil note is the one
+    failure the client will not accept."""
+    lone = {"text": "12", "box": REGION}
+    kept = filter_with(None, runs=[[lone], [], []])
+    assert len(kept) == 1, "a real pencil note was dropped for lack of seconds"
+
+
+def test_the_rescue_does_not_reach_ink():
+    """The same lone note over pen-dark strokes stays uncovered — otherwise
+    the rescue would undo the protection it sits beside."""
+    lone = {"text": "2083-04-04", "box": REGION}
+    assert filter_with(None, runs=[[lone], [], []],
+                       image_bytes=_voucher_bytes(INK_STROKE)) == []
+
+
+def test_a_lone_surviving_run_is_still_believed():
+    """When two locate calls fail there is nothing to agree with, and an
+    exposed pencil note is worse than a cover nobody seconded."""
+    real = {"text": "- Photocopy", "box": REGION}
+    assert len(filter_with(None, runs=[[real]])) == 1
+
+
+def test_no_runs_at_all_covers_nothing():
+    assert filter_with(None, runs=[]) == []
+
+
+# ------------------------------------------------- writing too dark to be pencil
+
+def test_pen_dark_strokes_are_never_covered():
+    """The other half of the protection: even with every run agreeing and no
+    matching text, writing that measures as ballpoint is not hidden."""
+    assert covers([{"text": "unreadable scrawl", "box": REGION}],
+                  image_bytes=_voucher_bytes(INK_STROKE)) == 0
+
+
+def test_graphite_is_still_covered():
+    """The same test with graphite instead of ink — the veto must not be so
+    eager that it uncovers the pencil this feature exists to hide."""
+    assert covers([{"text": "unreadable scrawl", "box": REGION}],
+                  image_bytes=_voucher_bytes(PENCIL_STROKE)) == 1
+
+
+def test_the_pen_darkness_line_sits_between_the_two():
+    """Pinned against the measurement it came from: over every located region
+    on the client's three pencil vouchers, ink ran 0.08-0.51 and genuine
+    graphite 0.56-0.79. Moving this line into either range would start
+    uncovering pencil or covering ink, so it is pinned rather than tuned."""
+    assert 0.51 < main.PENCIL_INK_REGION_RATIO < 0.56
+
+
 def test_graphite_grey_pixels_veto_even_a_text_match():
     """Strokes measurably in the graphite-grey zone are pencil no matter what
     the text matched — the pixels are the harder evidence."""
@@ -306,9 +405,9 @@ def test_graphite_grey_pixels_veto_even_a_text_match():
 def test_an_undecodable_image_still_allows_text_rejection():
     """The pixel veto is a backstop, not a requirement: matching text alone
     uncovers when there is nothing to measure."""
+    notes = [{"text": "Office Supplies", "box": REGION}]
     kept = main.filter_pencil_note_candidates(
-        [{"text": "Office Supplies", "box": REGION}], ROWS, b"not an image",
-        lambda m: None)
+        [notes, notes], ROWS, b"not an image", lambda m: None)
     assert kept == []
 
 

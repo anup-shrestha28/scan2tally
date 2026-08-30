@@ -1217,7 +1217,12 @@ export default function SideBySideReviewer({
                     const retryReceiptId = currentReceipt.id;
                     imageRetryReceiptIdRef.current = retryReceiptId;
                     setImageLoading(true);
+                    const retryRegions = pencilRegions[retryReceiptId];
                     getReceiptImageUrl(currentReceipt.storage_path, 3600, true)
+                      // The refreshed photo goes through the covers like any
+                      // other. Showing it raw would have made a failed image
+                      // load the one way to see the pencil again.
+                      .then(url => maskPencilRegions(url, retryRegions))
                       .then(url => {
                         if (imageRetryReceiptIdRef.current === retryReceiptId) {
                           setImageUrl(url);

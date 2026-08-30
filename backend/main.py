@@ -1589,6 +1589,36 @@ PENCIL_INK_ROW_RATIO = 0.85
 # Trimming that would leave less than this share of the box has misread the
 # box rather than fitted it, so the box is kept whole instead.
 PENCIL_MIN_KEPT_SHARE = 0.2
+# How many independent locate runs must agree on a spot before it is covered.
+#
+# Measured on the client's vouchers: every genuine pencil note was found by
+# all three runs, while the one false positive — the ink-written मिति date —
+# was found by exactly one. Requiring agreement therefore removes the mistakes
+# without touching the notes. Agreement is counted per PIXEL rather than per
+# box because the runs legitimately split the same block of writing
+# differently: one answered "TDS 60.75 / Net Payable 4515.75" as two notes and
+# another as four, and those describe the same graphite.
+PENCIL_AGREEMENT_RUNS = 2
+# Strokes this dark, measured against their own paper, are pen rather than
+# graphite, and a region under the line is one this feature is about to hide
+# by mistake. Measured over every located region on the client's three pencil
+# vouchers, after fitting so the number describes the writing itself:
+#
+#   genuine pencil   0.56 .. 0.79   (21 regions)
+#   ink              0.08 .. 0.51   (मिति dates, जम्मा totals)
+#
+# The line sits just above the darkest ink and clear of the lightest
+# graphite. It is deliberately nearer the ink end: covering a little ink
+# costs a photo the operator cannot fully check, while uncovering graphite
+# breaks the client's one rule.
+PENCIL_INK_REGION_RATIO = 0.52
+# Strokes at least this grey are graphite on the evidence of the pixels alone,
+# which is enough to keep a spot only one run found. Head-counting the runs
+# removes mistakes, but on its own it also drops a real note the other runs
+# happened to miss — the pencil voucher number on the client's second voucher
+# was found by one run out of three. Sitting at the bottom of the measured
+# graphite range, this rescues that note without rescuing ink.
+PENCIL_GRAPHITE_CONFIDENT = 0.55
 
 
 def _region_iou(a: List[int], b: List[int]) -> float:
@@ -1602,6 +1632,65 @@ def _region_iou(a: List[int], b: List[int]) -> float:
     area_a = (a[2] - a[0]) * (a[3] - a[1])
     area_b = (b[2] - b[0]) * (b[3] - b[1])
     return intersection / (area_a + area_b - intersection)
+
+
+def _boxes_overlap(a: List[int], b: List[int]) -> bool:
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def vote_pencil_regions(runs: List[List[dict]]) -> List[dict]:
+    """The spots that enough independent locate runs agree are pencil.
+
+    Each run is one model's complete answer for the whole voucher. A spot
+    covered by PENCIL_AGREEMENT_RUNS of them survives; a spot only one run
+    claimed does not. That single rule is what removes a wrong cover from an
+    ink field, because the model is consistent about the pencil it can see and
+    inconsistent about the things it merely mistook for pencil.
+
+    Counting is done on a normalized 1000x1000 grid rather than by comparing
+    boxes, so runs that split the same block of writing into different numbers
+    of notes still agree with each other.
+
+    Falls back to accepting a lone run's answer when only one run came back —
+    weaker agreement is still better than an exposed pencil note.
+    """
+    answered = [run for run in runs if run is not None]
+    if not answered:
+        return []
+    required = min(PENCIL_AGREEMENT_RUNS, len(answered))
+
+    votes = np.zeros((1000, 1000), dtype=np.uint8)
+    for run in answered:
+        marked = np.zeros((1000, 1000), dtype=bool)
+        for note in run:
+            y0, x0, y1, x1 = note["box"]
+            marked[y0:y1, x0:x1] = True
+        votes += marked.astype(np.uint8)
+
+    agreed = (votes >= required).astype(np.uint8)
+    if not agreed.any():
+        return []
+
+    found, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        agreed, connectivity=8
+    )
+    regions: List[dict] = []
+    for index in range(1, found):
+        x, y, width, height, _area = stats[index]
+        if width < 2 or height < 2:
+            continue
+        box = [int(y), int(x), int(y + height), int(x + width)]
+        # Every note that touches this spot speaks for it. All of them are
+        # kept: the uncovering test below has to be satisfied by all of them,
+        # so a spot holding one recognised ink word and one unrecognised note
+        # stays covered.
+        texts = [
+            note["text"]
+            for run in answered for note in run
+            if _region_iou(note["box"], box) > 0 or _boxes_overlap(note["box"], box)
+        ]
+        regions.append({"box": box, "texts": [t for t in texts if t]})
+    return regions
 
 
 def merge_pencil_notes(candidates: List[dict]) -> List[dict]:
@@ -1791,23 +1880,55 @@ def _texts_describe_same_writing(a: str, b: str) -> bool:
 
 
 def filter_pencil_note_candidates(
-    candidates: List[dict],
+    runs: List[List[dict]],
     transactions: List[dict],
     image_bytes: bytes,
     log,
 ) -> List[List[int]]:
-    """The located notes that are allowed to cover the photo, as plain boxes.
+    """The spots that are allowed to cover the photo, as plain boxes.
 
-    A note is uncovered only when its own transcribed text reads back as data
-    the extraction stored as ink — the voucher date, a ledger name, or the
-    narration — and the pixels do not measure unmistakably graphite-grey.
-    Everything else stays covered: an unmatched note, an unreadable text, an
-    undecodable image all fail toward hiding, because a covered sliver of ink
-    is still readable in the grid while an exposed pencil note defeats the
-    feature.
+    Three independent things have to agree before a cover survives, because
+    the cost of covering ink is a voucher the operator cannot check by eye:
+
+    1. Enough locate runs found the spot (vote_pencil_regions).
+    2. Its writing does not read back as data the extraction stored as ink —
+       the voucher date, a ledger name, the narration. The extraction refuses
+       pencil, so anything in that data is ink by construction.
+    3. Its strokes are not pen-dark.
+
+    Everything that cannot be measured fails toward hiding: an unreadable
+    text, an undecodable image, a region with nothing legible in it all stay
+    covered, because a covered sliver of ink is still readable in the grid
+    while an exposed pencil note defeats the feature entirely.
     """
-    merged = merge_pencil_notes(candidates)
-    if not merged:
+    regions = vote_pencil_regions(runs)
+
+    gray = None
+    try:
+        gray = np.asarray(Image.open(io.BytesIO(image_bytes)).convert("L"))
+    except Exception:
+        pass  # no pixel backstop, but matching alone can still uncover
+
+    # A note only one run found is normally dropped as a mistake. If its
+    # strokes measure as graphite, it is kept anyway: the pixels are better
+    # evidence than a head count, and the runs do sometimes miss a real note
+    # that the others see.
+    if gray is not None:
+        agreed = [region["box"] for region in regions]
+        rescued: List[dict] = []
+        for run in runs:
+            for note in run:
+                box = note["box"]
+                if any(_boxes_overlap(box, other) for other in agreed):
+                    continue
+                if any(_boxes_overlap(box, other["box"]) for other in rescued):
+                    continue
+                ratio = graphite_grey_ratio(gray, tighten_pencil_region(gray, box))
+                if ratio is not None and ratio >= PENCIL_GRAPHITE_CONFIDENT:
+                    rescued.append({"box": box, "texts": [note["text"]] if note["text"] else []})
+        regions.extend(rescued)
+
+    if not regions:
         return []
 
     ink_texts = set()
@@ -1821,33 +1942,49 @@ def filter_pencil_note_candidates(
         if len(date_digits) >= PENCIL_DATE_MIN_DIGITS:
             ink_date_digits.add(date_digits)
 
-    gray = None
-    try:
-        gray = np.asarray(Image.open(io.BytesIO(image_bytes)).convert("L"))
-    except Exception:
-        pass  # no pixel backstop, but matching alone can still uncover
-
-    kept: List[List[int]] = []
-    for note in merged:
-        note_text = _normalize_match_text(note["text"])
-        note_digits = re.sub(r"\D", "", note["text"])
-        matches_ink = any(
-            _texts_describe_same_writing(note_text, ink) for ink in ink_texts
-        ) or any(
-            date in note_digits or (
-                len(note_digits) >= PENCIL_DATE_MIN_DIGITS and note_digits in date
-            )
+    def reads_as_ink(text: str) -> bool:
+        normalized = _normalize_match_text(text)
+        digits = re.sub(r"\D", "", text)
+        if any(_texts_describe_same_writing(normalized, ink) for ink in ink_texts):
+            return True
+        return any(
+            date in digits
+            or (len(digits) >= PENCIL_DATE_MIN_DIGITS and digits in date)
             for date in ink_date_digits
         )
-        if matches_ink:
-            ratio = None if gray is None else graphite_grey_ratio(gray, note["box"])
+
+    kept: List[List[int]] = []
+    for region in regions:
+        box = region["box"]
+        texts = region["texts"]
+
+        # Every note on this spot must read as ink before it is uncovered. One
+        # recognised ink word beside one unrecognised note means there is
+        # probably graphite here too, and that keeps the cover.
+        if texts and all(reads_as_ink(text) for text in texts):
+            ratio = None if gray is None else graphite_grey_ratio(gray, box)
             if ratio is None or ratio < PENCIL_GREY_VETO_RATIO:
-                log(f"✂️ Not covering {note['box']}: it reads back as extracted "
-                    f"ink data ({note['text']!r}).")
+                log(f"✂️ Not covering {box}: it reads back as extracted ink "
+                    f"data ({texts[0]!r}).")
                 continue
+
         # Fitted to the writing itself, so the cover cannot spill onto the ink
         # line a few pixels above or below it.
-        kept.append(note["box"] if gray is None else tighten_pencil_region(gray, note["box"]))
+        fitted = box if gray is None else tighten_pencil_region(gray, box)
+
+        # Last check, on the fitted region so the measurement is of the writing
+        # and not of whatever the box overhung: pen is markedly darker than
+        # graphite, and a region that measures pen is one this feature is
+        # about to hide by mistake.
+        if gray is not None:
+            ratio = graphite_grey_ratio(gray, fitted)
+            if ratio is not None and ratio < PENCIL_INK_REGION_RATIO:
+                log(f"✂️ Not covering {fitted}: its strokes measure as pen "
+                    f"({ratio:.2f}), not pencil.")
+                continue
+
+        kept.append(fitted)
+
     # The browser-side sanitizer discards an avalanche wholesale; apply the
     # same ceiling here so what is stored is what will actually be drawn.
     if len(kept) > MAX_PENCIL_REGIONS:
@@ -2160,11 +2297,11 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
     # Where the pencil physically is, for display-time masking. Normalized
     # [ymin, xmin, ymax, xmax] boxes, 0-1000 of the upright image. Empty means
     # none found, masking disabled, or the locate call failed — all of which
-    # only cost the visual cover, never the extraction. The candidates hold
-    # the raw located notes (text + box) until the extracted rows exist to
-    # filter them against.
+    # only cost the visual cover, never the extraction. Each locate run is
+    # kept as its own list of notes until the extracted rows exist to filter
+    # them against — the runs have to stay apart to be able to agree.
     pencil_regions: List[List[int]] = []
-    pencil_note_candidates: List[dict] = []
+    pencil_note_runs: List[List[dict]] = []
     consensus_notes: List[str] = []
     progress = extraction_progress()
 
@@ -2292,23 +2429,25 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
                     if isinstance(notes_result, Exception):
                         locate_failures += 1
                         continue
-                    pencil_note_candidates.extend(notes_result)
+                    # An empty answer is a run saying "no pencil here", which
+                    # is a vote like any other and is kept as such.
+                    pencil_note_runs.append(notes_result)
                 if locate_failures == PENCIL_LOCATE_RUNS:
                     log(
                         "⚠️ Could not locate pencil regions (masking skipped "
                         "for this receipt)."
                     )
-                # A union can only over-cover, never under-cover — but past
-                # the sanity ceiling it stops being masking and starts being
-                # wallpaper, so the avalanche rule applies to the union too.
+                # Past the sanity ceiling this stops being masking and starts
+                # being wallpaper, so an implausible run is discarded whole.
                 # (The filter into pencil_regions runs after consensus, once
                 # the extracted ink data it matches against exists.)
-                if len(pencil_note_candidates) > MAX_PENCIL_REGIONS * PENCIL_LOCATE_RUNS:
+                located = sum(len(run) for run in pencil_note_runs)
+                if located > MAX_PENCIL_REGIONS * PENCIL_LOCATE_RUNS:
                     log(
-                        f"⚠️ Discarded an implausible {len(pencil_note_candidates)} "
-                        "pencil notes; the photo is shown unmasked."
+                        f"⚠️ Discarded an implausible {located} pencil notes; "
+                        "the photo is shown unmasked."
                     )
-                    pencil_note_candidates = []
+                    pencil_note_runs = []
 
             failures = [
                 r for r in runs[:OCR_CONSENSUS_RUNS + 1] if isinstance(r, Exception)
@@ -2380,10 +2519,11 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
     # Only now can the located pencil notes be filtered: the test for a
     # falsely-located note is whether its text reads back as data the
     # extraction stored as ink, and that data has just become final.
-    if pencil_note_candidates:
+    if any(pencil_note_runs):
+        located = sum(len(run) for run in pencil_note_runs)
         try:
             pencil_regions = filter_pencil_note_candidates(
-                pencil_note_candidates, extracted_transactions, image_bytes, log
+                pencil_note_runs, extracted_transactions, image_bytes, log
             )
         except Exception as filter_err:
             # Filtering exists to REMOVE covers; when it cannot run, the
@@ -2391,10 +2531,13 @@ async def run_extraction(raw_bytes: bytes, content_type: str, filename: str) -> 
             log(f"⚠️ Pencil note filtering unavailable "
                 f"({_describe_error(filter_err)}); keeping all located covers.")
             pencil_regions = [
-                note["box"] for note in merge_pencil_notes(pencil_note_candidates)
+                note["box"]
+                for note in merge_pencil_notes(
+                    [note for run in pencil_note_runs for note in run]
+                )
             ]
         log(f"✏️ Pencil covers: {len(pencil_regions)} kept from "
-            f"{len(pencil_note_candidates)} located notes.")
+            f"{located} located notes.")
 
     # Reconcile against the voucher's own printed totals. Reporting only —
     # a discrepancy never rewrites an amount, it just tells the reviewer where

@@ -30,7 +30,9 @@ import {
   fetchExportsForBatch,
   downloadExportFile,
   ExportRecord,
+  fetchPencilRegionsForReceipt,
 } from '../lib/db';
+import { maskPencilRegions } from '../lib/pencilMask';
 import { isPdfFile, splitPdfIntoPageImages } from '../lib/pdf';
 import { duplicateVoucherGroups, sortReceiptsByVoucherNo } from '../lib/receiptOrder';
 
@@ -302,6 +304,10 @@ export default function BatchWorkspace({ currentUser, onSelectBatch, onViewParti
   const [receiptSearch, setReceiptSearch] = useState('');
   const [selectedReceiptIds, setSelectedReceiptIds] = useState<Set<string>>(new Set());
   const [previewReceipt, setPreviewReceipt] = useState<Receipt | null>(null);
+  // The zoomed photo with its pencil covered. Held separately from
+  // previewReceipt.previewUrl because covering is asynchronous and the
+  // uncovered photo must never be what gets painted on screen.
+  const [previewSrc, setPreviewSrc] = useState<string>('');
   const [previewRotation, setPreviewRotation] = useState(0);
   const [previewZoom, setPreviewZoom] = useState(1);
   const [dragOver, setDragOver] = useState<boolean>(false);
@@ -470,6 +476,27 @@ export default function BatchWorkspace({ currentUser, onSelectBatch, onViewParti
     setBatchPage(1);
     setSelectedReceiptIds(new Set());
   }, [activeBatch?.id, receiptStatusFilter, receiptSearch, batchSearch, showArchived]);
+
+  // Pencil is covered here too, not only in the reviewer. This is a full-size
+  // view of the voucher, so leaving it uncovered would show the client exactly
+  // what the whole feature exists to hide. Covering is per-photo rather than
+  // per-batch: the thumbnails behind this modal are too small to read, and
+  // masking every one of them would decode every photo in the batch.
+  useEffect(() => {
+    let cancelled = false;
+    setPreviewSrc('');
+    if (!previewReceipt) return;
+    const original = previewReceipt.previewUrl || '';
+    if (!original || isPdfReceipt(previewReceipt)) {
+      setPreviewSrc(original);
+      return;
+    }
+    void fetchPencilRegionsForReceipt(previewReceipt.id)
+      .then(regions => maskPencilRegions(original, regions))
+      .then(covered => { if (!cancelled) setPreviewSrc(covered); })
+      .catch(() => { if (!cancelled) setPreviewSrc(original); });
+    return () => { cancelled = true; };
+  }, [previewReceipt]);
 
   useEffect(() => {
     if (!previewReceipt) return;
@@ -2249,7 +2276,7 @@ export default function BatchWorkspace({ currentUser, onSelectBatch, onViewParti
               ) : (
                 <img
                   className="preview-img"
-                  src={previewReceipt.previewUrl}
+                  src={previewSrc}
                   alt={previewReceipt.filename}
                   onDoubleClick={() => setPreviewZoom(zoom => zoom > 1 ? 1 : 2)}
                   // Rotation swaps which axis is constrained, so these two are

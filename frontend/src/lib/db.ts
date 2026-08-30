@@ -1014,6 +1014,29 @@ export async function fetchTransactionsForBatch(
  * in raw_extraction and fetching them apart would double the round trips for
  * no reason.
  */
+/**
+ * The pencil regions stored for ONE receipt.
+ *
+ * The reviewer reads a whole batch at once; the batch workspace opens one
+ * photo at a time and has no reason to fetch the rest. Never throws — a
+ * lookup that fails means no covers, which the caller treats as "show the
+ * photo as it is".
+ */
+export async function fetchPencilRegionsForReceipt(receiptId: string): Promise<unknown> {
+  try {
+    const { data, error } = await supabase
+      .from('receipts')
+      .select('pencil_regions:raw_extraction->pencil_regions')
+      .eq('id', receiptId)
+      .maybeSingle();
+    if (error || !data) return null;
+    return (data as any).pencil_regions ?? null;
+  } catch {
+    return null;
+  }
+}
+
+
 export async function fetchStatedVoucherTotals(
   batchId: string
 ): Promise<{
